@@ -1,7 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
-from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
 
@@ -14,12 +13,14 @@ hooks_dir = os.path.join(root_dir, 'hooks')
 
 runtime_hook = os.path.join(hooks_dir, 'rthook_change_wd.py') if os.path.isfile(os.path.join(hooks_dir, 'rthook_change_wd.py')) else None
 
-hidden_modules = sorted(set(
-    ['fitz'] +
-    collect_submodules('PySide6') +
-    collect_submodules('matplotlib') +
-    collect_submodules('fontTools')
-))
+hidden_modules = [
+    'fitz',
+    'shiboken6',
+    'PySide6.QtWidgets',
+    'PySide6.QtGui',
+    'PySide6.QtCore',
+    'fontTools.ttLib',
+]
 
 a = Analysis(
     ['main_codex1.py'],
@@ -29,7 +30,7 @@ a = Analysis(
     hiddenimports=hidden_modules,
     hookspath=[hooks_dir] if os.path.isdir(hooks_dir) else [],
     runtime_hooks=[runtime_hook] if runtime_hook else [],
-    excludes=['PyQt6'],
+    excludes=['PyQt6', 'PyQt5'],
     cipher=block_cipher,
     noarchive=False,
 )
