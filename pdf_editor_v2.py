@@ -29,7 +29,22 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox, QRubberBand, QSlider, QCheckBox, QProgressDialog, QRadioButton, QTextEdit, QProgressBar, QSplashScreen
 )
 from PyQt6.QtCore import Qt, QSize, QPoint, QRect, QEvent, QTimer, QItemSelectionModel, QItemSelection, QSettings, QFileSystemWatcher, QProcess
-from PyQt6.QtGui import QImage, QPixmap, QIcon, QAction, QTextCursor, QPainter, QColor, QWheelEvent, QActionGroup, QKeySequence, QShortcut, QFont
+from PyQt6.QtGui import (
+    QImage,
+    QPixmap,
+    QIcon,
+    QAction,
+    QTextCursor,
+    QPainter,
+    QColor,
+    QWheelEvent,
+    QActionGroup,
+    QKeySequence,
+    QShortcut,
+    QFont,
+    QDragEnterEvent,
+    QDropEvent,
+)
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 
 
@@ -174,7 +189,7 @@ def _build_splash_pixmap() -> Optional[QPixmap]:
     subtitle_font = QFont('Arial', 8)
     painter.setFont(subtitle_font)
     lines = [
-        '빠르고 직관적인 PDF 페이지 편집기',
+        '직관적인 PDF 페이지 편집기',
         '개발: Hwang Jinsu · 이메일: iiish@hanmail.net',
         '구성 요소를 초기화하는 동안 잠시만 기다려주세요...'
     ]
@@ -490,7 +505,24 @@ class ThumbnailWidget(QListWidget):
             self.editor.save_pages_as_file(selected_indexes)
 
     def dropEvent(self, event):
-        # Prefer rows captured at dragEnter to avoid selection churn
+        if event.mimeData().hasUrls():
+            paths = []
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    path = url.toLocalFile()
+                    if self.editor._is_supported_source(path):
+                        paths.append(path)
+            if paths:
+                self._indicator.setVisible(False)
+                dest_row = self._compute_dest_row(event.position().toPoint())
+                self.editor.insert_files_at(paths, dest_row)
+                event.setDropAction(Qt.DropAction.CopyAction)
+                event.acceptProposedAction()
+                return
+            event.ignore()
+            return
+
+        # Internal drag-reorder logic
         source_rows = getattr(self, '_drag_rows', [])
         if not source_rows:
             source_items = self.selectedItems()
@@ -498,33 +530,37 @@ class ThumbnailWidget(QListWidget):
                 event.ignore()
                 return
             source_rows = sorted([self.row(item) for item in source_items])
-        # Reset drag rows snapshot
         self._drag_rows = []
 
         pos = event.position().toPoint()
         dest_row = self._compute_dest_row(pos)
-
-        # ignore drop within the dragged block range (no-op) — allow exactly after block
         if source_rows[0] <= dest_row <= source_rows[-1]:
             event.ignore()
             return
 
         self._indicator.setVisible(False)
-        # Reorder on next tick to let view exit drag state before we rebuild
         QTimer.singleShot(0, lambda sr=source_rows, dr=dest_row: self.editor.reorder_pages(sr, dr))
         event.setDropAction(Qt.DropAction.MoveAction)
         event.acceptProposedAction()
 
     def dragEnterEvent(self, event):
-        # Snapshot current selection rows to ensure stability during DnD
+        if event.mimeData().hasUrls():
+            self._drag_rows = []
+            event.acceptProposedAction()
+            return
         self._drag_rows = sorted([self.row(item) for item in self.selectedItems()])
         event.setDropAction(Qt.DropAction.MoveAction)
         event.acceptProposedAction()
 
     def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            pos = event.position().toPoint()
+            dest = self._compute_dest_row(pos)
+            self._draw_indicator(dest)
+            return
         event.setDropAction(Qt.DropAction.MoveAction)
         event.acceptProposedAction()
-        # Show indicator aligned with computed destination
         pos = event.position().toPoint()
         dest = self._compute_dest_row(pos)
         self._draw_indicator(dest)
@@ -760,6 +796,7 @@ class PDFCompressionDialog(QDialog):
             }
 
 class PDFEditor(QMainWindow):
+    SUPPORTED_OPEN_EXTS = ('.pdf', '.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp')
     def __init__(self):
         super().__init__()
         if sys.platform.startswith('win'):
@@ -807,6 +844,7 @@ class PDFEditor(QMainWindow):
             self._cached_ghostscript_path = None
         # Scroll sync guard to prevent jumps during rerender
         self._suppress_scroll_sync = False
+        self.setAcceptDrops(True)
 
         self.setup_ui()
         self.update_page_info()
@@ -913,16 +951,20 @@ class PDFEditor(QMainWindow):
     def setup_menubar(self):
         menubar = self.menuBar()
         
+        #파일 메뉴(열기, 저장, 저장 복사, 인쇄, 종료)
         file_menu = menubar.addMenu(self.t('file_menu'))
         open_action = QAction(self.t('open'), self)
         open_action.triggered.connect(self.open_file)
         open_action.setShortcut(QKeySequence.StandardKey.Open)
+        self.open_action = open_action
         save_action = QAction(self.t('save'), self)
         save_action.triggered.connect(self.save_file)
         save_action.setShortcut(QKeySequence.StandardKey.Save)
+        self.save_action = save_action
         save_as_action = QAction(self.t('save_as'), self)
         save_as_action.triggered.connect(self.save_as_file)
         save_as_action.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        self.save_as_action = save_as_action
         self.print_action = QAction(self.t('print'), self)
         self.print_action.triggered.connect(self.print_document)
         self.print_action.setShortcut(QKeySequence.StandardKey.Print)
@@ -935,25 +977,32 @@ class PDFEditor(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(exit_action)
         
+        #페이지 메뉴(페이지 추가, 삭제, 이동, 회전)
         page_menu = menubar.addMenu(self.t('page_menu'))
         add_page_action = QAction(self.t('add_page'), self)
         add_page_action.triggered.connect(self.add_blank_page)
-        add_page_action.setShortcut(QKeySequence("Alt+Insert"))
+        add_page_action.setShortcut(QKeySequence("Insert"))
+        self.add_page_action = add_page_action
         delete_page_action = QAction(self.t('delete_page'), self)
         delete_page_action.triggered.connect(lambda: self.delete_pages(self.thumbnail_widget.get_selected_indexes()))
         delete_page_action.setShortcut(QKeySequence.StandardKey.Delete)
+        self.delete_page_action = delete_page_action
         move_up_action = QAction(self.t('move_up'), self)
         move_up_action.triggered.connect(lambda: self.move_pages_up(self.thumbnail_widget.get_selected_indexes()))
-        move_up_action.setShortcut(QKeySequence("Alt+Up"))
+        move_up_action.setShortcut(QKeySequence("Ctrl+Shift+Up"))
+        self.move_up_action = move_up_action
         move_down_action = QAction(self.t('move_down'), self)
         move_down_action.triggered.connect(lambda: self.move_pages_down(self.thumbnail_widget.get_selected_indexes()))
-        move_down_action.setShortcut(QKeySequence("Alt+Down"))
+        move_down_action.setShortcut(QKeySequence("Ctrl+Shift+Down"))
+        self.move_down_action = move_down_action
         rotate_left_action = QAction(self.t('rotate_left'), self)
         rotate_left_action.triggered.connect(lambda: self.rotate_pages(self.thumbnail_widget.get_selected_indexes(), -90))
-        rotate_left_action.setShortcut(QKeySequence("Alt+Left"))
+        rotate_left_action.setShortcut(QKeySequence("Ctrl+Shift+Left"))
+        self.rotate_left_action = rotate_left_action
         rotate_right_action = QAction(self.t('rotate_right'), self)
         rotate_right_action.triggered.connect(lambda: self.rotate_pages(self.thumbnail_widget.get_selected_indexes(), 90))
-        rotate_right_action.setShortcut(QKeySequence("Alt+Right"))
+        rotate_right_action.setShortcut(QKeySequence("Ctrl+Shift+Right"))
+        self.rotate_right_action = rotate_right_action
         page_menu.addActions([add_page_action, delete_page_action])
         page_menu.addSeparator()
         page_menu.addActions([move_up_action, move_down_action])
@@ -965,11 +1014,14 @@ class PDFEditor(QMainWindow):
         undo_action_menu = QAction(self.t('undo'), self)
         undo_action_menu.setShortcut(QKeySequence.StandardKey.Undo)
         undo_action_menu.triggered.connect(self.undo_action)
+        self.undo_action_act = undo_action_menu
         redo_action_menu = QAction(self.t('redo'), self)
         redo_action_menu.setShortcut(QKeySequence.StandardKey.Redo)
         redo_action_menu.triggered.connect(self.redo_action)
+        self.redo_action_act = redo_action_menu
         edit_menu.addActions([undo_action_menu, redo_action_menu])
 
+        #보기 메뉴(테마, 단/이중 페이지, 화면 맞춤)
         view_menu = menubar.addMenu(self.t('view_menu'))
         theme_group = QActionGroup(self)
         self.light_theme_action = QAction(self.t('theme_light_mode'), self, checkable=True)
@@ -1001,6 +1053,16 @@ class PDFEditor(QMainWindow):
         self.fit_height_action.triggered.connect(self.fit_to_height)
         view_menu.addActions([self.fit_width_action, self.fit_height_action])
 
+        #도구 메뉴(압축, 외부 편집기, 고스트스크립트 설정)
+        tools_menu = menubar.addMenu(self.t('tools_menu'))
+        compress_action = QAction(self.t('compress_pdf'), self)
+        compress_action.triggered.connect(self.show_compression_settings)
+        launch_editor_action = QAction(self.t('edit_short'), self)
+        launch_editor_action.triggered.connect(self.launch_external_editor)
+        ghostscript_action = QAction(self.t('ghostscript_config'), self)
+        ghostscript_action.triggered.connect(self.configure_ghostscript_path)
+        tools_menu.addActions([compress_action, launch_editor_action, ghostscript_action])
+
         # Language menu (fixed labels per language)
         lang_menu = menubar.addMenu(self.t('language_menu'))
         lang_group = QActionGroup(self)
@@ -1016,19 +1078,24 @@ class PDFEditor(QMainWindow):
         add_lang('zh-CN', '简体中文')
         add_lang('zh-TW', '繁體中文')
 
-        tools_menu = menubar.addMenu(self.t('tools_menu'))
-        compress_action = QAction(self.t('compress_pdf'), self)
-        compress_action.triggered.connect(self.show_compression_settings)
-        launch_editor_action = QAction(self.t('edit_short'), self)
-        launch_editor_action.triggered.connect(self.launch_external_editor)
-        ghostscript_action = QAction(self.t('ghostscript_config'), self)
-        ghostscript_action.triggered.connect(self.configure_ghostscript_path)
-        tools_menu.addActions([compress_action, launch_editor_action, ghostscript_action])
+        #후원 메뉴(카카오페이, 페이팔)
+        support_menu = menubar.addMenu(self.t('support_menu'))
+        donate_kakao_action = QAction(self.t('donate_kakao'), self)
+        donate_kakao_action.triggered.connect(self.show_kakao_donation_dialog)
+        donate_paypal_action = QAction(self.t('donate_paypal'), self)
+        donate_paypal_action.triggered.connect(self.show_paypal_donation_dialog)
+        support_menu.addActions([donate_kakao_action, donate_paypal_action])
 
+        #도움말 메뉴(정보, 라이선스)
         help_menu = menubar.addMenu(self.t('help_menu'))
         about_action = QAction(self.t('about'), self)
         about_action.triggered.connect(self.show_about_dialog)
         help_menu.addAction(about_action)
+        
+        usage_guide_action = QAction(self.t('usage_guide'), self)
+        usage_guide_action.triggered.connect(lambda: webbrowser.open("https://www.youtube.com/playlist?list=PLs36bSFfggCCUX31PYEH_SNgAmVc3dk_B"))
+        help_menu.addAction(usage_guide_action)
+
         licenses_action = QAction(self.t('licenses_menu') if self.language!='en' else 'Open-Source Licenses', self)
         licenses_action.triggered.connect(self.show_licenses_dialog)
         help_menu.addAction(licenses_action)
@@ -1039,17 +1106,11 @@ class PDFEditor(QMainWindow):
         toolbar.setMovable(False)
         toolbar.setIconSize(QSize(18, 18))
         
-        undo_action = QAction(self.t('undo'), self)
-        undo_action.setShortcut(QKeySequence.StandardKey.Undo)
-        undo_action.triggered.connect(self.undo_action)
-        redo_action = QAction(self.t('redo'), self)
-        redo_action.setShortcut(QKeySequence.StandardKey.Redo)
-        redo_action.triggered.connect(self.redo_action)
+        undo_action = self.undo_action_act
+        redo_action = self.redo_action_act
 
-        open_btn = QAction(self.t('open'), self)
-        open_btn.triggered.connect(self.open_file)
-        save_btn = QAction(self.t('save'), self)
-        save_btn.triggered.connect(self.save_file)
+        open_btn = self.open_action
+        save_btn = self.save_action
         zoom_in_btn = QAction(self.t('zoom_in'), self)
         zoom_in_btn.triggered.connect(self.zoom_in)
         zoom_out_btn = QAction(self.t('zoom_out'), self)
@@ -1058,21 +1119,12 @@ class PDFEditor(QMainWindow):
         prev_btn.triggered.connect(self.prev_page)
         next_btn = QAction(self.t('next'), self)
         next_btn.triggered.connect(self.next_page)
-        add_page_btn = QAction(self.t('add_short'), self)
-        add_page_btn.triggered.connect(self.add_blank_page)
-        add_page_btn.setShortcut(QKeySequence("Insert"))
-        delete_page_btn = QAction(self.t('delete_short'), self)
-        delete_page_btn.triggered.connect(lambda: self.delete_pages(self.thumbnail_widget.get_selected_indexes()))
-        move_page_up_btn = QAction(self.t('move_up_short'), self)
-        move_page_up_btn.triggered.connect(lambda: self.move_pages_up(self.thumbnail_widget.get_selected_indexes()))
-        move_page_down_btn = QAction(self.t('move_down_short'), self)
-        move_page_down_btn.triggered.connect(lambda: self.move_pages_down(self.thumbnail_widget.get_selected_indexes()))
-        rotate_left_btn = QAction(self.t('rotate_left_short'), self)
-        rotate_left_btn.triggered.connect(lambda: self.rotate_pages(self.thumbnail_widget.get_selected_indexes(), -90))
-        rotate_left_btn.setShortcut(QKeySequence("Alt+Left"))
-        rotate_right_btn = QAction(self.t('rotate_right_short'), self)
-        rotate_right_btn.triggered.connect(lambda: self.rotate_pages(self.thumbnail_widget.get_selected_indexes(), 90))
-        rotate_right_btn.setShortcut(QKeySequence("Alt+Right"))
+        add_page_btn = self.add_page_action
+        delete_page_btn = self.delete_page_action
+        move_page_up_btn = self.move_up_action
+        move_page_down_btn = self.move_down_action
+        rotate_left_btn = self.rotate_left_action
+        rotate_right_btn = self.rotate_right_action
         compress_action = QAction(self.t('compress_pdf'), self)
         compress_action.triggered.connect(self.show_compression_settings)
         edit_btn = QAction(self.t('edit_short'), self)
@@ -1406,6 +1458,7 @@ class PDFEditor(QMainWindow):
                 'status_print_done': '인쇄 명령을 보냈습니다.',
                 'status_compressing': '압축 중...',
                 'status_compress_done': '압축이 완료되었습니다.',
+                'error_title': '오류',
                 'status_patch_mode_on': '🩹 패치 모드가 활성화되었습니다.',
                 'status_patch_mode_off': '🩹 패치 모드가 해제되었습니다.',
                 'status_patch_eraser_on': '🧽 지우개 모드가 활성화되었습니다.',
@@ -1437,6 +1490,11 @@ class PDFEditor(QMainWindow):
                 'dual_view': '📖 두쪽 보기',
                 'fit_width': '↔️ 가로 맞춤',
                 'fit_height': '↕️ 세로 맞춤',
+                'support_menu': '❣️개발자 후원하기❣️',
+                'donate_kakao': '카카오페이로 후원하기',
+                'donate_paypal': 'PayPal로 후원하기',
+                'donate_paypal_message': '<a href="https://www.paypal.com/paypalme/1hwangjinsu">https://www.paypal.com/paypalme/1hwangjinsu</a> 에서 후원해주세요🙏 진심으로 감사합니다❣️',
+                'donate_image_missing': '후원 이미지를 찾을 수 없습니다.',
                 'tools_menu': '도구',
                 'compress_pdf': '📦 PDF 압축',
                 'edit_menu': '편집',
@@ -1446,6 +1504,7 @@ class PDFEditor(QMainWindow):
                 'korean': '한글',
                 'english': 'English',
                 'help_menu': '도움말', 'licenses_menu': '📜 오픈소스 라이선스', 'licenses_title': '오픈소스 라이선스',
+                'usage_guide': '❓ 사용방법 안내',
                 'about': 'ℹ️ 정보',
                 'prev': '👈 이전',
                 'next': '👉 다음',
@@ -1456,7 +1515,7 @@ class PDFEditor(QMainWindow):
                 'rotate_left_short': '⤴️ 왼쪽 회전',
                 'rotate_right_short': '⤵️ 오른쪽 회전',
                 'edit_short': '✏️ 편집',
-                'about_text': '용PDF\n개발: Hwang Jinsu\n메일: iiish@hanmail.net\n라이선스: 프리웨어\n본 소프트웨어는 개인/업무용 무료 사용 가능합니다.',
+                'about_text': '용PDF\n개발: Hwang Jinsu\n메일: iiish@hanmail.net\n라이선스: 프리웨어\n채널: <a href="https://www.youtube.com/playlist?list=PLs36bSFfggCCUX31PYEH_SNgAmVc3dk_B">용툴즈 스튜디오</a>\n본 소프트웨어는 개인/업무용 무료 사용 가능합니다.',
                 'info_compress': '압축 방식을 선택하세요.\n- 일반 압축: 구조 최적화 (무손실)\n- 고급 압축: 이미지 DPI 다운샘플',
                 'ghostscript_config': '🛠️ Ghostscript 경로 설정',
                 'ghostscript_prompt': 'Ghostscript가 설치되어 있지 않습니다. 지금 설치하시겠습니까?',
@@ -1504,7 +1563,7 @@ class PDFEditor(QMainWindow):
                 'progress_applying_overlay': "페이지 {page} 오버레이 반영 중… '{text}'",
                 'save_permission_error': '현재 위치에 저장할 수 없습니다. 다른 위치에 저장해 주세요.',
                 'save_failed': '파일을 저장하지 못했습니다.',
-                'err_editor_missing': 'YongPDF_text (앱/실행파일) 또는 main_codex1.py를 찾을 수 없습니다.',
+                'err_editor_missing': 'YongPDF_text (앱/실행파일)를 찾을 수 없습니다.',
                 'err_editor_launch': '외부 편집기를 실행하지 못했습니다.',
                 'general_compress': '일반 압축 (무손실, 파일 구조 최적화)',
                 'advanced_compress': '고급 압축 (이미지 DPI 조절)',
@@ -1541,6 +1600,7 @@ class PDFEditor(QMainWindow):
                 'status_print_done': 'Print job sent.',
                 'status_compressing': 'Compressing...',
                 'status_compress_done': 'Compression finished.',
+                'error_title': 'Error',
                 'status_patch_mode_on': '🩹 Patch mode enabled.',
                 'status_patch_mode_off': '🩹 Patch mode disabled.',
                 'status_patch_eraser_on': '🧽 Eraser mode enabled.',
@@ -1566,6 +1626,11 @@ class PDFEditor(QMainWindow):
                 'dual_view': '📖 Two-Page View',
                 'fit_width': '↔️ Fit Width',
                 'fit_height': '↕️ Fit Height',
+                'support_menu': '❣️Support the Developer❣️',
+                'donate_kakao': 'Support via KakaoPay',
+                'donate_paypal': 'Support via PayPal',
+                'donate_paypal_message': 'Please support via <a href="https://www.paypal.com/paypalme/1hwangjinsu">https://www.paypal.com/paypalme/1hwangjinsu</a> 🙏 Thank you so much ❣️',
+                'donate_image_missing': 'Unable to locate the donation image.',
                 'tools_menu': 'Tools',
                 'compress_pdf': '📦 Compress PDF',
                 'edit_menu': 'Edit',
@@ -1575,6 +1640,7 @@ class PDFEditor(QMainWindow):
                 'korean': 'Korean',
                 'english': 'English',
                 'help_menu': 'Help', 'licenses_menu': '📜 Open-Source Licenses', 'licenses_title': 'Open-Source Licenses',
+                'usage_guide': '❓ User Guide',
                 'about': 'ℹ️ About',
                 'prev': '👈 Prev',
                 'next': '👉 Next',
@@ -1585,7 +1651,7 @@ class PDFEditor(QMainWindow):
                 'rotate_left_short': '⤴️ Rotate Left',
                 'rotate_right_short': '⤵️ Rotate Right',
                 'edit_short': '✏️ Edit',
-                'about_text': 'YongPDF\nDeveloper: Hwang Jinsu\nEmail: iiish@hanmail.net\nLicense: Freeware\nThis software is free for personal and work use.',
+                'about_text': 'YongPDF\nDeveloper: Hwang Jinsu\nEmail: iiish@hanmail.net\nLicense: Freeware\nChannel: <a href="https://www.youtube.com/playlist?list=PLs36bSFfggCCUX31PYEH_SNgAmVc3dk_B">YongTools Studio</a>\nThis software is free for personal and work use.',
                 'info_compress': 'Choose compression mode.\n- General: structure optimization (lossless)\n- Advanced: downsample images (DPI)',
                 'alert_no_pdf': 'No PDF is open.',
                 'ghostscript_config': '🛠️ Configure Ghostscript Path',
@@ -1639,7 +1705,7 @@ class PDFEditor(QMainWindow):
                 'err_undo': 'Error occurred while undoing.',
                 'err_redo': 'Error occurred while redoing.',
                 'alert_no_edit_pdf': 'No PDF is open to edit.',
-                'err_editor_missing': 'YongPDF_text (app/executable) or main_codex1.py not found.',
+                'err_editor_missing': 'YongPDF_text (app/executable) not found.',
                 'err_editor_launch': 'Failed to launch external editor',
                 'progress_compress': 'Compressing PDF...',
                 'progress_compress_adv': 'Advanced PDF compression...',
@@ -1675,6 +1741,7 @@ class PDFEditor(QMainWindow):
                 'status_print_done': '印刷ジョブを送信しました。',
                 'status_compressing': '圧縮中...',
                 'status_compress_done': '圧縮が完了しました。',
+                'error_title': 'エラー',
                 'status_patch_mode_on': '🩹 パッチモードを有効にしました。',
                 'status_patch_mode_off': '🩹 パッチモードを無効にしました。',
                 'status_patch_eraser_on': '🧽 消しゴムモードを有効にしました。',
@@ -1687,11 +1754,12 @@ class PDFEditor(QMainWindow):
                 'file_menu': 'ファイル', 'open': '📂 開く', 'save': '💾 保存', 'save_as': '📑 名前を付けて保存', 'print': '🖨️ 印刷', 'exit': '🚪 終了',
                 'page_menu': 'ページ', 'add_page': '🙏 ページ追加', 'delete_page': '🗑️ ページ削除', 'cm_delete_selected': '🗑️ 選択ページを削除', 'cm_save_selected': '💾 選択ページを保存',
                 'move_up': '👆 上へ移動', 'move_down': '👇 下へ移動', 'rotate_left': '⤴️ 左回転', 'rotate_right': '⤵️ 右回転',
-                'view_menu': '表示', 'single_view': '📄 1ページ表示', 'dual_view': '📖 2ページ表示', 'fit_width': '↔️ 幅を合わせる', 'fit_height': '↕️ 高さを合わせる',
+                'view_menu': '表示', 'single_view': '📄 1ページ表示', 'dual_view': '📖 2ページ表示', 'fit_width': '↔️ 幅を合わせる', 'fit_height': '↕️ 高さを合わせる', 
+                'support_menu': '❣️開発者を支援する❣️', 'donate_kakao': 'KakaoPayで支援する', 'donate_paypal': 'PayPalで支援する', 'donate_paypal_message': '<a href="https://www.paypal.com/paypalme/1hwangjinsu">https://www.paypal.com/paypalme/1hwangjinsu</a> でご支援ください🙏 心より感謝いたします❣️', 'donate_image_missing': '支援用の画像が見つかりません。',
                 'tools_menu': 'ツール', 'compress_pdf': '📦 PDF圧縮',
-                'edit_menu': '編集', 'undo': '↩️ 元に戻す', 'redo': '↪️ やり直し', 'language_menu': '言語', 'korean': '韓国語', 'english': '英語', 'help_menu': 'ヘルプ', 'licenses_menu': '📜 オープンソース ライセンス', 'licenses_title': 'オープンソース ライセンス', 'about': 'ℹ️ 情報',
+                'edit_menu': '編集', 'undo': '↩️ 元に戻す', 'redo': '↪️ やり直し', 'language_menu': '言語', 'korean': '韓国語', 'english': '英語', 'help_menu': 'ヘルプ', 'licenses_menu': '📜 オープンソース ライセンス', 'licenses_title': 'オープンソース ライセンス', 'usage_guide': '❓ 使い方ガイド', 'about': 'ℹ️ 情報',
                 'prev': '👈 前へ', 'next': '👉 次へ', 'add_short': '🙏 追加', 'delete_short': '🗑️ 削除', 'move_up_short': '👆 上へ', 'move_down_short': '👇 下へ', 'rotate_left_short': '⤴️ 左回転', 'rotate_right_short': '⤵️ 右回転', 'edit_short': '✏️ 編集',
-                'about_text': 'YongPDF\n開発者: Hwang Jinsu\nメール: iiish@hanmail.net\nライセンス: フリーウェア\n本ソフトは個人/業務利用とも無料です。',
+                'about_text': 'YongPDF\n開発者: Hwang Jinsu\nメール: iiish@hanmail.net\nライセンス: フリーウェア\nチャンネル: <a href="https://www.youtube.com/playlist?list=PLs36bSFfggCCUX31PYEH_SNgAmVc3dk_B">YongTools Studio</a>\n本ソフトは個人/業務利用とも無料です。',
                 'info_compress': '圧縮モードを選択してください。\n- 一般: 構造最適化(ロスレス)\n- 高度: 画像をDPIでダウンサンプル', 'general_compress': '一般(ロスレス、構造最適化)', 'advanced_compress': '高度(画像DPI調整)',
                 'color_dpi_label': 'カラー画像 DPI (10段階)', 'gray_dpi_label': 'グレースケール画像 DPI', 'mono_dpi_label': 'モノクロ画像 DPI', 'preserve_vector': 'テキスト/ベクターを保持(画像のみ処理)',
                 'ghostscript_config': '🛠️ Ghostscript パス設定', 'ghostscript_prompt': 'Ghostscript がインストールされていません。今すぐインストールしますか？', 'ghostscript_select': 'Ghostscript 実行ファイルを選択', 'ghostscript_set': 'Ghostscript パスを保存しました。', 'ghostscript_not_found': 'Ghostscript 実行ファイルを見つけられませんでした。', 'ghostscript_install': '今すぐインストール', 'ghostscript_install_proceed': 'インストールを実行', 'ghostscript_install_cancel': 'キャンセル', 'ghostscript_install_hint': 'Ghostscript のダウンロードページを開きました。インストール後に再試行してください。', 'ghostscript_install_notice_mac': "macOS で高度な圧縮を行うには Ghostscript が必要です。\n『インストールを実行』を押すと Homebrew から『brew install ghostscript』コマンドを実行します。\nHomebrew が未導入の場合は https://brew.sh から先に導入してください。", 'print_error': '印刷中にエラーが発生しました。', 'compress_adv_done': '高度なPDF圧縮が完了しました。', 'compress_adv_error': '高度なPDF圧縮中にエラーが発生しました。', 'compress_adv_permission_error': "Ghostscript のインストールには管理者権限が必要です。\n『インストールを実行』を選択して再起動後の案内に従ってください。", 'save_permission_error': '現在の場所に保存できません。他の場所に保存してください。', 'save_failed': 'ファイルを保存できませんでした。', 'saved': '保存済み', 'saved_as': '別名で保存済み',
@@ -1725,6 +1793,7 @@ class PDFEditor(QMainWindow):
                 'status_reordering': '正在重新排序页面…', 'status_reordered': '页面已重新排序。', 'status_rotating': '正在旋转页面…', 'status_rotated': '页面已旋转。',
                 'status_printing': '正在准备打印…', 'status_print_done': '打印任务已发送。',
                 'status_compressing': '正在压缩…', 'status_compress_done': '压缩已完成。',
+                'error_title': '错误',
                 'status_patch_mode_on': '🩹 补丁模式已启用。', 'status_patch_mode_off': '🩹 补丁模式已关闭。',
                 'status_patch_eraser_on': '🧽 橡皮模式已启用。', 'status_patch_eraser_off': '🧽 橡皮模式已关闭。',
                 'progress_compress': '正在压缩 PDF...', 'progress_compress_adv': '正在执行高级 PDF 压缩...',
@@ -1732,13 +1801,14 @@ class PDFEditor(QMainWindow):
                 'progress_applying_overlay': "正在为第 {page} 页应用覆盖层…“{text}”",
                 'file_menu': '文件', 'open': '📂 打开', 'save': '💾 保存', 'save_as': '📑 另存为', 'print': '🖨️ 打印', 'exit': '🚪 退出',
                 'page_menu': '页面', 'add_page': '🙏 添加页面', 'delete_page': '🗑️ 删除页面', 'cm_delete_selected': '🗑️ 删除所选页面', 'cm_save_selected': '💾 保存所选页面',
-                'move_up': '👆 上移', 'move_down': '👇 下移', 'rotate_left': '⤴️ 向左旋转', 'rotate_right': '⤵️ 向右旋转', 'view_menu': '视图', 'single_view': '📄 单页显示', 'dual_view': '📖 双页显示', 'fit_width': '↔️ 适应宽度', 'fit_height': '↕️ 适应高度', 'tools_menu': '工具', 'compress_pdf': '📦 压缩PDF',
-                'edit_menu': '编辑', 'undo': '↩️ 撤销', 'redo': '↪️ 重做', 'language_menu': '语言', 'korean': '韩文', 'english': '英文', 'help_menu': '帮助', 'licenses_menu': '📜 开源许可', 'licenses_title': '开源许可', 'about': 'ℹ️ 关于',
+                'move_up': '👆 上移', 'move_down': '👇 下移', 'rotate_left': '⤴️ 向左旋转', 'rotate_right': '⤵️ 向右旋转', 'view_menu': '视图', 'single_view': '📄 单页显示', 'dual_view': '📖 双页显示', 'fit_width': '↔️ 适应宽度', 'fit_height': '↕️ 适应高度', 
+                'support_menu': '❣️支持开发者❣️', 'donate_kakao': '通过 KakaoPay 支持', 'donate_paypal': '通过 PayPal 支持', 'donate_paypal_message': '请通过 <a href="https://www.paypal.com/paypalme/1hwangjinsu">https://www.paypal.com/paypalme/1hwangjinsu</a> 支持我们🙏 非常感谢❣️', 'donate_image_missing': '未能找到捐赠图片。', 'tools_menu': '工具', 'compress_pdf': '📦 压缩PDF',
+                'edit_menu': '编辑', 'undo': '↩️ 撤销', 'redo': '↪️ 重做', 'language_menu': '语言', 'korean': '韩文', 'english': '英文', 'help_menu': '帮助', 'licenses_menu': '📜 开源许可', 'licenses_title': '开源许可', 'usage_guide': '❓ 使用指南', 'about': 'ℹ️ 关于',
                 'prev': '👈 上一页', 'next': '👉 下一页', 'add_short': '🙏 添加', 'delete_short': '🗑️ 删除', 'move_up_short': '👆 上移', 'move_down_short': '👇 下移', 'rotate_left_short': '⤴️ 左旋转', 'rotate_right_short': '⤵️ 右旋转', 'edit_short': '✏️ 编辑',
-                'about_text': 'YongPDF\n开发者: Hwang Jinsu\n邮箱: iiish@hanmail.net\n许可: 免费软件\n本软件可免费用于个人/工作用途。',
+                'about_text': 'YongPDF\n开发者: Hwang Jinsu\n邮箱: iiish@hanmail.net\n许可: 免费软件\n频道: <a href="https://www.youtube.com/playlist?list=PLs36bSFfggCCUX31PYEH_SNgAmVc3dk_B">YongTools Studio</a>\n本软件可免费用于个人/工作用途。',
                 'info_compress': '请选择压缩模式。\n- 一般: 结构优化(无损)\n- 高级: 按DPI降采样图像', 'general_compress': '一般(无损, 结构优化)', 'advanced_compress': '高级(图像DPI调节)',
                 'color_dpi_label': '彩色图像 DPI (10级)', 'gray_dpi_label': '灰度图像 DPI', 'mono_dpi_label': '黑白图像 DPI', 'preserve_vector': '保留文本/矢量(仅处理图像)',
-                'ghostscript_config': '🛠️ 设置 Ghostscript 路径', 'ghostscript_prompt': '未安装 Ghostscript。现在安装吗？', 'ghostscript_select': '选择 Ghostscript 可执行文件', 'ghostscript_set': '已保存 Ghostscript 路径。', 'ghostscript_not_found': '找不到 Ghostscript 可执行文件。', 'ghostscript_install': '立即安装', 'ghostscript_install_proceed': '安装并继续', 'ghostscript_install_cancel': '取消', 'ghostscript_install_hint': '已打开 Ghostscript 下载页面。安装后请重试。', 'ghostscript_install_notice_mac': "在 macOS 上进行高级压缩需要 Ghostscript。\n点击“安装并继续”会通过 Homebrew 执行“brew install ghostscript”。\n如果尚未安装 Homebrew，请先访问 https://brew.sh。", 'print_error': '打印时发生错误。', 'compress_adv_done': '高级 PDF 压缩已完成。', 'compress_adv_error': '高级 PDF 压缩时发生错误。', 'compress_adv_permission_error': "Ghostscript 安装需要管理员授权。请选择'安装并继续'，按提示完成安装后压缩会自动继续。", 'save_permission_error': '无法写入当前位置。请另存到其他位置。', 'save_failed': '无法保存文件。', 'saved': '已保存', 'saved_as': '已另存为', 'err_editor_missing': '未找到 YongPDF_text（應用/可執行檔）或 main_codex1.py。', 'err_editor_launch': '无法启动外部编辑器。',
+                'ghostscript_config': '🛠️ 设置 Ghostscript 路径', 'ghostscript_prompt': '未安装 Ghostscript。现在安装吗？', 'ghostscript_select': '选择 Ghostscript 可执行文件', 'ghostscript_set': '已保存 Ghostscript 路径。', 'ghostscript_not_found': '找不到 Ghostscript 可执行文件。', 'ghostscript_install': '立即安装', 'ghostscript_install_proceed': '安装并继续', 'ghostscript_install_cancel': '取消', 'ghostscript_install_hint': '已打开 Ghostscript 下载页面。安装后请重试。', 'ghostscript_install_notice_mac': "在 macOS 上进行高级压缩需要 Ghostscript。\n点击“安装并继续”会通过 Homebrew 执行“brew install ghostscript”。\n如果尚未安装 Homebrew，请先访问 https://brew.sh。", 'print_error': '打印时发生错误。', 'compress_adv_done': '高级 PDF 压缩已完成。', 'compress_adv_error': '高级 PDF 压缩时发生错误。', 'compress_adv_permission_error': "Ghostscript 安装需要管理员授权。请选择'安装并继续'，按提示完成安装后压缩会自动继续。", 'save_permission_error': '无法写入当前位置。请另存到其他位置。', 'save_failed': '无法保存文件。', 'saved': '已保存', 'saved_as': '已另存为', 'err_editor_missing': '未找到 YongPDF_text（應用/可執行檔）。', 'err_editor_launch': '无法启动外部编辑器。',
                 'ghostscript_installing': '正在通过终端安装 Ghostscript...（{manager}）',
                 'ghostscript_install_success': 'Ghostscript 安装完成。',
                 'ghostscript_install_failed': 'Ghostscript 安装失败。',
@@ -1765,7 +1835,7 @@ class PDFEditor(QMainWindow):
             'zh-TW': {
                 'alert_no_pdf': '沒有開啟任何 PDF。', 'alert_no_edit_pdf': '尚未開啟可編輯的 PDF。', 'unsaved_changes': '有未儲存的變更，是否儲存？', 'btn_yes': '是', 'btn_save_as': '另存新檔', 'btn_no': '否', 'btn_cancel': '取消',
                 'zoom_in': '➕ 放大', 'zoom_out': '➖ 縮小', 'theme_light': '☀️ 亮色', 'theme_dark': '🌙 暗色', 'theme_light_mode': '☀️ 亮色模式', 'theme_dark_mode': '🌙 暗色模式',
-                'status_page': '頁面', 'status_zoom': '縮放', 'status_ready': '就緒', 'status_saving': '正在儲存…', 'status_saved': '已儲存。', 'status_reordering': '正在重新排序頁面…', 'status_reordered': '已重新排序頁面。', 'status_rotating': '正在旋轉頁面…', 'status_rotated': '頁面已旋轉。', 'status_printing': '正在準備列印…', 'status_print_done': '列印工作已送出。', 'status_compressing': '正在壓縮…', 'status_compress_done': '壓縮完成。',
+                'status_page': '頁面', 'status_zoom': '縮放', 'status_ready': '就緒', 'status_saving': '正在儲存…', 'status_saved': '已儲存。', 'status_reordering': '正在重新排序頁面…', 'status_reordered': '已重新排序頁面。', 'status_rotating': '正在旋轉頁面…', 'status_rotated': '頁面已旋轉。', 'status_printing': '正在準備列印…', 'status_print_done': '列印工作已送出。', 'status_compressing': '正在壓縮…', 'status_compress_done': '壓縮完成。', 'error_title': '錯誤',
                 'status_patch_mode_on': '🩹 補丁模式已啟用。', 'status_patch_mode_off': '🩹 補丁模式已停用。',
                 'status_patch_eraser_on': '🧽 橡皮模式已啟用。', 'status_patch_eraser_off': '🧽 橡皮模式已停用。',
                 'progress_compress': '正在壓縮 PDF...', 'progress_compress_adv': '正在執行進階 PDF 壓縮...',
@@ -1773,13 +1843,14 @@ class PDFEditor(QMainWindow):
                 'progress_applying_overlay': "正在於第 {page} 頁套用覆蓋層…「{text}」",
                 'file_menu': '檔案', 'open': '📂 開啟', 'save': '💾 儲存', 'save_as': '📑 另存新檔', 'print': '🖨️ 列印', 'exit': '🚪 結束',
                 'page_menu': '頁面', 'add_page': '🙏 新增頁面', 'delete_page': '🗑️ 刪除頁面', 'cm_delete_selected': '🗑️ 刪除所選頁面', 'cm_save_selected': '💾 儲存所選頁面',
-                'move_up': '👆 上移', 'move_down': '👇 下移', 'rotate_left': '⤴️ 向左旋轉', 'rotate_right': '⤵️ 向右旋轉', 'view_menu': '檢視', 'single_view': '📄 單頁檢視', 'dual_view': '📖 雙頁檢視', 'fit_width': '↔️ 配合寬度', 'fit_height': '↕️ 配合高度', 'tools_menu': '工具', 'compress_pdf': '📦 壓縮PDF',
-                'edit_menu': '編輯', 'undo': '↩️ 復原', 'redo': '↪️ 取消復原', 'language_menu': '語言', 'korean': '韓文', 'english': '英文', 'help_menu': '說明', 'licenses_menu': '📜 開源授權', 'licenses_title': '開源授權', 'about': 'ℹ️ 關於',
+                'move_up': '👆 上移', 'move_down': '👇 下移', 'rotate_left': '⤴️ 向左旋轉', 'rotate_right': '⤵️ 向右旋轉', 'view_menu': '檢視', 'single_view': '📄 單頁檢視', 'dual_view': '📖 雙頁檢視', 'fit_width': '↔️ 配合寬度', 'fit_height': '↕️ 配合高度', 
+                'support_menu': '❣️支持開發者❣️', 'donate_kakao': '以 KakaoPay 支援', 'donate_paypal': '以 PayPal 支援', 'donate_paypal_message': '請前往 <a href="https://www.paypal.com/paypalme/1hwangjinsu">https://www.paypal.com/paypalme/1hwangjinsu</a> 支援我們🙏 真心感謝❣️', 'donate_image_missing': '找不到支援用的圖片。', 'tools_menu': '工具', 'compress_pdf': '📦 壓縮PDF',
+                'edit_menu': '編輯', 'undo': '↩️ 復原', 'redo': '↪️ 取消復原', 'language_menu': '語言', 'korean': '韓文', 'english': '英文', 'help_menu': '說明', 'licenses_menu': '📜 開源授權', 'licenses_title': '開源授權', 'usage_guide': '❓ 使用指南', 'about': 'ℹ️ 關於',
                 'prev': '👈 上一頁', 'next': '👉 下一頁', 'add_short': '🙏 新增', 'delete_short': '🗑️ 刪除', 'move_up_short': '👆 上移', 'move_down_short': '👇 下移', 'rotate_left_short': '⤴️ 左旋轉', 'rotate_right_short': '⤵️ 右旋轉', 'edit_short': '✏️ 編輯',
-                'about_text': 'YongPDF\n開發者: Hwang Jinsu\n信箱: iiish@hanmail.net\n授權: 免費軟體\n本軟體可免費用於個人/商務。',
+                'about_text': 'YongPDF\n開發者: Hwang Jinsu\n信箱: iiish@hanmail.net\n授權: 免費軟體\n頻道: <a href="https://www.youtube.com/playlist?list=PLs36bSFfggCCUX31PYEH_SNgAmVc3dk_B">YongTools Studio</a>\n本軟體可免費用於個人/商務。',
                 'info_compress': '請選擇壓縮模式。\n- 一般: 結構最佳化(無損)\n- 進階: 依DPI降採樣影像', 'general_compress': '一般(無損, 結構最佳化)', 'advanced_compress': '進階(影像DPI調整)',
                 'color_dpi_label': '彩色影像 DPI (10級)', 'gray_dpi_label': '灰階影像 DPI', 'mono_dpi_label': '黑白影像 DPI', 'preserve_vector': '保留文字/向量(僅處理影像)',
-                'ghostscript_config': '🛠️ 設定 Ghostscript 路徑', 'ghostscript_prompt': '尚未安裝 Ghostscript，要立即安裝嗎？', 'ghostscript_select': '選擇 Ghostscript 執行檔', 'ghostscript_set': '已儲存 Ghostscript 路徑。', 'ghostscript_not_found': '找不到 Ghostscript 執行檔。', 'ghostscript_install': '立即安裝', 'ghostscript_install_proceed': '安裝並繼續', 'ghostscript_install_cancel': '取消', 'ghostscript_install_hint': '已開啟 Ghostscript 下載頁面。安裝後請再試一次。', 'ghostscript_install_notice_mac': "在 macOS 上進行進階壓縮需要 Ghostscript。\n按下「安裝並繼續」會透過 Homebrew 執行「brew install ghostscript」。\n若尚未安裝 Homebrew，請先前往 https://brew.sh。", 'print_error': '列印時發生錯誤。', 'compress_adv_done': '進階 PDF 壓縮完成。', 'compress_adv_error': '進階 PDF 壓縮時發生錯誤。', 'compress_adv_permission_error': "Ghostscript 安裝需要管理員授權。請點選'安裝並繼續'，依照指示完成後會自動續行壓縮。", 'save_permission_error': '無法寫入目前位置。請另存到其他位置。', 'save_failed': '無法儲存檔案。', 'saved': '已儲存', 'saved_as': '已另存新檔', 'err_editor_missing': '找不到 YongPDF_text（應用/可執行檔）或 main_codex1.py。', 'err_editor_launch': '無法啟動外部編輯器。',
+                'ghostscript_config': '🛠️ 設定 Ghostscript 路徑', 'ghostscript_prompt': '尚未安裝 Ghostscript，要立即安裝嗎？', 'ghostscript_select': '選擇 Ghostscript 執行檔', 'ghostscript_set': '已儲存 Ghostscript 路徑。', 'ghostscript_not_found': '找不到 Ghostscript 執行檔。', 'ghostscript_install': '立即安裝', 'ghostscript_install_proceed': '安裝並繼續', 'ghostscript_install_cancel': '取消', 'ghostscript_install_hint': '已開啟 Ghostscript 下載頁面。安裝後請再試一次。', 'ghostscript_install_notice_mac': "在 macOS 上進行進階壓縮需要 Ghostscript。\n按下「安裝並繼續」會透過 Homebrew 執行「brew install ghostscript」。\n若尚未安裝 Homebrew，請先前往 https://brew.sh。", 'print_error': '列印時發生錯誤。', 'compress_adv_done': '進階 PDF 壓縮完成。', 'compress_adv_error': '進階 PDF 壓縮時發生錯誤。', 'compress_adv_permission_error': "Ghostscript 安裝需要管理員授權。請點選'安裝並繼續'，依照指示完成後會自動續行壓縮。", 'save_permission_error': '無法寫入目前位置。請另存到其他位置。', 'save_failed': '無法儲存檔案。', 'saved': '已儲存', 'saved_as': '已另存新檔', 'err_editor_missing': '找不到 YongPDF_text（應用/可執行檔）。', 'err_editor_launch': '無法啟動外部編輯器。',
                 'ghostscript_installing': '正在透過終端機安裝 Ghostscript...（{manager}）',
                 'ghostscript_install_success': 'Ghostscript 安裝完成。',
                 'ghostscript_install_failed': 'Ghostscript 安裝失敗。',
@@ -1955,31 +2026,165 @@ class PDFEditor(QMainWindow):
             self.status_page_label.setText(f"{self.t('status_page')}: 0 / 0")
             self.status_zoom_label.setText(f"{self.t('status_zoom')}: -")
 
+    def _is_supported_source(self, path: str) -> bool:
+        ext = os.path.splitext(path)[1].lower()
+        return ext in self.SUPPORTED_OPEN_EXTS
+
+    def _open_pdf_or_convert_image(self, path: str) -> tuple[fitz.Document, bool]:
+        try:
+            doc = fitz.open(path)
+            if getattr(doc, "is_pdf", False):
+                return doc, False
+            doc.close()
+        except Exception:
+            pass
+        try:
+            from PIL import Image  # type: ignore
+            import io
+        except ImportError as err:
+            raise RuntimeError(f"Pillow not available: {err}")
+        try:
+            with Image.open(path) as img:
+                if img.mode in ("P", "RGBA"):
+                    img = img.convert("RGB")
+                width, height = img.size
+                pdf_doc = fitz.open()
+                page = pdf_doc.new_page(width=float(width), height=float(height))
+                with io.BytesIO() as buf:
+                    img.save(buf, format='PNG')
+                    buf.seek(0)
+                    page.insert_image(page.rect, stream=buf.read())
+            return pdf_doc, True
+        except Exception as convert_err:
+            raise RuntimeError(convert_err)
+
     def open_file(self, file_path=None):
-        if not file_path:
+        if isinstance(file_path, bool):
+            file_path = None
+        if file_path is None:
             last_dir = str(self.settings.value('last_dir', os.path.dirname(self.current_file) if self.current_file else os.getcwd())) if hasattr(self, 'settings') else ''
-            file_path, _ = QFileDialog.getOpenFileName(self, "📂 PDF 파일 열기", last_dir, "PDF 파일 (*.pdf)")
-        if file_path:
-            try:
-                if self.pdf_document: self.pdf_document.close()
-                self.pdf_document = fitz.open(file_path)
-                self.current_file = file_path
-                self.current_page = 0
-                self.has_unsaved_changes = False
-                self.setWindowTitle(f"PDF Editor - {os.path.basename(file_path)}")
-                self._thumb_cache.clear(); self._page_cache.clear()
-                self.load_thumbnails()
-                self.load_document_view()
-                # Align thumbnail frames with current icon/grid settings
+            filters = [
+                "PDF / Image Files (*.pdf *.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)",
+                "PDF Files (*.pdf)",
+                "Image Files (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)"
+            ]
+            selected, _ = QFileDialog.getOpenFileNames(self, self.t('open'), last_dir, ";;".join(filters))
+            file_paths = [os.path.abspath(p) for p in selected if p]
+        elif isinstance(file_path, (list, tuple, set)):
+            file_paths = [os.path.abspath(str(p)) for p in file_path if p]
+        else:
+            file_paths = [os.path.abspath(str(file_path))]
+
+        if not file_paths:
+            return
+
+        if self.has_unsaved_changes and self.pdf_document:
+            choice = self._prompt_save_changes()
+            if choice == 'yes':
+                self.save_file()
+                if self.has_unsaved_changes:
+                    return
+            elif choice == 'saveas':
+                self.save_as_file()
+                if self.has_unsaved_changes:
+                    return
+            elif choice == 'cancel':
+                return
+            elif choice == 'no':
+                pass
+
+        valid_paths = [path for path in file_paths if os.path.isfile(path)]
+        if not valid_paths:
+            return
+
+        sources: list[tuple[fitz.Document, bool, str]] = []
+        try:
+            for path in valid_paths:
+                doc, is_temp = self._open_pdf_or_convert_image(path)
+                sources.append((doc, is_temp, path))
+        except Exception as err:
+            for doc, _, _ in sources:
                 try:
-                    self.on_thumbnail_zoom_slider_changed(self.thumbnail_zoom_slider.value())
+                    doc.close()
                 except Exception:
                     pass
-                self.update_page_info()
-                if hasattr(self, 'settings'):
-                    self.settings.setValue('last_dir', os.path.dirname(file_path))
-            except Exception as e:
-                QMessageBox.critical(self, "오류", f"PDF 파일을 열 수 없습니다.\n{e}")
+            QMessageBox.critical(self, self.app_name, f"{self.t('error_title')}: {err}")
+            return
+
+        adopt_indices: set[int] = set()
+        try:
+            if len(sources) == 1 and not sources[0][1]:
+                new_doc = sources[0][0]
+                adopt_indices.add(0)
+                new_path = file_paths[0]
+                mark_unsaved = False
+            elif len(sources) == 1 and sources[0][1]:
+                new_doc = sources[0][0]
+                adopt_indices.add(0)
+                new_path = None
+                mark_unsaved = True
+            else:
+                new_doc = fitz.open()
+                for doc, _, _ in sources:
+                    new_doc.insert_pdf(doc)
+                new_path = None
+                mark_unsaved = True
+        except Exception as err:
+            for doc, _, _ in sources:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
+            QMessageBox.critical(self, self.app_name, f"{self.t('error_title')}: {err}")
+            return
+
+        self._disable_external_watch()
+        if self.pdf_document:
+            try:
+                self.pdf_document.close()
+            except Exception:
+                pass
+        self.pdf_document = new_doc
+
+        for idx, (doc, _, _) in enumerate(sources):
+            if idx in adopt_indices:
+                continue
+            try:
+                doc.close()
+            except Exception:
+                pass
+
+        self.current_file = new_path
+        self.current_page = 0
+        self.has_unsaved_changes = mark_unsaved
+        self._thumb_cache.clear()
+        self._page_cache.clear()
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+        self.load_thumbnails()
+        self.load_document_view()
+        try:
+            self.on_thumbnail_zoom_slider_changed(self.thumbnail_zoom_slider.value())
+        except Exception:
+            pass
+        self.update_page_info()
+
+        title_hint = os.path.basename(valid_paths[0]) if valid_paths else ''
+        if len(valid_paths) > 1:
+            title_hint = f"{title_hint} (+{len(valid_paths) - 1})"
+        display_title = title_hint or "Untitled"
+        if mark_unsaved:
+            self.setWindowTitle(f"{self.app_name} - *{display_title}")
+        else:
+            self.setWindowTitle(f"{self.app_name} - {display_title}")
+
+        if new_path:
+            self._configure_external_watch(new_path)
+        else:
+            self._disable_external_watch()
+
+        if hasattr(self, 'settings'):
+            self.settings.setValue('last_dir', os.path.dirname(valid_paths[0]))
 
     def _unload_document(self, preserve_current_file: bool = False):
         if self.pdf_document:
@@ -2142,6 +2347,26 @@ class PDFEditor(QMainWindow):
                 except Exception:
                     pass
 
+    def dragEnterEvent(self, event: QDragEnterEvent):  # type: ignore[override]
+        for url in event.mimeData().urls():
+            if url.isLocalFile() and self._is_supported_source(url.toLocalFile()):
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+    def dropEvent(self, event: QDropEvent):  # type: ignore[override]
+        paths = []
+        for url in event.mimeData().urls():
+            if url.isLocalFile():
+                path = url.toLocalFile()
+                if self._is_supported_source(path):
+                    paths.append(path)
+        if paths:
+            self.open_file(paths)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
     def _restore_from_bytes(self, data: bytes):
         try:
             if self.pdf_document:
@@ -2236,7 +2461,7 @@ class PDFEditor(QMainWindow):
         self.show_status(self.t('status_saved'))
 
     def _save_document_incremental(self, path: str) -> None:
-        self.pdf_document.save(path, incremental=True)
+        self.pdf_document.save(path, incremental=False, deflate=True, garbage=4)
 
     def _save_document_full_replace(self, path: str) -> None:
         base_dir = os.path.dirname(path) or os.getcwd()
@@ -2574,33 +2799,80 @@ class PDFEditor(QMainWindow):
         self.reorder_pages(sorted_indexes, sorted_indexes[-1] + 2)
 
     def add_blank_page(self):
-        if not self.pdf_document: return
+        if not self.pdf_document:
+            return
         last_dir = str(self.settings.value('last_dir', os.path.dirname(self.current_file) if self.current_file else os.getcwd())) if hasattr(self, 'settings') else ''
-        file_path, _ = QFileDialog.getOpenFileName(self, self.t('add_page'), last_dir, "PDF 파일 (*.pdf)")
-        if file_path:
-            # snapshot for undo
+        filters = [
+            "PDF / Image Files (*.pdf *.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)",
+            "PDF Files (*.pdf)",
+            "Image Files (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)"
+        ]
+        file_paths, _ = QFileDialog.getOpenFileNames(self, self.t('add_page'), last_dir, ";;".join(filters))
+        if not file_paths:
+            return
+
+        self.insert_files_at(file_paths, self.current_page + 1)
+
+    def insert_files_at(self, file_paths: list[str], dest_index: int):
+        if not file_paths:
+            return
+        if not self.pdf_document:
+            self.open_file(file_paths)
+            return
+
+        valid_paths = [os.path.abspath(p) for p in file_paths if os.path.isfile(p)]
+        if not valid_paths:
+            return
+
+        dest_index = max(0, min(dest_index, self.pdf_document.page_count))
+
+        try:
+            self._undo_stack.append(self.pdf_document.tobytes(garbage=4, deflate=True))
+            self._redo_stack.clear()
+        except Exception:
+            pass
+
+        insert_at = dest_index
+        inserted_pages = 0
+        for path in valid_paths:
+            doc = None
             try:
-                self._undo_stack.append(self.pdf_document.tobytes(garbage=4, deflate=True))
-                self._redo_stack.clear()
+                doc, _ = self._open_pdf_or_convert_image(path)
+            except Exception as err:
+                QMessageBox.warning(self, self.app_name, f"{self.t('error_title')}: {os.path.basename(path)}\n{err}")
+                continue
+            try:
+                page_count = doc.page_count
+                if page_count <= 0:
+                    continue
+                self.pdf_document.insert_pdf(doc, from_page=0, to_page=page_count - 1, start_at=insert_at)
+                inserted_pages += page_count
+                insert_at += page_count
+            finally:
+                if doc is not None:
+                    try:
+                        doc.close()
+                    except Exception:
+                        pass
+
+        if inserted_pages <= 0:
+            try:
+                self._undo_stack.pop()
             except Exception:
                 pass
-            insert_at = self.current_page + 1
-            insert_doc = fitz.open(file_path)
-            self.pdf_document.insert_pdf(insert_doc, from_page=0, to_page=insert_doc.page_count - 1, start_at=insert_at)
-            insert_doc.close()
-            self.mark_as_unsaved()
-            self._thumb_cache.clear(); self._page_cache.clear()
-            # Suppress sync during rebuild to avoid jumping to page 1
-            self._suppress_scroll_sync = True
-            # Set target page early so any intermediate UI refresh reads this value
-            self.current_page = insert_at
-            self.load_thumbnails()
-            self.load_document_view()
-            self.scroll_to_page(insert_at)
-            # End suppression on next tick to ensure no late scroll events override our target
-            QTimer.singleShot(0, lambda: self._finalize_after_insert(insert_at))
-            if hasattr(self, 'settings'):
-                self.settings.setValue('last_dir', os.path.dirname(file_path))
+            return
+
+        self.mark_as_unsaved()
+        self._thumb_cache.clear()
+        self._page_cache.clear()
+        self._suppress_scroll_sync = True
+        self.current_page = dest_index
+        self.load_thumbnails()
+        self.load_document_view()
+        self.scroll_to_page(dest_index)
+        QTimer.singleShot(0, lambda idx=dest_index: self._finalize_after_insert(idx))
+        if hasattr(self, 'settings'):
+            self.settings.setValue('last_dir', os.path.dirname(valid_paths[-1]))
 
     def _finalize_after_insert(self, page_idx: int):
         self._suppress_scroll_sync = False
@@ -2660,15 +2932,48 @@ class PDFEditor(QMainWindow):
         self._thumb_cache.clear(); self._page_cache.clear()
         self.load_thumbnails()
         self.load_document_view()
-        # restore multi-selection
+        # restore multi-selection and current focus
+        max_idx = self.thumbnail_widget.count() - 1
+        effective_indexes: list[int] = []
+        if max_idx >= 0:
+            for idx in sel_before:
+                effective_indexes.append(max(0, min(idx, max_idx)))
+        if not effective_indexes:
+            effective_indexes = [max(0, min(self.current_page, max_idx))] if max_idx >= 0 else [0]
+        focus_index = self.thumbnail_widget.currentRow()
+        if focus_index < 0 or focus_index not in effective_indexes:
+            focus_index = effective_indexes[0]
+        self.current_page = focus_index
         sel_model = self.thumbnail_widget.selectionModel()
-        sel_model.clearSelection()
-        for idx in sel_before:
-            item = self.thumbnail_widget.item(min(idx, self.thumbnail_widget.count()-1))
-            if item:
-                sel_model.select(self.thumbnail_widget.indexFromItem(item), QItemSelectionModel.SelectionFlag.Select)
+        if sel_model:
+            try:
+                sel_model.blockSignals(True)
+            except Exception:
+                pass
+            try:
+                sel_model.clearSelection()
+                model = self.thumbnail_widget.model()
+                for idx in effective_indexes:
+                    model_index = model.index(idx, 0)
+                    if not model_index.isValid():
+                        continue
+                    sel_model.select(
+                        model_index,
+                        QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+                    )
+                focus_model_index = model.index(focus_index, 0)
+                if focus_model_index.isValid():
+                    sel_model.setCurrentIndex(
+                        focus_model_index,
+                        QItemSelectionModel.SelectionFlag.Current | QItemSelectionModel.SelectionFlag.NoUpdate
+                    )
+            finally:
+                try:
+                    sel_model.blockSignals(False)
+                except Exception:
+                    pass
         self._suppress_scroll_sync = False
-        QTimer.singleShot(0, lambda: self.scroll_to_page(min(sel_before)))
+        QTimer.singleShot(0, lambda: self.scroll_to_page(self.current_page))
         self.show_status(self.t('status_rotated'))
 
     def goto_page(self):
@@ -3707,7 +4012,7 @@ class PDFEditor(QMainWindow):
     def mark_as_unsaved(self):
         self.has_unsaved_changes = True
         title = os.path.basename(self.current_file) if self.current_file else "Untitled"
-        self.setWindowTitle(f"PDF Editor - *{title}")
+        self.setWindowTitle(f"{self.app_name} - *{title}")
 
     def _save_ui_settings(self):
         try:
@@ -3993,6 +4298,67 @@ class PDFEditor(QMainWindow):
                     preserve_vector=settings.get('preserve_vector', True)
                 )
 
+    def show_kakao_donation_dialog(self):
+        path_candidates: list[str] = []
+        try:
+            path_candidates.append(_resolve_static_path('yongpdf_donation.jpg'))
+        except Exception:
+            pass
+        try:
+            module_dir = os.path.dirname(os.path.abspath(__file__))
+            path_candidates.append(os.path.join(module_dir, 'yongpdf_donation.jpg'))
+        except Exception:
+            pass
+
+        selected_path = None
+        seen: set[str] = set()
+        for candidate in path_candidates:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            if os.path.exists(candidate):
+                selected_path = candidate
+                break
+
+        if not selected_path:
+            QMessageBox.warning(self, self.app_name, self.t('donate_image_missing'))
+            return
+
+        pixmap = QPixmap(selected_path)
+        if pixmap.isNull():
+            QMessageBox.warning(self, self.app_name, self.t('donate_image_missing'))
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self.t('donate_kakao'))
+        layout = QVBoxLayout(dialog)
+        image_label = QLabel(dialog)
+        image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        max_width = 480
+        if pixmap.width() > max_width:
+            scaled = pixmap.scaledToWidth(max_width, Qt.TransformationMode.SmoothTransformation)
+        else:
+            scaled = pixmap
+        image_label.setPixmap(scaled)
+        layout.addWidget(image_label)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        button_box.accepted.connect(dialog.accept)
+        layout.addWidget(button_box)
+        dialog.setModal(True)
+        dialog.resize(scaled.width() + 40, scaled.height() + 80)
+        dialog.exec()
+
+    def show_paypal_donation_dialog(self):
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Icon.Information)
+        msg_box.setWindowTitle(self.t('donate_paypal'))
+        msg_box.setTextFormat(Qt.TextFormat.RichText)
+        msg_box.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg_box.setText(self.t('donate_paypal_message'))
+        msg_box.exec()
+
     def show_about_dialog(self):
         box = QMessageBox(self)
         box.setWindowTitle(self.app_name)
@@ -4200,12 +4566,39 @@ class PDFEditor(QMainWindow):
         if self.current_page != closest_page:
             self.current_page = closest_page
             self.update_page_info()
+            sel_model = None
+            index = None
+            multi_selected = False
             try:
                 sel_model = self.thumbnail_widget.selectionModel()
+                if sel_model:
+                    try:
+                        multi_selected = len(sel_model.selectedRows()) > 1
+                    except Exception:
+                        multi_selected = False
                 index = self.thumbnail_widget.model().index(self.current_page, 0)
-                sel_model.setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
+                self.thumbnail_widget.blockSignals(True)
+                if not multi_selected:
+                    try:
+                        self.thumbnail_widget.setCurrentRow(
+                            self.current_page,
+                            QItemSelectionModel.SelectionFlag.ClearAndSelect
+                        )
+                    except Exception:
+                        self.thumbnail_widget.setCurrentRow(self.current_page)
+                if sel_model and index.isValid():
+                    flags = QItemSelectionModel.SelectionFlag.NoUpdate | QItemSelectionModel.SelectionFlag.Current
+                    sel_model.setCurrentIndex(index, flags)
+                item = self.thumbnail_widget.item(self.current_page)
+                if item:
+                    self.thumbnail_widget.scrollToItem(item, QListWidget.ScrollHint.PositionAtCenter)
             except Exception:
                 pass
+            finally:
+                try:
+                    self.thumbnail_widget.blockSignals(False)
+                except Exception:
+                    pass
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

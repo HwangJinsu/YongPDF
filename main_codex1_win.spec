@@ -10,19 +10,20 @@ if _spec_file:
 else:
     root_dir = os.path.abspath(os.getcwd())
 hooks_dir = os.path.join(root_dir, 'hooks')
+assets_dir = os.path.join(root_dir, 'assets')
 
 static_dir = os.path.join(root_dir, 'static')
 static_datas = []
 if os.path.isdir(static_dir):
     static_datas.append((static_dir, 'static'))
 
-brand_images = ['YongPDF_page_img.png', 'YongPDF_text_img.png']
+brand_images = ['YongPDF_page_img.png', 'YongPDF_text_img.png', 'yongpdf_donation.jpg']
 for image_name in brand_images:
-    image_path = os.path.join(root_dir, image_name)
+    image_path = os.path.join(assets_dir, image_name)
     if os.path.isfile(image_path):
         static_datas.append((image_path, 'static'))
 
-icon_path = os.path.join(root_dir, 'YongPDF_text_icon.ico')
+icon_path = os.path.join(assets_dir, 'YongPDF_text_icon.ico')
 
 runtime_hook = os.path.join(hooks_dir, 'rthook_change_wd.py') if os.path.isfile(os.path.join(hooks_dir, 'rthook_change_wd.py')) else None
 

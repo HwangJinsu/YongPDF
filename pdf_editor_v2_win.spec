@@ -11,15 +11,16 @@ else:
     root_dir = os.path.abspath(os.getcwd())
 hooks_dir = os.path.join(root_dir, 'hooks')
 static_dir = os.path.join(root_dir, 'static')
+assets_dir = os.path.join(root_dir, 'assets')
 ghostscript_dir = os.path.join(root_dir, 'ghostscript')
-icon_path = os.path.join(root_dir, 'YongPDF_page_icon.ico')
+icon_path = os.path.join(assets_dir, 'YongPDF_page_icon.ico')
 
 datas_common = []
 if os.path.isdir(static_dir):
     datas_common.append((static_dir, 'static'))
 
-for image_name in ('YongPDF_page_img.png', 'YongPDF_text_img.png'):
-    image_path = os.path.join(root_dir, image_name)
+for image_name in ('YongPDF_page_img.png', 'YongPDF_text_img.png', 'yongpdf_donation.jpg'):
+    image_path = os.path.join(assets_dir, image_name)
     if os.path.isfile(image_path):
         datas_common.append((image_path, 'static'))
 
@@ -60,7 +61,7 @@ exe_main = EXE(
     a_main.zipfiles,
     a_main.datas,
     [],
-    name='YongPDF',
+    name='YongPDF_page',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -75,5 +76,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='YongPDF',
+    name='YongPDF_page',
 )
