@@ -37,6 +37,7 @@ Thumbs.db
 # Project specific
 backup/
 tmp/
+Commands/
 google_accounts.json
 oauth_creds.json
 installation_id
