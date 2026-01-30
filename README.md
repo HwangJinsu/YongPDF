@@ -89,7 +89,7 @@ This application utilizes the following open source projects:
 ---
 **Copyright © 2026 YongPDF · Hwang Jinsu. All rights reserved.**
 
-----------
+---
 
 # 📄 YongPDF_text (PDF Text Editor)
 
