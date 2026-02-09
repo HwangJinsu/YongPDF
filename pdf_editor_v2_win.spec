@@ -19,6 +19,10 @@ datas_common = []
 if os.path.isdir(static_dir):
     datas_common.append((static_dir, 'static'))
 
+i18n_dir = os.path.join(root_dir, 'i18n')
+if os.path.isdir(i18n_dir):
+    datas_common.append((i18n_dir, 'i18n'))
+
 for image_name in ('YongPDF_page_img.png', 'YongPDF_text_img.png', 'yongpdf_donation.jpg'):
     image_path = os.path.join(assets_dir, image_name)
     if os.path.isfile(image_path):

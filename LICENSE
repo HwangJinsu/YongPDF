@@ -1,0 +1,35 @@
+YongPDF (Page Editor & Text Editor)
+Copyright (C) 2025 Hwang Jinsu (https://github.com/HwangJinsu/YongPDF)
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+---
+
+ADDITIONAL ATTRIBUTIONS & LICENSES:
+
+1. PyMuPDF (fitz): Distributed under GNU GPL v3.0.
+   Copyright (c) 2024 Artifex Software, Inc.
+
+2. Ghostscript: Distributed under GNU AGPL v3.0.
+   This distribution includes Ghostscript binaries for PDF compression.
+   Source code available at: https://www.ghostscript.com/
+
+3. PySide6 (Qt for Python): Distributed under GNU LGPL v3.0.
+   Copyright (c) 2024 The Qt Company Ltd.
+
+4. Pillow (PIL): Distributed under the HPND License.
+   Copyright (c) 2024 Jeffrey A. Clark (python-pillow).
+
+5. fontTools: Distributed under the MIT License.
+   Copyright (c) 2024 fontTools developers.

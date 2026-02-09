@@ -28,7 +28,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtCore import (
     Qt, Signal, QPoint, QPointF, QTimer, QSize, QPropertyAnimation, 
-    QRect, QEasingCurve, QObject, QBuffer, QByteArray, QSettings, QVariantAnimation
+    QRect, QRectF, QEasingCurve, QObject, QBuffer, QByteArray, QSettings, QVariantAnimation
 )
 import fitz  # PyMuPDF
 from fontTools.ttLib import TTFont
@@ -52,9 +52,15 @@ print = _orig_print  # type: ignore
 
 # --- Splash utilities ----------------------------------------------------
 
+def _rect_to_tuple(rect):
+    """fitz.Rect를 (x0, y0, x1, y1) 튜플로 변환"""
+    if rect is None: return None
+    try:
+        return (float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1))
+    except Exception: return None
+
 def _resolve_static_path(*relative_parts: str) -> str:
     """Locate a static resource in both source and frozen bundles."""
-
     candidates: list[str] = []
     try:
         module_dir = os.path.dirname(os.path.abspath(__file__))
@@ -114,51 +120,54 @@ def _build_text_splash_pixmap() -> Optional[QPixmap]:
     pixmap.fill(QColor('#080b10'))
 
     painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
 
-    logo_path = _resolve_static_path('YongPDF_text_img.png')
-    logo = QPixmap(logo_path)
-    if not logo.isNull():
-        target_size = min(int(220 * 0.8), width - 96)
-        scaled = logo.scaled(
-            target_size,
-            target_size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
+        logo_path = _resolve_static_path('YongPDF_text_img.png')
+        if logo_path:
+            logo = QPixmap(logo_path)
+            if not logo.isNull():
+                target_size = min(int(220 * 0.8), width - 96)
+                scaled = logo.scaled(
+                    target_size,
+                    target_size,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                logo_x = (width - scaled.width()) // 2
+                painter.drawPixmap(logo_x, 32, scaled)
+
+        painter.setPen(QColor('#f4f4f4'))
+        title_font = QFont('Arial', 17)
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.drawText(QRect(0, 232, width, 28), Qt.AlignmentFlag.AlignHCenter, 'YongPDF')
+
+        painter.setPen(QColor('#c0c7d1'))
+        subtitle_font = QFont('Arial', 8)
+        painter.setFont(subtitle_font)
+        lines = [
+            '정교한 PDF 텍스트 편집기',
+            '개발: Hwang Jinsu · 이메일: iiish@hanmail.net',
+            '본 소프트웨어는 개인용/업무용 무료 사용 가능합니다.'
+        ]
+        top = 268
+        for line in lines:
+            painter.drawText(QRect(0, top, width, 18), Qt.AlignmentFlag.AlignHCenter, line)
+            top += 21
+
+        painter.setPen(QColor('#8a94a3'))
+        copyright_font = QFont('Arial', 7)
+        painter.setFont(copyright_font)
+        painter.drawText(
+            QRect(0, height - 30, width, 18),
+            Qt.AlignmentFlag.AlignHCenter,
+            '© 2025 YongPDF · Hwang Jinsu. All rights reserved.'
         )
-        logo_x = (width - scaled.width()) // 2
-        painter.drawPixmap(logo_x, 32, scaled)
-
-    painter.setPen(QColor('#f4f4f4'))
-    title_font = QFont('Arial', 17)
-    title_font.setBold(True)
-    painter.setFont(title_font)
-    painter.drawText(QRect(0, 232, width, 28), Qt.AlignmentFlag.AlignHCenter, 'YongPDF')
-
-    painter.setPen(QColor('#c0c7d1'))
-    subtitle_font = QFont('Arial', 8)
-    painter.setFont(subtitle_font)
-    lines = [
-        '정교한 PDF 텍스트 편집기',
-        '개발: Hwang Jinsu · 이메일: iiish@hanmail.net',
-        '본 소프트웨어는 개인용/업무용 무료 사용 가능합니다.'
-    ]
-    top = 268
-    for line in lines:
-        painter.drawText(QRect(0, top, width, 18), Qt.AlignmentFlag.AlignHCenter, line)
-        top += 21
-
-    painter.setPen(QColor('#8a94a3'))
-    copyright_font = QFont('Arial', 7)
-    painter.setFont(copyright_font)
-    painter.drawText(
-        QRect(0, height - 30, width, 18),
-        Qt.AlignmentFlag.AlignHCenter,
-        '© 2025 YongPDF · Hwang Jinsu. All rights reserved.'
-    )
-
-    painter.end()
+    finally:
+        painter.end()
+    
     return pixmap
 
 
@@ -373,31 +382,54 @@ class SystemFontManager:
                 log_path = font_dir.encode('utf-8', 'ignore').decode('ascii', 'ignore')
             print(f"  [{marker}] {log_path}")
         
-        # 각 디렉토리에서 폰트 파일 수집
-        total_fonts_found = 0
+        # 각 디렉토리에서 모든 폰트 파일 수집
+        all_font_files = []
         for dir_path in font_dirs:
             if os.path.exists(dir_path):
                 try:
-                    fonts_in_dir = 0
                     for root, dirs, files in os.walk(dir_path):
                         for filename in files:
                             if filename.lower().endswith(('.ttf', '.otf', '.ttc')):
-                                full_path = os.path.join(root, filename)
-                                try:
-                                    font_names = self._get_all_names_from_font(full_path)
-                                    for name in font_names:
-                                        if name and name not in font_map:
-                                            font_map[name] = full_path
-                                            fonts_in_dir += 1
-                                except Exception as e:
-                                    print(f"Error processing font {full_path}: {e}")
-                    total_fonts_found += fonts_in_dir
-                    if fonts_in_dir > 0:
-                        print(f"    Found {fonts_in_dir} fonts in {dir_path}")
+                                all_font_files.append(os.path.join(root, filename))
                 except (OSError, PermissionError) as e:
                     print(f"Warning: Could not access directory {dir_path}: {e}")
         
-        print(f"Total fonts loaded: {total_fonts_found}")
+        # 폰트 파일 우선순위 정렬 (Regular/Normal 우선 처리하여 Family Name 선점 방지)
+        def font_priority_key(path):
+            name = os.path.basename(path).lower()
+            score = 0
+            # Bold 관련 키워드 (높을수록 나중에 처리)
+            if any(k in name for k in ['bold', 'black', 'heavy', 'extra', '-b', '_b', 'bd.']): score += 10
+            # Italic 관련 키워드
+            if any(k in name for k in ['italic', 'oblique', '-i', '_i', 'it.']): score += 5
+            # Light/Thin 관련 키워드
+            if any(k in name for k in ['light', 'thin', 'extra', 'lt.']): score += 2
+            # Regular/Normal 명시된 경우 가중치 감소
+            if any(k in name for k in ['regular', 'normal', 'medium', 'reg.']): score = 0
+            return score
+            
+        all_font_files.sort(key=font_priority_key)
+        
+        # 정렬된 순서대로 폰트 맵 구성 (Family Name은 먼저 처리된 Regular가 선점)
+        total_fonts_found = 0
+        for full_path in all_font_files:
+            try:
+                font_names = self._get_all_names_from_font(full_path)
+                added_any = False
+                for name in font_names:
+                    if name and name not in font_map:
+                        font_map[name] = full_path
+                        added_any = True
+                if added_any:
+                    total_fonts_found += 1
+            except Exception as e:
+                # 에러 로그 인코딩 방어
+                try:
+                    print(f"Error processing font {full_path}: {e}")
+                except:
+                    pass
+        
+        print(f"Total unique font files indexed: {total_fonts_found}")
         return font_map
 
     def _register_font_variation_entry(self, variations: dict[str, str], font_name: str) -> None:
@@ -502,17 +534,18 @@ class SystemFontManager:
         if key in self._unmatched_fonts_warned:
             return
         self._unmatched_fonts_warned.add(key)
-        message = (
-            "PDF에서 사용된 폰트 '{font}'에 대응하는 시스템 폰트를 찾을 수 없습니다.\n"
-            "환경설정 또는 폰트 매니저에서 수동으로 매칭을 진행해 주세요."
-        ).format(font=pdf_font_name or 'Unknown')
+        
+        # 다국어 번역 적용
+        title = MainWindow.t('msg_unmatched_font_title')
+        body = MainWindow.t('msg_unmatched_font_body', font=pdf_font_name or 'Unknown')
+        
         try:
             if QApplication.instance():
-                QMessageBox.warning(None, "폰트 매칭 필요", message)
+                QMessageBox.warning(None, title, body)
             else:
-                print(f"Warning: {message}")
+                print(f"Warning: [{title}] {body}")
         except Exception:
-            print(f"Warning: {message}")
+            print(f"Warning: [{title}] {body}")
 
     def _preferred_family_from_path(self, font_path):
         try:
@@ -776,6 +809,9 @@ class PdfFontExtractor:
 class TextEditorDialog(QDialog):
     def __init__(self, span_info, pdf_fonts=None, parent=None):
         super().__init__(parent)
+        self.main_window = parent if isinstance(parent, QMainWindow) else None
+        self.overlay_key = (span_info.get('page_num'), span_info.get('overlay_id')) if span_info.get('overlay_id') is not None else None
+        
         if parent and hasattr(parent, 't'):
             self._t = parent.t  # type: ignore[assignment]
         else:
@@ -833,6 +869,7 @@ class TextEditorDialog(QDialog):
         # 원본 폰트 정보 저장
         self.original_font_info = {
             'font': span_info.get('font', ''),
+            'pdf_font_name': span_info.get('pdf_font_name') or span_info.get('font', ''),
             'size': span_info.get('size', 12),
             'flags': span_info.get('flags', 0)
         }
@@ -999,7 +1036,7 @@ class TextEditorDialog(QDialog):
         self.bold_weight_spin = QSpinBox()
         self.bold_weight_spin.setRange(100, 500)
         self.bold_weight_spin.setSuffix('%')
-        self.bold_weight_spin.setValue(int(span_info.get('synth_bold_weight', 150)))
+        self.bold_weight_spin.setValue(int(span_info.get('synth_bold_weight', 120)))
         self.bold_weight_spin.setFixedWidth(70)
         self.bold_weight_spin.setEnabled(self.bold_checkbox.isChecked())
         style_layout.addWidget(self.bold_weight_spin)
@@ -1009,20 +1046,56 @@ class TextEditorDialog(QDialog):
         style_layout.addSpacing(15)
         
         style_layout.addWidget(self.underline_checkbox)
-        # 밑줄 굵기 (Underline 체크 시 활성화)
-        self.underline_weight_spin = QSpinBox()
-        self.underline_weight_spin.setRange(1, 5)
-        self.underline_weight_spin.setValue(int(span_info.get('underline_weight', 1)))
-        self.underline_weight_spin.setFixedWidth(50)
+        # 밑줄 굵기 (Underline 체크 시 활성화) - 디폴트 0.6으로 강제 설정
+        self.underline_weight_spin = QDoubleSpinBox()
+        self.underline_weight_spin.setRange(0.1, 2.0)
+        self.underline_weight_spin.setSingleStep(0.1)
+        self.underline_weight_spin.setDecimals(1)
+        # span_info에 값이 있더라도 신규 편집 시에는 0.6 선호 (사용자 피드백 반영)
+        u_weight = float(span_info.get('underline_weight', 0.6))
+        if not span_info.get('is_overlay'): u_weight = 0.6
+        self.underline_weight_spin.setValue(u_weight)
+        self.underline_weight_spin.setFixedWidth(60)
         self.underline_weight_spin.setEnabled(self.underline_checkbox.isChecked())
         style_layout.addWidget(self.underline_weight_spin)
+        
+        # 밑줄 간격 (Underline 체크 시 활성화)
+        self.underline_offset_spin = QDoubleSpinBox()
+        self.underline_offset_spin.setRange(-5.0, 10.0)
+        self.underline_offset_spin.setSingleStep(0.1)
+        self.underline_offset_spin.setDecimals(1)
+        self.underline_offset_spin.setValue(float(span_info.get('underline_offset', 1.5)))
+        self.underline_offset_spin.setFixedWidth(60)
+        self.underline_offset_spin.setEnabled(self.underline_checkbox.isChecked())
+        style_layout.addWidget(self.underline_offset_spin)
         
         style_layout.addStretch()
         form_layout.addRow(self._t('style_label') + ':', style_layout)
         
-        # 체크박스 상태에 따른 활성화/비활성화 연결
-        self.bold_checkbox.toggled.connect(self.bold_weight_spin.setEnabled)
-        self.underline_checkbox.toggled.connect(self.underline_weight_spin.setEnabled)
+        # 체크박스 상태에 따른 활성화/비활성화 및 스타일(회색 처리) 연결
+        def update_bold_style(checked):
+            self.bold_weight_spin.setEnabled(checked)
+            if checked:
+                self.bold_weight_spin.setStyleSheet("")
+            else:
+                self.bold_weight_spin.setStyleSheet("background-color: #f0f0f0; color: #a0a0a0;")
+        
+        def update_underline_style(checked):
+            self.underline_weight_spin.setEnabled(checked)
+            self.underline_offset_spin.setEnabled(checked)
+            if checked:
+                self.underline_weight_spin.setStyleSheet("")
+                self.underline_offset_spin.setStyleSheet("")
+            else:
+                self.underline_weight_spin.setStyleSheet("background-color: #f0f0f0; color: #a0a0a0;")
+                self.underline_offset_spin.setStyleSheet("background-color: #f0f0f0; color: #a0a0a0;")
+
+        self.bold_checkbox.toggled.connect(update_bold_style)
+        self.underline_checkbox.toggled.connect(update_underline_style)
+        
+        # 초기 스타일 적용
+        update_bold_style(self.bold_checkbox.isChecked())
+        update_underline_style(self.underline_checkbox.isChecked())
 
         # HWP 공백 보정 옵션
         self.hwp_space_checkbox = QCheckBox("HWP(아래아한글) 공백 너비 적용")
@@ -1038,6 +1111,14 @@ class TextEditorDialog(QDialog):
             
         form_layout.addRow(self.hwp_space_checkbox)
 
+        # 패치 없이 텍스트만 생성 옵션
+        self.text_only_checkbox = QCheckBox(self._t('patch_text_only_label'))
+        if 'text_only_mode' in span_info:
+            self.text_only_checkbox.setChecked(bool(span_info['text_only_mode']))
+        else:
+            self.text_only_checkbox.setChecked(False)
+        form_layout.addRow(self.text_only_checkbox)
+
         # 이미지로 처리 옵션
         self.force_image_checkbox = QCheckBox(self._t('force_image_label'))
         form_layout.addRow(self.force_image_checkbox)
@@ -1048,6 +1129,10 @@ class TextEditorDialog(QDialog):
         self.button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        # 시스템 기본 언어 대신 앱 설정 언어로 텍스트 강제 설정
+        self.button_box.button(QDialogButtonBox.StandardButton.Ok).setText(self._t('btn_yes'))
+        self.button_box.button(QDialogButtonBox.StandardButton.Cancel).setText(self._t('btn_cancel'))
+        
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
         # OK/Cancel 버튼 크기 동일/확대
@@ -1066,26 +1151,32 @@ class TextEditorDialog(QDialog):
         patch_layout.addWidget(QLabel(self._t('patch_color_label') + ':'), 0, 0)
         patch_layout.addLayout(patch_color_row, 0, 1)
 
-        def _extract_margin_ratio(source) -> tuple[float, float]:
+        def _extract_margin_ratio(source) -> tuple[float, float, float, float]:
             try:
                 if isinstance(source, dict):
-                    return float(source.get('horizontal', 0.0)), float(source.get('vertical', 0.0))
-                if isinstance(source, (tuple, list)) and len(source) >= 2:
-                    return float(source[0]), float(source[1])
+                    return (float(source.get('left', 0.0)), float(source.get('right', 0.0)),
+                            float(source.get('top', 0.0)), float(source.get('bottom', 0.0)))
+                if isinstance(source, (tuple, list)):
+                    if len(source) == 4:
+                        return (float(source[0]), float(source[1]), float(source[2]), float(source[3]))
+                    elif len(source) >= 2:
+                        return (float(source[0]), float(source[0]), float(source[1]), float(source[1]))
                 value = float(source)
-                return value, value
+                return value, value, value, value
             except Exception:
-                return 0.0, 0.0
+                return 0.0, 0.0, 0.0, 0.0
 
-        base_margin_h = 0.0
-        base_margin_v = 0.0
-        if 'patch_margin_h' in span_info or 'patch_margin_v' in span_info:
-            base_margin_h = float(span_info.get('patch_margin_h', 0.0) or 0.0)
-            base_margin_v = float(span_info.get('patch_margin_v', 0.0) or 0.0)
+        m_l, m_r, m_t, m_b = 0.0, 0.0, 0.0, 0.0
+        # 개별 속성 우선
+        if all(k in span_info for k in ['patch_margin_l', 'patch_margin_r', 'patch_margin_t', 'patch_margin_b']):
+            m_l = float(span_info['patch_margin_l'])
+            m_r = float(span_info['patch_margin_r'])
+            m_t = float(span_info['patch_margin_t'])
+            m_b = float(span_info['patch_margin_b'])
         elif 'patch_margin' in span_info:
-            base_margin_h, base_margin_v = _extract_margin_ratio(span_info.get('patch_margin'))
+            m_l, m_r, m_t, m_b = _extract_margin_ratio(span_info.get('patch_margin'))
         elif hasattr(parent, 'patch_margin'):
-            base_margin_h, base_margin_v = _extract_margin_ratio(getattr(parent, 'patch_margin'))
+            m_l, m_r, m_t, m_b = _extract_margin_ratio(getattr(parent, 'patch_margin'))
 
         def _create_margin_spin(initial_value: float) -> QDoubleSpinBox:
             spin = QDoubleSpinBox()
@@ -1094,42 +1185,74 @@ class TextEditorDialog(QDialog):
             spin.setSingleStep(1.0)
             spin.setSuffix('%')
             spin.setValue(max(-50.0, min(50.0, initial_value * 100.0)))
+            spin.setFixedWidth(140) # 너비 2배 확대 (70 -> 140)
             return spin
 
-        patch_layout.addWidget(QLabel(self._t('patch_margin_label_horizontal') + ':'), 1, 0)
-        self.patch_margin_spin_h = _create_margin_spin(base_margin_h)
-        patch_layout.addWidget(self.patch_margin_spin_h, 1, 1)
+        patch_layout.addWidget(QLabel(self._t('patch_margin_label_left') + ':'), 1, 0)
+        self.patch_margin_spin_l = _create_margin_spin(m_l)
+        patch_layout.addWidget(self.patch_margin_spin_l, 1, 1)
 
-        patch_layout.addWidget(QLabel(self._t('patch_margin_label_vertical') + ':'), 2, 0)
-        self.patch_margin_spin_v = _create_margin_spin(base_margin_v)
-        patch_layout.addWidget(self.patch_margin_spin_v, 2, 1)
+        patch_layout.addWidget(QLabel(self._t('patch_margin_label_right') + ':'), 1, 2)
+        self.patch_margin_spin_r = _create_margin_spin(m_r)
+        patch_layout.addWidget(self.patch_margin_spin_r, 1, 3)
 
-        self.patch_margin_spin_h.valueChanged.connect(lambda _: self._on_patch_margin_changed())
-        self.patch_margin_spin_v.valueChanged.connect(lambda _: self._on_patch_margin_changed())
+        patch_layout.addWidget(QLabel(self._t('patch_margin_label_top') + ':'), 2, 0)
+        self.patch_margin_spin_t = _create_margin_spin(m_t)
+        patch_layout.addWidget(self.patch_margin_spin_t, 2, 1)
 
+        patch_layout.addWidget(QLabel(self._t('patch_margin_label_bottom') + ':'), 2, 2)
+        self.patch_margin_spin_b = _create_margin_spin(m_b)
+        patch_layout.addWidget(self.patch_margin_spin_b, 2, 3)
+
+        # 힌트
         hint_label = QLabel(self._t('patch_margin_hint'))
         hint_label.setWordWrap(True)
         hint_label.setStyleSheet("color: #666666; font-size: 11px;")
-        patch_layout.addWidget(hint_label, 3, 0, 1, 2)
+        patch_layout.addWidget(hint_label, 3, 0, 1, 4)
         patch_group.setLayout(patch_layout)
         
-        # 메인 레이아웃
+        # 메인 레이아웃 구성
         main_layout = QVBoxLayout()
-        main_layout.addWidget(self.font_info_group)  # 원본 폰트 정보 추가
+        main_layout.addWidget(self.font_info_group)
         main_layout.addLayout(form_layout)
-        main_layout.addWidget(patch_group)  # 패치 설정 추가
+        main_layout.addWidget(patch_group)
         
-        # 폰트 관련 버튼 레이아웃
         font_button_layout = QHBoxLayout()
         font_button_layout.addWidget(self.install_font_button)
-        
         main_layout.addLayout(font_button_layout)
         main_layout.addWidget(self.button_box)
         self.setLayout(main_layout)
         
-        # 위치 조정 관련 변수
+        # 실시간 미리보기 시그널 연결
+        self.text_edit.textChanged.connect(self._on_values_changed)
+        self.font_combo.currentTextChanged.connect(self._on_values_changed)
+        self.size_spinbox.valueChanged.connect(self._on_values_changed)
+        self.stretch_spin.valueChanged.connect(self._on_values_changed)
+        self.tracking_spin.valueChanged.connect(self._on_values_changed)
+        self.bold_checkbox.toggled.connect(self._on_values_changed)
+        self.italic_checkbox.toggled.connect(self._on_values_changed)
+        self.underline_checkbox.toggled.connect(self._on_values_changed)
+        self.bold_weight_spin.valueChanged.connect(self._on_values_changed)
+        self.underline_weight_spin.valueChanged.connect(self._on_values_changed)
+        self.underline_offset_spin.valueChanged.connect(self._on_values_changed)
+        self.patch_color_pick_checkbox.toggled.connect(self._on_values_changed)
+        self.hwp_space_checkbox.toggled.connect(self._on_values_changed)
+        self.force_image_checkbox.toggled.connect(self._on_values_changed)
+        
+        for spin in [self.patch_margin_spin_l, self.patch_margin_spin_r, self.patch_margin_spin_t, self.patch_margin_spin_b]:
+            spin.valueChanged.connect(self._on_values_changed)
+
         self.position_adjustment_requested = False
-        self.overlay_key = (span_info.get('page_num'), span_info.get('overlay_id')) if span_info.get('overlay_id') is not None else None
+
+    def _on_values_changed(self):
+        """설정값이 변경될 때마다 부모 창에 실시간 미리보기 요청"""
+        parent = self.parent()
+        if not parent or not hasattr(parent, 'preview_edit_changes'):
+            return
+        
+        vals = self.get_values()
+        print(f"[Dialog] Values changed: text='{vals.get('text')}', size={vals.get('size')}")
+        parent.preview_edit_changes(self.overlay_key, vals)
 
     def _normalize_font_size(self, value):
         try:
@@ -1139,22 +1262,15 @@ class TextEditorDialog(QDialog):
         return round(val, 2)
 
     def _on_patch_margin_changed(self):
-        parent = self.parent()
-        if not parent or not hasattr(parent, 'preview_patch_margin'):
-            return
-        try:
-            horizontal = self.patch_margin_spin_h.value() / 100.0
-            vertical = self.patch_margin_spin_v.value() / 100.0
-        except Exception:
-            horizontal = vertical = 0.0
-        parent.preview_patch_margin(self.overlay_key, horizontal, vertical)
+        # _on_values_changed로 통합됨
+        self._on_values_changed()
     
     def _on_clear_text(self):
         self.text_edit.clear()
         self.text_edit.setFocus()
 
     def create_original_font_info_section(self):
-        """원본 폰트 정보 섹션 생성"""
+        """원본 폰트 정보 섹션 생성 - 신뢰도 향상을 위해 유사 폰트 안내 강화"""
         from PySide6.QtWidgets import QGroupBox, QGridLayout
         
         # 원본 폰트 정보 그룹박스
@@ -1162,11 +1278,14 @@ class TextEditorDialog(QDialog):
         font_info_layout = QGridLayout()
         
         # 폰트명 정보
-        original_font = self.original_font_info['font']
+        original_font = self.original_font_info.get('pdf_font_name') or self.original_font_info.get('font', 'Unknown')
         clean_font_name = original_font.split('+')[-1] if '+' in original_font else original_font
         
         font_info_layout.addWidget(QLabel(self._t('original_font_label') + ':'), 0, 0)
-        font_info_layout.addWidget(QLabel(f"<b>{original_font}</b>"), 0, 1)
+        # 원본 폰트명을 강조하여 표시
+        orig_label = QLabel(f"<b>{original_font}</b>")
+        orig_label.setToolTip(self._t('original_font_tooltip', font=original_font))
+        font_info_layout.addWidget(orig_label, 0, 1)
 
         if '+' in original_font:
             font_info_layout.addWidget(QLabel(self._t('font_alias_label') + ':'), 1, 0)
@@ -1188,8 +1307,8 @@ class TextEditorDialog(QDialog):
         
         # 구분선 추가
         line = QFrame()
-        line.setFrameShape(QFrame.HLine)
-        line.setFrameShadow(QFrame.Sunken)
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
         font_info_layout.addWidget(line, 4, 0, 1, 2)
         
         # === 원본 폰트 설치 상태 확인 ===
@@ -1217,30 +1336,39 @@ class TextEditorDialog(QDialog):
 
         else:
             # 원본 폰트가 설치되어 있지 않음
-            font_info_layout.addWidget(QLabel(self._t('not_installed_label')), 5, 1)
+            not_inst_label = QLabel(f"<span style='color: #d9534f; font-weight: bold;'>{self._t('not_installed_label')}</span>")
+            font_info_layout.addWidget(not_inst_label, 5, 1)
 
-            # 시스템 매칭 결과 (추측 자료)
+            # 시스템 매칭 결과 (유사 폰트 안내)
             font_info_layout.addWidget(QLabel(self._t('recommended_font_label') + ':'), 6, 0)
             matched_font = font_manager.find_best_font_match(clean_font_name)
 
             if matched_font:
-                font_info_layout.addWidget(QLabel(f"<i style='color: #666;'>→ {matched_font}</i>"), 6, 1)
+                # [해결] 폰트명이 템플릿에 올바르게 적용되도록 matched_font 전달
+                similar_text = self._t('similar_font_applied_label', font=matched_font)
+                similar_label = QLabel(f"<i style='color: #f0ad4e;'>→ {similar_text}</i>")
+                similar_label.setToolTip(self._t('similar_font_tooltip'))
+                font_info_layout.addWidget(similar_label, 6, 1)
 
                 # 폰트 설치 안내 링크 추가
                 font_info_layout.addWidget(QLabel(self._t('install_method_label') + ':'), 7, 0)
                 link_text = self._t('font_install_link_text', font=clean_font_name)
-                install_guide_label = QLabel(f"<a href='install_guide' style='color: blue;'>{link_text}</a>")
+                install_guide_label = QLabel(f"<a href='install_guide' style='color: #337ab7; text-decoration: underline;'>{link_text}</a>")
                 install_guide_label.linkActivated.connect(lambda: self.show_font_install_guide_for_font(clean_font_name))
+                install_guide_label.setCursor(Qt.CursorShape.PointingHandCursor)
                 font_info_layout.addWidget(install_guide_label, 7, 1)
             else:
                 font_info_layout.addWidget(QLabel(self._t('no_alternative_label')), 6, 1)
-
+                
                 # 폰트 설치 안내
                 font_info_layout.addWidget(QLabel(self._t('install_method_label') + ':'), 7, 0)
                 link_text = self._t('font_install_link_text', font=clean_font_name)
-                install_guide_label = QLabel(f"<a href='install_guide' style='color: blue;'>{link_text}</a>")
+                install_guide_label = QLabel(f"<a href='install_guide' style='color: #337ab7; text-decoration: underline;'>{link_text}</a>")
                 install_guide_label.linkActivated.connect(lambda: self.show_font_install_guide_for_font(clean_font_name))
+                install_guide_label.setCursor(Qt.CursorShape.PointingHandCursor)
                 font_info_layout.addWidget(install_guide_label, 7, 1)
+        
+        self.font_info_group.setLayout(font_info_layout)
         
         self.font_info_group.setLayout(font_info_layout)
     
@@ -1249,46 +1377,47 @@ class TextEditorDialog(QDialog):
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout
         import sys
         import webbrowser
+        from urllib.parse import quote_plus
+        
+        # 폰트명 정제
+        clean_name = font_name.split('+')[-1] if '+' in font_name else font_name
         
         dialog = QDialog(self)
-        dialog.setWindowTitle(self._t('font_install_dialog_title', font=font_name))
-        dialog.setMinimumSize(500, 400)
+        dialog.setWindowTitle(self._t('font_install_title', font=clean_name))
+        dialog.setMinimumSize(500, 450)
 
         layout = QVBoxLayout()
 
         guide_text = QTextEdit()
         guide_text.setReadOnly(True)
 
-        sections = [self._t('font_install_intro_html', font=font_name)]
-        if sys.platform == "win32":
-            sections.append(self._t('font_install_windows_html'))
-        elif sys.platform == "darwin":
-            sections.append(self._t('font_install_mac_html'))
-        else:
-            sections.append(self._t('font_install_linux_html'))
-        sections.append(self._t('font_install_warning_html'))
-        sections.append(self._t('font_install_sites_html'))
-        guide_text.setHtml(''.join(sections))
+        # 폰트 굵기/스타일 어미 제거 (Bold, Medium, Light 등)하여 검색 성공률 향상
+        # 공백, 하이픈, 언더바 뒤에 오는 어미들을 포괄적으로 제거
+        search_name = re.sub(r'[\s\-_]*(Bold|Italic|Medium|Light|Regular|Thin|Black|Extra|Heavy|Semi|Demi|Static|Condensed|Narrow|ExtraBold|ExtraLight|UltraLight|SemiBold|DemiBold)+$', '', clean_name, flags=re.IGNORECASE).strip()
+        if not search_name:
+            search_name = clean_name
+            
+        html = self._t('font_install_message_html', font=clean_name)
+        guide_text.setHtml(html)
         layout.addWidget(guide_text)
 
         button_layout = QHBoxLayout()
-        try:
-            from urllib.parse import quote_plus
-            suffix = self._t('font_install_google_query_suffix')
-            query = quote_plus(f"{font_name} {suffix}")
-        except Exception:
-            suffix = self._t('font_install_google_query_suffix')
-            query = f"{font_name} {suffix}"
+        
+        query = quote_plus(search_name)
+        google_query = quote_plus(f"{search_name} ttf")
+        
+        google_font_btn = QPushButton(self._t('font_search_google'))
+        google_font_btn.setMinimumHeight(35)
+        google_font_btn.clicked.connect(lambda: webbrowser.open(f"https://www.google.com/search?q={google_query}"))
+        button_layout.addWidget(google_font_btn)
 
-        google_button = QPushButton(self._t('font_install_google_button', font=font_name, suffix=suffix))
-        google_button.clicked.connect(lambda: webbrowser.open(f"https://www.google.com/search?q={query}"))
-        button_layout.addWidget(google_button)
-
-        noonnu_button = QPushButton(self._t('font_install_noonnu_button'))
-        noonnu_button.clicked.connect(lambda: webbrowser.open("https://noonnu.cc/"))
-        button_layout.addWidget(noonnu_button)
+        noonnu_btn = QPushButton(self._t('font_search_noonnu'))
+        noonnu_btn.setMinimumHeight(35)
+        noonnu_btn.clicked.connect(lambda: webbrowser.open(f"https://noonnu.cc/en/index?search={query}"))
+        button_layout.addWidget(noonnu_btn)
 
         close_button = QPushButton(self._t('button_close'))
+        close_button.setMinimumHeight(35)
         close_button.clicked.connect(dialog.accept)
         button_layout.addWidget(close_button)
 
@@ -1297,59 +1426,10 @@ class TextEditorDialog(QDialog):
         dialog.exec()
 
     def show_font_install_guide(self):
-        """폰트 설치 안내 대화상자"""
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout
-        import sys
-        import webbrowser
-        
-        dialog = QDialog(self)
-        dialog.setWindowTitle(self._t('font_install_general_title'))
-        dialog.setMinimumSize(500, 400)
+        """폰트 설치 안내 대화상자 (일반)"""
+        original_font = self.original_font_info.get('pdf_font_name') or self.original_font_info.get('font', 'Unknown')
+        self.show_font_install_guide_for_font(original_font)
 
-        layout = QVBoxLayout()
-
-        guide_text = QTextEdit()
-        guide_text.setReadOnly(True)
-
-        original_font = self.original_font_info['font']
-        clean_font_name = original_font.split('+')[-1] if '+' in original_font else original_font
-
-        sections = [self._t('font_install_general_intro_html', original=original_font, clean=clean_font_name)]
-        if sys.platform == "win32":
-            sections.append(self._t('font_install_windows_html'))
-        elif sys.platform == "darwin":
-            sections.append(self._t('font_install_mac_html'))
-        else:
-            sections.append(self._t('font_install_linux_html'))
-        sections.append(self._t('font_install_warning_html'))
-        sections.append(self._t('font_install_sites_html'))
-        guide_text.setHtml(''.join(sections))
-        layout.addWidget(guide_text)
-
-        button_layout = QHBoxLayout()
-        try:
-            from urllib.parse import quote_plus
-            suffix = self._t('font_install_google_query_suffix')
-            query = quote_plus(f"{clean_font_name} {suffix}")
-        except Exception:
-            suffix = self._t('font_install_google_query_suffix')
-            query = f"{clean_font_name} {suffix}"
-
-        google_button = QPushButton(self._t('font_install_google_button', font=clean_font_name, suffix=suffix))
-        google_button.clicked.connect(lambda: webbrowser.open(f"https://www.google.com/search?q={query}"))
-        button_layout.addWidget(google_button)
-
-        noonnu_button = QPushButton(self._t('font_install_noonnu_button'))
-        noonnu_button.clicked.connect(lambda: webbrowser.open("https://noonnu.cc/"))
-        button_layout.addWidget(noonnu_button)
-
-        close_button = QPushButton(self._t('button_close'))
-        close_button.clicked.connect(dialog.accept)
-        button_layout.addWidget(close_button)
-
-        layout.addLayout(button_layout)
-        dialog.setLayout(layout)
-        dialog.exec()
     
     def _convert_color_from_int(self, color_int):
         """PDF 색상 정수를 QColor로 변환"""
@@ -1411,18 +1491,24 @@ class TextEditorDialog(QDialog):
             "underline": self.underline_checkbox.isChecked(),
             "synth_bold_weight": self.bold_weight_spin.value(),
             "underline_weight": self.underline_weight_spin.value(),
+            "underline_offset": self.underline_offset_spin.value(),
             "color": self.text_color,
             "use_custom_patch_color": self.patch_color_pick_checkbox.isChecked(),
             "patch_color": self.patch_color_button_color,
             "force_image": self.force_image_checkbox.isChecked(),
             "hwp_space_mode": self.hwp_space_checkbox.isChecked(),
+            "text_only_mode": self.text_only_checkbox.isChecked(),
             "position_adjustment_requested": getattr(self, 'position_adjustment_requested', False),
-            "patch_margin_h": self.patch_margin_spin_h.value() / 100.0 if hasattr(self, 'patch_margin_spin_h') else None,
-            "patch_margin_v": self.patch_margin_spin_v.value() / 100.0 if hasattr(self, 'patch_margin_spin_v') else None,
+            "patch_margin_l": self.patch_margin_spin_l.value() / 100.0 if hasattr(self, 'patch_margin_spin_l') else 0.0,
+            "patch_margin_r": self.patch_margin_spin_r.value() / 100.0 if hasattr(self, 'patch_margin_spin_r') else 0.0,
+            "patch_margin_t": self.patch_margin_spin_t.value() / 100.0 if hasattr(self, 'patch_margin_spin_t') else 0.0,
+            "patch_margin_b": self.patch_margin_spin_b.value() / 100.0 if hasattr(self, 'patch_margin_spin_b') else 0.0,
             "patch_margin": (
-                self.patch_margin_spin_h.value() / 100.0,
-                self.patch_margin_spin_v.value() / 100.0,
-            ) if hasattr(self, 'patch_margin_spin_h') and hasattr(self, 'patch_margin_spin_v') else None
+                self.patch_margin_spin_l.value() / 100.0 if hasattr(self, 'patch_margin_spin_l') else 0.0,
+                self.patch_margin_spin_r.value() / 100.0 if hasattr(self, 'patch_margin_spin_r') else 0.0,
+                self.patch_margin_spin_t.value() / 100.0 if hasattr(self, 'patch_margin_spin_t') else 0.0,
+                self.patch_margin_spin_b.value() / 100.0 if hasattr(self, 'patch_margin_spin_b') else 0.0
+            )
         }
 
 class TextOverlay:
@@ -1445,16 +1531,22 @@ class TextOverlay:
         content_bbox=None,
         preview_height_ratio=None,
         hwp_space_mode=False,
+        text_only_mode=False,
         synth_bold_weight=120,
-        underline_weight=1
+        underline_weight=0.6,
+        underline_offset=1.5,
+        origin=None,
+        pdf_font_name=None
     ):
         self.text = text
         self.font = font  
+        self.pdf_font_name = pdf_font_name or font # 원본 PDF 폰트명 보존
         self.size = size
         self.color = color
         self.bbox = bbox  # fitz.Rect 객체
         self.page_num = page_num
         self.flags = flags  # 볼드, 이탤릭 등 스타일 플래그
+        self.origin = origin # 베이스라인 좌표 (Point 또는 tuple)
         self.visible = True
         self.z_index = 0  # 레이어 순서
         self.original_bbox = source_bbox if source_bbox is not None else bbox  # 패치 원본 영역
@@ -1463,12 +1555,16 @@ class TextOverlay:
         self.stretch = 1.0  # 1.0 = 100%
         self.tracking = 0.0  # percent delta (0 = 기본)
         self.hwp_space_mode = hwp_space_mode
+        self.text_only_mode = text_only_mode
         self.font_path = None
         self.synth_bold = False
         self.synth_bold_weight = int(synth_bold_weight)
-        self.underline_weight = int(underline_weight)
-        self.patch_margin_h = 0.0
-        self.patch_margin_v = 0.0
+        self.underline_weight = float(underline_weight)
+        self.underline_offset = float(underline_offset)
+        self.patch_margin_l = 0.0
+        self.patch_margin_r = 0.0
+        self.patch_margin_t = 0.0
+        self.patch_margin_b = 0.0
         self._loaded_font_family = None
         base_ratio = self._normalize_height_ratio(height_ratio if height_ratio is not None else 1.15)
         self.height_ratio = base_ratio
@@ -1478,7 +1574,7 @@ class TextOverlay:
         preview_ratio = preview_height_ratio if preview_height_ratio is not None else base_ratio
         self.preview_height_ratio = self._normalize_height_ratio(preview_ratio)
         if ascent_ratio is None:
-            ascent_ratio = base_ratio * 0.86
+            ascent_ratio = base_ratio * 0.85
         if descent_ratio is None:
             descent_ratio = max(0.0, base_ratio - ascent_ratio)
         self.ascent_ratio = float(ascent_ratio)
@@ -1490,6 +1586,7 @@ class TextOverlay:
         self,
         text=None,
         font=None,
+        pdf_font_name=None,
         size=None,
         color=None,
         flags=None,
@@ -1499,6 +1596,7 @@ class TextOverlay:
         synth_bold=None,
         synth_bold_weight=None,
         underline_weight=None,
+        underline_offset=None,
         patch_margin=None,
         patch_margin_h=None,
         patch_margin_v=None,
@@ -1507,13 +1605,20 @@ class TextOverlay:
         descent_ratio=None,
         preview_height_ratio=None,
         hwp_space_mode=None,
+        text_only_mode=None,
         content_bbox=None,
+        origin=None,
+        new_values=None
     ):
         """텍스트 속성 업데이트 (편집창 연계)"""
         if text is not None:
             self.text = text
+        if origin is not None:
+            self.origin = origin
         if font is not None:
             self.font = font
+        if pdf_font_name is not None:
+            self.pdf_font_name = pdf_font_name
         if size is not None:
             self.size = size
         if color is not None:
@@ -1532,31 +1637,46 @@ class TextOverlay:
         if synth_bold_weight is not None:
             self.synth_bold_weight = int(synth_bold_weight)
         if underline_weight is not None:
-            self.underline_weight = int(underline_weight)
+            self.underline_weight = float(underline_weight)
+        if underline_offset is not None:
+            self.underline_offset = float(underline_offset)
         if hwp_space_mode is not None:
             self.hwp_space_mode = bool(hwp_space_mode)
+        if text_only_mode is not None:
+            self.text_only_mode = bool(text_only_mode)
+        
+        # 패치 마진 개별 업데이트 (L, R, T, B)
+        if new_values:
+            for attr in ['patch_margin_l', 'patch_margin_r', 'patch_margin_t', 'patch_margin_b']:
+                if attr in new_values:
+                    setattr(self, attr, float(new_values[attr]))
+            if 'text_only_mode' in new_values:
+                self.text_only_mode = bool(new_values['text_only_mode'])
+
         if patch_margin_h is not None or patch_margin_v is not None or patch_margin is not None:
             if patch_margin is not None and not isinstance(patch_margin, dict):
                 try:
-                    if isinstance(patch_margin, (tuple, list)) and len(patch_margin) >= 2:
-                        self.patch_margin_h = float(patch_margin[0])
-                        self.patch_margin_v = float(patch_margin[1])
+                    if isinstance(patch_margin, (tuple, list)):
+                        if len(patch_margin) == 4:
+                            self.patch_margin_l = float(patch_margin[0])
+                            self.patch_margin_r = float(patch_margin[1])
+                            self.patch_margin_t = float(patch_margin[2])
+                            self.patch_margin_b = float(patch_margin[3])
+                        elif len(patch_margin) >= 2:
+                            self.patch_margin_l = self.patch_margin_r = float(patch_margin[0])
+                            self.patch_margin_t = self.patch_margin_b = float(patch_margin[1])
                     else:
                         value = float(patch_margin)
-                        self.patch_margin_h = value
-                        self.patch_margin_v = value
+                        self.patch_margin_l = self.patch_margin_r = value
+                        self.patch_margin_t = self.patch_margin_b = value
                 except Exception:
                     pass
+            # 레거시 호환
             if patch_margin_h is not None:
-                try:
-                    self.patch_margin_h = float(patch_margin_h)
-                except Exception:
-                    pass
-        if patch_margin_v is not None:
-            try:
-                self.patch_margin_v = float(patch_margin_v)
-            except Exception:
-                pass
+                self.patch_margin_l = self.patch_margin_r = float(patch_margin_h)
+            if patch_margin_v is not None:
+                self.patch_margin_t = self.patch_margin_b = float(patch_margin_v)
+        
         if content_bbox is not None:
             try:
                 updated_content = fitz.Rect(content_bbox)
@@ -1642,306 +1762,201 @@ class TextOverlay:
         """현재 위치 기반 해시 생성"""
         return f"{self.bbox.x0:.1f},{self.bbox.y0:.1f},{self.bbox.x1:.1f},{self.bbox.y1:.1f}"
         
-    def render_to_painter(self, painter, scale_factor=1.0):
-        """QPainter를 사용하여 오버레이 렌더링 (정교한 스케일팩터 적용)"""
+    def render_to_painter(self, painter, scale_factor=1.0, offsets=(0, 0)):
+        """QPainter를 사용하여 오버레이 렌더링 (PDF 좌표계 직접 사용)
+        painter는 이미 적절한 scale과 translate가 적용된 상태여야 함.
+        """
         if not self.visible:
             return
         
-        # 합성 볼드 상태 초기화 (매번 다시 계산)
-        self.synth_bold = False
+        painter.save() # 상태 저장
         
-        print(f"TextOverlay 정교한 렌더링 시작:")
-        print(f"   스케일팩터: {scale_factor}")
-        print(f"   원본 bbox: {self.bbox}")
-        print(f"   원본 텍스트: '{self.text}', 폰트: '{self.font}', 크기: {self.size}pt")
+        try:
+            # 1. 원본 폰트 정보 및 속성 준비
+            effective_point_size = max(0.1, float(self.size))
             
-        # 1. 스케일팩터에 맞춘 bbox 계산 (화면 확대축소 대응)
-        scaled_bbox = fitz.Rect(
-            self.bbox.x0 * scale_factor,
-            self.bbox.y0 * scale_factor,
-            self.bbox.x1 * scale_factor,
-            self.bbox.y1 * scale_factor
-        )
-        print(f"   스케일된 bbox: {scaled_bbox}")
-        content_rect = getattr(self, 'content_bbox', self.bbox)
-        scaled_content = fitz.Rect(
-            content_rect.x0 * scale_factor,
-            content_rect.y0 * scale_factor,
-            content_rect.x1 * scale_factor,
-            content_rect.y1 * scale_factor
-        )
-        print(f"   콘텐츠 영역: {scaled_content}")
-        
-        # 2. 프리뷰용 픽셀 크기: 폰트 크기와 저장된 높이 비율 기반
-        pixels_per_point = max(0.01, float(scale_factor))
-        pdf_height_ratio = self._normalize_height_ratio(getattr(self, 'height_ratio', float(self.bbox.height) / max(1.0, float(self.size))))
-        preview_height_ratio = self._normalize_height_ratio(getattr(self, 'preview_height_ratio', pdf_height_ratio))
-        base_font_px = max(1.0, float(self.size) * pixels_per_point)
-        target_height = max(1.0, base_font_px * preview_height_ratio)
-        print(f"   목표 텍스트 높이(px): {target_height:.2f}px (preview_ratio={preview_height_ratio:.3f}, pdf_ratio={pdf_height_ratio:.3f})")
-        print(f"   기본 폰트 픽셀 크기: {base_font_px:.2f}px")
-        target_h_px = max(1, int(math.ceil(target_height)))
-
-        # 3. QFont 생성 및 검증 (픽셀 크기 기반)
-        font_db = QFontDatabase()
-        available_families = font_db.families()
-
-        qfont = None
-        used_style = False
-
-        def _normalize_family(name: Optional[str]) -> str:
-            if not name:
-                return ''
-            return re.sub(r'[^0-9a-z가-힣]+', '', name.lower())
-
-        if self.font_path and os.path.exists(self.font_path):
-            try:
-                if not self._loaded_font_family:
-                    font_id = QFontDatabase.addApplicationFont(self.font_path)
-                    if font_id != -1:
-                        families = QFontDatabase.applicationFontFamilies(font_id)
-                    else:
-                        families = []
-                        print(f"   경고 폰트 등록 실패: {self.font_path}")
-                    if families:
-                        requested_norm = _normalize_family(self.font)
-                        base_norm = _normalize_family(os.path.splitext(os.path.basename(self.font_path))[0])
-                        chosen_family = None
-                        for fam in families:
-                            fam_norm = _normalize_family(fam)
-                            if requested_norm and fam_norm == requested_norm:
-                                chosen_family = fam
-                                break
-                        if not chosen_family and base_norm:
-                            for fam in families:
-                                fam_norm = _normalize_family(fam)
-                                if fam_norm and (fam_norm == base_norm or fam_norm in base_norm or base_norm in fam_norm):
-                                    chosen_family = fam
-                                    break
-                        if not chosen_family:
-                            for fam in families:
-                                probe = QFont(fam)
-                                info = QFontInfo(probe)
-                                if info.exactMatch() and _normalize_family(info.family()) == _normalize_family(fam):
-                                    chosen_family = fam
-                                    break
-                        self._loaded_font_family = chosen_family or families[0]
-                if self._loaded_font_family:
-                    qfont = QFont(self._loaded_font_family)
-            except Exception as font_err:
-                print(f"   경고 폰트 파일 로드 실패: {font_err}")
-
-        if qfont is None and self._loaded_font_family:
-            qfont = QFont(self._loaded_font_family)
-
-        lookup_family = self._loaded_font_family or self.font
-
-        if qfont is None:
-            target_style = None
-            if lookup_family and font_db.hasFamily(lookup_family):
-                styles = font_db.styles(lookup_family)
-                lower_styles = {s.lower(): s for s in styles}
-                
-                # 볼드 검색 비활성화 (합성 볼드 강제 적용을 위해)
-                if self.flags & 2: # 이탤릭만 검색
-                    for keyword in ('italic', 'oblique'):
-                        for ls, original in lower_styles.items():
-                            if keyword in ls:
-                                target_style = original
-                                break
-                        if target_style:
-                            break
-
-            qfont = QFont(lookup_family or '')
-            if target_style:
+            # 2. QFont 생성 및 검증
+            qfont = None
+            if self.font_path and os.path.exists(self.font_path):
                 try:
-                    qfont = font_db.font(lookup_family, target_style, max(1, target_h_px))
-                    print(f"   스타일 적용: {lookup_family} / {target_style}")
-                    used_style = True
-                except Exception as style_err:
-                    print(f"   경고 스타일 폰트 로드 실패: {style_err}")
-                    qfont = QFont(lookup_family or '')
+                    if not self._loaded_font_family:
+                        font_id = QFontDatabase.addApplicationFont(self.font_path)
+                        if font_id != -1:
+                            families = QFontDatabase.applicationFontFamilies(font_id)
+                            if families:
+                                self._loaded_font_family = families[0]
+                    if self._loaded_font_family:
+                        qfont = QFont(self._loaded_font_family)
+                except Exception: pass
 
-        # 폰트 검증 및 대체 폰트 처리
-        actual_family = qfont.family()
-        if lookup_family and actual_family.lower() != lookup_family.lower():
-            print(f"   경고 폰트 폴백: '{lookup_family}' → '{actual_family}'")
-            
-            # 한글 폰트 대체 처리
-            korean_fonts = ['Apple SD Gothic Neo', 'AppleSDGothicNeo-Regular', 'Malgun Gothic', '맑은 고딕']
-            if any(ord(char) >= 0xAC00 and ord(char) <= 0xD7A3 for char in self.font):
-                for korean_font in korean_fonts:
-                    if korean_font in available_families:
-                        qfont = QFont(korean_font)
-                        try:
-                            qfont.setPixelSize(target_h_px)
-                        except Exception:
-                            qfont.setPointSizeF(max(1.0, float(target_h_px)))
-                        print(f"   한글 대체 폰트: '{korean_font}'")
-                        break
-        
-        # 4. 폰트 스타일 적용 (PyMuPDF 플래그 → QFont)
-        if self.flags & 16:  # 볼드
-            # 사용자 요청: 폰트 자체 볼드체 대신 합성 볼드 강제 사용
-            qfont.setBold(False)
-            qfont.setWeight(QFont.Weight.Normal)
-            qfont.setStyleStrategy(QFont.StyleStrategy.NoFontMerging)
-            self.synth_bold = True
-            print(f"   합성 볼드 강제 활성화: {qfont.family()}")
+            if qfont is None:
+                qfont = QFont(self.font or 'Arial')
 
-        if self.flags & 2:   # 이탤릭
-            qfont.setItalic(True)
-        # 장평 / 자간 적용
-        try:
-            qfont.setStretch(int(max(1, min(400, self.stretch * 100))))
-        except Exception:
-            pass
-        try:
-            # 자간이 0이 아닐 때만 적용하여 불필요한 렌더링 변화 방지
-            if abs(float(self.tracking)) > 0.01:
-                qfont.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 100.0 + float(self.tracking))
-        except Exception:
-            pass
-        
-        # 공백 너비 보정 초기화
-        try:
-            qfont.setWordSpacing(0.0)
-        except Exception:
-            pass
-        
-        # 폰트 크기 설정 (WYSIWYG를 위해 self.size를 직접 반영)
-        effective_point_size = max(0.5, float(self.size))
-        effective_pixel_size = effective_point_size * pixels_per_point
-        applied_pixel_size = int(round(effective_pixel_size))
-        
-        try:
-            qfont.setPixelSize(applied_pixel_size)
-        except Exception:
-            try:
-                qfont.setPointSizeF(effective_point_size)
-            except Exception:
-                pass
-        
-        if qfont.pixelSize() <= 0 and qfont.pointSizeF() <= 0:
-            qfont.setPixelSize(max(1, int(effective_pixel_size)))
-
-        # 5. 색상 설정
-        if isinstance(self.color, int):
-            if self.color == 0:
-                qcolor = QColor(0, 0, 0)
-            else:
-                r = (self.color >> 16) & 0xFF
-                g = (self.color >> 8) & 0xFF
-                b = self.color & 0xFF
-                qcolor = QColor(r, g, b)
-        else:
-            qcolor = QColor(0, 0, 0)
+            # 스타일 및 정밀 크기 설정 (PDF 포인트 단위)
+            is_bold_flag = bool(self.flags & 16)
+            loaded_name = (self._loaded_font_family or self.font or '').lower()
+            has_bold_variant = any(kw in loaded_name for kw in ('bold', 'black', 'heavy'))
             
-        painter.setFont(qfont)
-        painter.setPen(qcolor)
-        
-        # 6. 정교한 위치 계산 및 렌더링 (높이 우선 정합)
-        font_metrics_f = QFontMetricsF(qfont)
-        pixel_size_actual = qfont.pixelSize()
-        if pixel_size_actual <= 0:
-            pixel_size_actual = qfont.pointSizeF() * pixels_per_point
-            
-        pdf_ratio_safe = pdf_height_ratio if pdf_height_ratio > 0 else 1.15
-        ascent_ratio = float(getattr(self, 'ascent_ratio', pdf_ratio_safe * 0.86))
-        target_ascent_px = float(self.size) * ascent_ratio * pixels_per_point
-        
-        # 베이스라인 계산
-        baseline_y = scaled_bbox.y0 + target_ascent_px
-        text_x = scaled_content.x0
-
-        # 합성 볼드 오프셋 계산 (사용자 지정 굵기 반영 - 강도 대폭 상향 및 부드러운 렌더링)
-        synth_weight = float(getattr(self, 'synth_bold_weight', 150))
-        # 150%면 0.075, 300%면 0.3 정도의 오프셋 (1.5배/3배 효과를 위해 상향)
-        # 공식: (weight - 100) / 100 * 0.15 * pixel_size
-        offset_factor = (synth_weight - 100.0) / 100.0 * 0.15
-        total_bold_offset = pixel_size_actual * offset_factor if getattr(self, 'synth_bold', False) else 0.0
-        
-        if not math.isfinite(total_bold_offset):
-            total_bold_offset = 0.0
-
-        def _draw_text_item(x_pos, y_pos, txt):
-            if total_bold_offset > 0.005:
-                # 굵기에 따라 대칭으로 다중 레이어 드로잉 (틈새 방지 및 자연스러운 확장)
-                # 원본 위치를 중심으로 왼쪽/오른쪽으로 확장
-                half_offset = total_bold_offset / 2.0
-                step = 0.3 # 0.3px 간격으로 채우기
-                
-                # 왼쪽 절반부터 오른쪽 절반까지 루프
-                curr_dx = -half_offset
-                # 안전 장치: 루프 횟수 제한
-                max_iter = 100
-                while curr_dx <= half_offset and max_iter > 0:
-                    painter.drawText(QPointF(x_pos + curr_dx, y_pos), txt)
-                    curr_dx += step
-                    max_iter -= 1
-                
-                # 최종 경계면 보정
-                painter.drawText(QPointF(x_pos + half_offset, y_pos), txt)
-            else:
-                # 기본 레이어
-                painter.drawText(QPointF(x_pos, y_pos), txt)
-
-        # HWP 공백 보정 및 렌더링 동기화
-        is_hwp = getattr(self, 'hwp_space_mode', False)
-        
-        # Qt의 자동 공백 보정 기능을 끄고 수동으로 제어함 (자간 간섭 방지)
-        qfont.setWordSpacing(0.0)
-        painter.setFont(qfont)
-
-        if is_hwp:
-            # HWP 모드: 공백 단위로 쪼개서 수동 배치 (텍스트 자간은 Qt 엔진에 맡겨 커닝 보존)
-            print(f"   HWP Word Mode Preview (offset={total_bold_offset:.3f})")
-            parts = re.split(r'( +)', self.text)
-            curr_x = text_x
-            
-            # Qt의 Tracking(자간) 비율 계산 (100%가 기본)
-            tracking_ratio = float(self.tracking) / 100.0
-            
-            # 현재 설정된 폰트의 '공백' 너비 측정 (자간 포함됨)
-            total_space_w = font_metrics_f.horizontalAdvance(' ')
-            # 순수 공백 너비 산출 (자간 제외)
-            base_space_w = total_space_w / (1.0 + tracking_ratio) if abs(1.0 + tracking_ratio) > 0.01 else total_space_w
-            
-            # HWP 보정된 공백 너비: (순수너비 * 1.5) + 자간
-            hwp_space_advance = base_space_w * (1.5 + tracking_ratio)
-            
-            for part in parts:
-                if not part: continue
-                if part.isspace():
-                    # 보정된 공백 너비 적용
-                    curr_x += hwp_space_advance * len(part)
+            # 중요: 실제 폰트 자체가 볼드면(has_bold_variant) 추가 합성 볼드 적용 안함
+            # UI 프리뷰(render_to_painter)와 PDF 출력(_flatten_single_overlay) 로직 100% 일치시킴
+            if is_bold_flag:
+                if has_bold_variant:
+                    # 이미 볼드체이므로 추가 합성 볼드 및 Qt Bold 설정 불필요
+                    qfont.setBold(False)
+                    self.synth_bold = False
                 else:
-                    # 단어 단위 출력 (폰트 고유 커닝 및 사용자 자간 설정 유지)
-                    _draw_text_item(curr_x, baseline_y, part)
-                    curr_x += font_metrics_f.horizontalAdvance(part)
-        else:
-            # 일반 모드: 전체 텍스트 일괄 출력 (자간/장평 등 Qt 엔진 기본 처리)
-            print(f"   Standard Preview (offset={total_bold_offset:.3f})")
-            _draw_text_item(text_x, baseline_y, self.text)
-        
-        # 밑줄 처리 (flag 4)
-        if self.flags & 4:
-            underline_y = baseline_y + 2
-            actual_text_width = font_metrics_f.horizontalAdvance(self.text)
-            u_weight = int(getattr(self, 'underline_weight', 1))
-            pen = painter.pen()
-            pen.setWidth(u_weight)
-            painter.setPen(pen)
-            painter.drawLine(text_x, underline_y, text_x + actual_text_width, underline_y)
-            print(f"   밑줄 적용 (두께={u_weight})")
+                    # 일반체만 있으므로 합성 볼드 적용
+                    qfont.setBold(False)
+                    self.synth_bold = True
+            else:
+                qfont.setBold(False)
+                self.synth_bold = False
+                
+            if self.flags & 2: # 이탤릭
+                qfont.setItalic(True)
+            
+            try:
+                if abs(float(self.tracking)) > 0.01:
+                    qfont.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 100.0 + float(self.tracking))
+            except Exception: pass
+            
+            # DPI 보정: 1 PDF 포인트 = 1/72 인치
+            dpi_y = painter.device().logicalDpiY() if painter.device() else 72
+            dpi_factor = 72.0 / dpi_y
+            qfont.setPointSizeF(effective_point_size * dpi_factor)
+            
+            # 3. 색상 설정
+            if isinstance(self.color, int):
+                qcolor = QColor((self.color >> 16) & 0xFF, (self.color >> 8) & 0xFF, self.color & 0xFF)
+            else:
+                qcolor = QColor(0, 0, 0)
+                
+            painter.setFont(qfont)
+            painter.setPen(qcolor)
+            
+            # [중요] PDF와의 자간 정합성을 위해 Kerning 비활성화
+            qfont.setKerning(False)
+            
+            # 4. 정교한 렌더링 파라미터 (PDF 좌표계)
+            # 측정용 폰트 준비 (장평/자간이 적용되지 않은 순수 너비 측정용)
+            measure_font = QFont(qfont)
+            measure_font.setStretch(100)
+            measure_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0)
+            measure_font.setKerning(False)
+            # 현재 painter 장치 컨텍스트를 반영하여 측정 (DPI 등 동기화)
+            font_metrics_f = QFontMetricsF(measure_font, painter.device())
+            
+            ascent_ratio = float(getattr(self, 'ascent_ratio', 0.85))
+            height_ratio = float(getattr(self, 'height_ratio', 1.15))
+            
+            # 베이스라인 결정 (절대 좌표계로 원복하여 정합성 확보)
+            origin = getattr(self, 'origin', None)
+            if origin:
+                # origin은 베이스라인의 절대 좌표 (x, y)
+                dx = self.bbox.x0 - self.original_bbox.x0
+                dy = self.bbox.y0 - self.original_bbox.y0
+                base_baseline_y = origin[1] + dy
+                text_x = origin[0] + dx
+            else:
+                # origin이 없는 경우 bbox 상단 기준비율로 계산
+                base_baseline_y = self.bbox.y0 + (effective_point_size * ascent_ratio)
+                text_x = self.bbox.x0
+                
+            line_height_pt = effective_point_size * height_ratio
+            synth_weight = float(getattr(self, 'synth_bold_weight', 120))
+            offset_factor = (synth_weight - 100.0) / 100.0 * 0.15
+            total_bold_offset = effective_point_size * offset_factor if self.synth_bold else 0.0
+            step_pt = 0.05
+            
+            stretch = float(getattr(self, 'stretch', 1.0))
+
+            def _draw_text_item(x_pos, y_pos, txt):
+                painter.save()
+                # 글자 시작점을 원점으로 이동 후 가로 스케일 적용
+                painter.translate(x_pos, y_pos)
+                if abs(stretch - 1.0) > 0.001:
+                    painter.scale(stretch, 1.0)
+                
+                if total_bold_offset > 0.005:
+                    # 스케일된 공간에서의 오프셋 보정
+                    local_step = step_pt / stretch
+                    half_offset = (total_bold_offset / stretch) / 2.0
+                    curr_dx = -half_offset
+                    max_iter = 200
+                    while curr_dx <= half_offset and max_iter > 0:
+                        painter.drawText(QPointF(curr_dx, 0), txt)
+                        curr_dx += local_step
+                        max_iter -= 1
+                    painter.drawText(QPointF(half_offset, 0), txt)
+                else:
+                    painter.drawText(QPointF(0, 0), txt)
+                painter.restore()
+
+            is_hwp = getattr(self, 'hwp_space_mode', False)
+            lines = self.text.splitlines() if "\n" in self.text else [self.text]
+            
+            stretch = float(getattr(self, 'stretch', 1.0))
+            tracking_ratio = float(getattr(self, 'tracking', 0.0)) / 100.0
+            
+            # 항상 개별 글자 정밀 배치 수행 (PDF와 1:1 일치 보장)
+            needs_precise = True 
+
+            for li, line in enumerate(lines):
+                curr_y = base_baseline_y + li * line_height_pt
+                if needs_precise:
+                    curr_x = text_x
+                    t_ratio = 1.0 + tracking_ratio
+                    
+                    if is_hwp and abs(stretch - 1.0) < 0.001:
+                        parts = re.split(r'( +)', line)
+                        base_space_w = font_metrics_f.horizontalAdvance(' ')
+                        hwp_space_advance = base_space_w * 1.5 * t_ratio
+                        for part in parts:
+                            if not part: continue
+                            if part.isspace():
+                                curr_x += hwp_space_advance * len(part)
+                            else:
+                                _draw_text_item(curr_x, curr_y, part)
+                                curr_x += font_metrics_f.horizontalAdvance(part) * t_ratio
+                    else:
+                        for ch in line:
+                            # 순수 글자 너비 측정 (측정용 폰트 사용)
+                            ch_w = font_metrics_f.horizontalAdvance(ch)
+                            current_advance = ch_w * 1.5 if (ch == ' ' and is_hwp) else ch_w
+                            
+                            if ch.strip():
+                                _draw_text_item(curr_x, curr_y, ch)
+                            
+                            # 다음 글자 위치 = 순수너비 * 장평 * 자간비율
+                            # (이 계산식은 PDF 플래튼 로직과 완벽히 동일해야 함)
+                            curr_x += current_advance * stretch * t_ratio
+                    actual_width = (curr_x - text_x)
+                else:
+                    _draw_text_item(text_x, curr_y, line)
+                    actual_width = font_metrics_f.horizontalAdvance(line)
+                
+                # 밑줄 처리
+                if self.flags & 4:
+                    u_offset = float(getattr(self, 'underline_offset', 1.5))
+                    underline_y = curr_y + u_offset
+                    u_weight = float(getattr(self, 'underline_weight', 0.6))
+                    pen = painter.pen()
+                    pen.setWidthF(u_weight)
+                    painter.setPen(pen)
+                    painter.drawLine(QPointF(text_x, underline_y), QPointF(text_x + actual_width, underline_y))
+                    painter.setPen(qcolor)
+        finally:
+            painter.restore() # 상태 복구
         
         print(f"   OK TextOverlay 렌더링 완료: '{self.text}'")
         
     def to_dict(self):
         """편집창 연계를 위한 딕셔너리 변환"""
         return {
+            'overlay_id': self.z_index,
             'text': self.text,
             'font': self.font,
+            'pdf_font_name': self.pdf_font_name,
             'size': self.size,
             'color': self.color,
             'flags': self.flags,
@@ -1955,8 +1970,21 @@ class TextOverlay:
             'baseline_top_ratio': getattr(self, 'baseline_top_ratio', None),
             'baseline_bottom_ratio': getattr(self, 'baseline_bottom_ratio', None),
             'hwp_space_mode': getattr(self, 'hwp_space_mode', False),
-            'synth_bold_weight': getattr(self, 'synth_bold_weight', 150),
-            'underline_weight': getattr(self, 'underline_weight', 1)
+            'text_only_mode': getattr(self, 'text_only_mode', False),
+            'synth_bold_weight': getattr(self, 'synth_bold_weight', 120),
+            'underline_weight': getattr(self, 'underline_weight', 0.6),
+            'underline_offset': getattr(self, 'underline_offset', 1.5),
+            'origin': getattr(self, 'origin', None),
+            'patch_margin_l': getattr(self, 'patch_margin_l', 0.0),
+            'patch_margin_r': getattr(self, 'patch_margin_r', 0.0),
+            'patch_margin_t': getattr(self, 'patch_margin_t', 0.0),
+            'patch_margin_b': getattr(self, 'patch_margin_b', 0.0),
+            'patch_margin': (
+                getattr(self, 'patch_margin_l', 0.0),
+                getattr(self, 'patch_margin_r', 0.0),
+                getattr(self, 'patch_margin_t', 0.0),
+                getattr(self, 'patch_margin_b', 0.0)
+            )
         }
 
 class PdfViewerWidget(QLabel):
@@ -1964,6 +1992,7 @@ class PdfViewerWidget(QLabel):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.parent_window = parent # 부모 윈도우 명시적 저장
         self.doc = None
         self.current_page_num = 0
         self.pixmap_scale_factor = 1.0
@@ -1990,7 +2019,7 @@ class PdfViewerWidget(QLabel):
         # 텍스트 위치 조정용 변수
         self.selected_text_info = None
         self.text_adjustment_mode = False
-        self.adjustment_step = 1.0  # 픽셀 단위 조정 크기
+        self.adjustment_step = 0.2  # 더 정밀한 조정을 위해 0.2로 축소
         self.quick_adjustment_mode = False  # 빠른 조정 모드 (싱글클릭)
         self.pending_edit_info = None  # 편집 대기 정보
         self.active_overlay = None  # (page_num, overlay_id)
@@ -2001,10 +2030,11 @@ class PdfViewerWidget(QLabel):
         self.selection_rect = None
         self.selected_texts = []  # 선택된 텍스트들 목록
         
-        # 호버 애니메이션
+        # 호버 애니메이션 및 데이터 캐시
         self.hover_timer = QTimer()
         self.hover_timer.timeout.connect(self.check_hover)
         self.hover_timer.start(100)  # 100ms마다 체크
+        self._text_dict_cache = {}  # page_num -> text_dict 캐시
         
         # 싱글/더블 클릭 구분을 위한 타이머
         self.single_click_timer = QTimer()
@@ -2023,12 +2053,14 @@ class PdfViewerWidget(QLabel):
 
     def _tick_anim(self):
         self._anim_phase = (self._anim_phase + 1) % 16
-        if self.text_adjustment_mode or self.quick_adjustment_mode:
+        # 애니메이션이 필요한 모든 경우에 화면 갱신
+        if self.text_adjustment_mode or self.quick_adjustment_mode or self.hover_rect or self.active_overlay:
             self.update()
         
     def set_document(self, doc):
         self.doc = doc
         self.current_page_num = 0
+        self._text_dict_cache = {} # 캐시 초기화
         self.pdf_font_extractor = PdfFontExtractor(doc)
         self.pdf_fonts = self.pdf_font_extractor.extract_fonts_from_document()
         self.active_overlay = None
@@ -2049,14 +2081,17 @@ class PdfViewerWidget(QLabel):
             
             dx, dy = 0, 0
             
+            # Shift 키를 누르면 기존처럼 1.0 단위로 이동, 아니면 0.2 단위로 정밀 이동
+            current_step = 1.0 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else self.adjustment_step
+            
             if event.key() == Qt.Key.Key_Left:
-                dx = -self.adjustment_step
+                dx = -current_step
             elif event.key() == Qt.Key.Key_Right:
-                dx = self.adjustment_step
+                dx = current_step
             elif event.key() == Qt.Key.Key_Up:
-                dy = -self.adjustment_step
+                dy = -current_step
             elif event.key() == Qt.Key.Key_Down:
-                dy = self.adjustment_step
+                dy = current_step
             elif event.key() == Qt.Key.Key_Escape:
                 # 조정 모드 종료
                 if self.quick_adjustment_mode:
@@ -2137,7 +2172,7 @@ class PdfViewerWidget(QLabel):
             self.active_overlay = (self.current_page_num, overlay_hit.z_index)
         else:
             self.active_overlay = None
-        self.update()
+        self.update() # 즉시 갱신하여 패치 투명도 반영
         self.pending_single_click_pos = click_pos
         self.single_click_timer.start(300)  # 300ms 후 싱글클릭 처리
         print(f"Single click timer started at position: {self.pending_single_click_pos}")
@@ -2183,42 +2218,24 @@ class PdfViewerWidget(QLabel):
                 self.parent().wheelEvent(event)
     
     def check_hover(self):
-        """마우스 호버 체크 및 텍스트 블록 하이라이트"""
+        """마우스 호버 체크 및 텍스트 블록 하이라이트 (캐시 적용 최적화)"""
         if not self.doc or not hasattr(self, 'mouse_pos'):
             return
         
         try:
             # 마우스 위치를 PDF 좌표로 변환
-            label_pos = self.mouse_pos
-            scroll_area = self.parent()
-            
-            if hasattr(scroll_area, 'horizontalScrollBar'):
-                scroll_offset_x = scroll_area.horizontalScrollBar().value()
-                scroll_offset_y = scroll_area.verticalScrollBar().value()
-                
-                pixmap = self.pixmap()
-                if pixmap:
-                    widget_rect = self.rect()
-                    pixmap_rect = pixmap.rect()
-                    
-                    offset_x = (widget_rect.width() - pixmap_rect.width()) // 2
-                    offset_y = (widget_rect.height() - pixmap_rect.height()) // 2
-                    
-                    pixmap_x = label_pos.x() - offset_x + scroll_offset_x
-                    pixmap_y = label_pos.y() - offset_y + scroll_offset_y
-                    
-                    pdf_x = pixmap_x / self.pixmap_scale_factor
-                    pdf_y = pixmap_y / self.pixmap_scale_factor
-                else:
-                    pdf_x = label_pos.x() / self.pixmap_scale_factor
-                    pdf_y = label_pos.y() / self.pixmap_scale_factor
-            else:
-                pdf_x = label_pos.x() / self.pixmap_scale_factor
-                pdf_y = label_pos.y() / self.pixmap_scale_factor
+            pdf_x, pdf_y = self._widget_point_to_pdf(self.mouse_pos)
+            if pdf_x is None or pdf_y is None:
+                return
             
             pdf_point = fitz.Point(pdf_x, pdf_y)
-            page = self.doc.load_page(self.current_page_num)
-            text_dict = page.get_text("dict")
+            
+            # 캐시된 텍스트 데이터 사용
+            if self.current_page_num not in self._text_dict_cache:
+                page = self.doc.load_page(self.current_page_num)
+                self._text_dict_cache[self.current_page_num] = page.get_text("dict")
+            
+            text_dict = self._text_dict_cache[self.current_page_num]
             
             # 호버 중인 텍스트/오버레이 찾기 - 오버레이 bbox 먼저 검사
             overlay_hover_rect = None
@@ -2239,7 +2256,10 @@ class PdfViewerWidget(QLabel):
                             'color': ov.color,
                             'original_bbox': ov.original_bbox,
                             'is_overlay': True,
-                            'overlay_id': ov.z_index
+                            'overlay_id': ov.z_index,
+                            'synth_bold_weight': getattr(ov, 'synth_bold_weight', 120),
+                            'underline_weight': getattr(ov, 'underline_weight', 0.6),
+                            'underline_offset': getattr(ov, 'underline_offset', 1.5)
                         }
                         break
 
@@ -2278,13 +2298,13 @@ class PdfViewerWidget(QLabel):
                         self.setCursor(Qt.CursorShape.CrossCursor)
                     else:
                         self.setCursor(Qt.CursorShape.PointingHandCursor)
-                elif not new_hover_rect:
+                else:
                     if self.ctrl_pressed:
                         self.setCursor(Qt.CursorShape.CrossCursor)
                     else:
                         self.setCursor(Qt.CursorShape.ArrowCursor)
                     
-        except Exception as e:
+        except Exception:
             pass
     
     def mouseDoubleClickEvent(self, event):
@@ -2308,30 +2328,9 @@ class PdfViewerWidget(QLabel):
             label_pos = event.position().toPoint()
             print(f"Click position: {label_pos}")  # 디버깅 출력
             
-            scroll_area = self.parent()
-            if hasattr(scroll_area, 'horizontalScrollBar'):
-                scroll_offset_x = scroll_area.horizontalScrollBar().value()
-                scroll_offset_y = scroll_area.verticalScrollBar().value()
-                
-                pixmap = self.pixmap()
-                if pixmap:
-                    widget_rect = self.rect()
-                    pixmap_rect = pixmap.rect()
-                    
-                    offset_x = (widget_rect.width() - pixmap_rect.width()) // 2
-                    offset_y = (widget_rect.height() - pixmap_rect.height()) // 2
-                    
-                    pixmap_x = label_pos.x() - offset_x + scroll_offset_x
-                    pixmap_y = label_pos.y() - offset_y + scroll_offset_y
-                    
-                    pdf_x = pixmap_x / self.pixmap_scale_factor
-                    pdf_y = pixmap_y / self.pixmap_scale_factor
-                else:
-                    pdf_x = label_pos.x() / self.pixmap_scale_factor
-                    pdf_y = label_pos.y() / self.pixmap_scale_factor
-            else:
-                pdf_x = label_pos.x() / self.pixmap_scale_factor
-                pdf_y = label_pos.y() / self.pixmap_scale_factor
+            pdf_x, pdf_y = self._widget_point_to_pdf(label_pos)
+            if pdf_x is None or pdf_y is None:
+                return
             
             pdf_point = fitz.Point(pdf_x, pdf_y)
             print(f"PDF coordinates: ({pdf_x}, {pdf_y})")  # 디버깅 출력
@@ -2356,8 +2355,9 @@ class PdfViewerWidget(QLabel):
                             'stretch': getattr(ov, 'stretch', 1.0),
                             'tracking': getattr(ov, 'tracking', 0.0),
                             'hwp_space_mode': getattr(ov, 'hwp_space_mode', False),
-                            'synth_bold_weight': getattr(ov, 'synth_bold_weight', 150),
-                            'underline_weight': getattr(ov, 'underline_weight', 1)
+                            'synth_bold_weight': getattr(ov, 'synth_bold_weight', 120),
+                            'underline_weight': getattr(ov, 'underline_weight', 0.6),
+                            'underline_offset': getattr(ov, 'underline_offset', 1.5)
                         }
                         self.text_selected.emit(span_info)
                         return
@@ -2511,11 +2511,12 @@ class PdfViewerWidget(QLabel):
                     span_info = {
                         'text': overlay.text,
                         'font': overlay.font,
-                        'size': overlay.size,
+                        'size': float(overlay.size), # 정밀도 유지를 위해 float 사용
                         'flags': overlay.flags,
                         'color': overlay.color,
                         'original_bbox': overlay.original_bbox,  # 원본 위치 사용
                         'current_bbox': overlay.bbox,  # 현재 위치 추가
+                        'origin': getattr(overlay, 'origin', selected_span.get('origin')), # 원본 베이스라인 정보 유지
                         'line_text': line_text.strip(),
                         'line_spans': line_spans,
                         'is_overlay': True,  # 오버레이 텍스트 표시
@@ -2524,19 +2525,21 @@ class PdfViewerWidget(QLabel):
                         'stretch': getattr(overlay, 'stretch', 1.0),
                         'tracking': getattr(overlay, 'tracking', 0.0),
                         'hwp_space_mode': getattr(overlay, 'hwp_space_mode', False),
-                        'synth_bold_weight': getattr(overlay, 'synth_bold_weight', 150),
-                        'underline_weight': getattr(overlay, 'underline_weight', 1)
+                        'synth_bold_weight': getattr(overlay, 'synth_bold_weight', 120),
+                        'underline_weight': getattr(overlay, 'underline_weight', 0.6),
+                        'underline_offset': getattr(overlay, 'underline_offset', 1.5)
                     }
                     self.active_overlay = (self.current_page_num, overlay.z_index)
-                    print(f"   편집창에 오버레이 속성 전달: {overlay.font}, {overlay.size}px, flags={overlay.flags}")
+                    print(f"   편집창에 오버레이 속성 전달: {overlay.font}, {overlay.size}pt, flags={overlay.flags}")
                 else:
                     # 원본 텍스트의 속성을 편집창에 전달
                     span_info = {
                         'text': selected_span.get('text', ''),
                         'font': selected_span.get('font', ''),
-                        'size': int(round(selected_span.get('size', 12))),
+                        'size': float(selected_span.get('size', 12.0)), # 정밀도 유지를 위해 float 사용
                         'flags': selected_span.get('flags', 0),
                         'color': selected_span.get('color', 0),
+                        'origin': selected_span.get('origin'), # 베이스라인 좌표 필수
                         'original_bbox': selected_bbox,
                         'line_text': line_text.strip(),
                         'line_spans': line_spans,
@@ -2555,175 +2558,186 @@ class PdfViewerWidget(QLabel):
             traceback.print_exc()
     
     def paintEvent(self, event):
-        super().paintEvent(event)
-        
+        """커스텀 그리기: PDF 배경, 패치, 호버 하이라이트, 텍스트 오버레이"""
         painter = QPainter(self)
-
-        # 배경 패치 렌더링 (원본 텍스트 가리기) - 다른 강조 표시보다 먼저 그려서 오버레이 윤곽선이 위에 보이도록 함
-        if hasattr(self, 'background_patches') and self.current_page_num in self.background_patches:
-            patches = self.background_patches[self.current_page_num]
-            for pentry in patches:
-                try:
-                    # 호환: dict/Rect 둘 다 허용
-                    if isinstance(pentry, dict):
-                        patch_bbox = pentry.get('bbox')
-                        stored_color = pentry.get('color')
-                    else:
-                        patch_bbox = pentry
-                        stored_color = None
-                    screen_rect = self._pdf_rect_to_screen_rect(patch_bbox)
-                    if screen_rect:
-                        try:
-                            page = self.doc.load_page(self.current_page_num)
-                            main_window = self.window()
-
-                            if stored_color is not None:
-                                if max(stored_color) <= 1.0:
-                                    detected_bg_color = stored_color
-                                else:
-                                    detected_bg_color = (
-                                        stored_color[0] / 255.0,
-                                        stored_color[1] / 255.0,
-                                        stored_color[2] / 255.0
-                                    )
-                            elif main_window and hasattr(main_window, 'get_precise_background_color'):
-                                detected_bg_color = main_window.get_precise_background_color(page, patch_bbox)
-                            else:
-                                detected_bg_color = (1.0, 1.0, 1.0)
-
-                            r = int(detected_bg_color[0] * 255)
-                            g = int(detected_bg_color[1] * 255)
-                            b = int(detected_bg_color[2] * 255)
-                            bg_qcolor = QColor(r, g, b)
-
-                            painter.setPen(QPen(bg_qcolor, 0))
-                            painter.setBrush(QBrush(bg_qcolor))
-                            painter.drawRect(screen_rect)
-                        except Exception as color_error:
-                            print(f"경고 배경색 검출 예외 발생: {color_error}")
-                            import traceback
-                            traceback.print_exc()
-
-                            painter.setPen(QPen(QColor(243, 244, 248), 0))
-                            painter.setBrush(QBrush(QColor(243, 244, 248)))
-                            painter.drawRect(screen_rect)
-                except Exception as e:
-                    print(f"X 배경 패치 렌더링 오류: {e}")
-
-        # 호버 효과 그리기 (오버레이는 초록 점선 애니메이션, 원본은 파란 반투명)
-        if self.hover_rect and self.pixmap():
-            screen_rect = self._pdf_rect_to_screen_rect(self.hover_rect)
-            if screen_rect:
-                if isinstance(self.hover_span_info, dict) and self.hover_span_info.get('is_overlay', False):
-                    pen = QPen(QColor(0, 200, 0), 2)
-                    pen.setStyle(Qt.PenStyle.CustomDashLine)
-                    pen.setDashPattern([6, 4])
-                    pen.setDashOffset(self._anim_phase)
-                    painter.setPen(pen)
-                    painter.setBrush(QBrush())
-                else:
-                    painter.setPen(QPen(QColor(0, 120, 255, 150), 2))
-                    painter.setBrush(QBrush(QColor(0, 120, 255, 30)))
-                painter.drawRect(screen_rect)
-        
-        # 사각형 선택 영역 그리기
-        if self.selection_mode and self.selection_rect:
-            painter.setPen(QPen(QColor(255, 0, 0, 200), 2))  # 빨간색 테두리
-            painter.setBrush(QBrush(QColor(255, 0, 0, 50)))   # 반투명 빨간색 채우기
-            painter.drawRect(self.selection_rect)
-        
-        # 텍스트 위치 조정 모드 표시
-        if self.text_adjustment_mode and self.selected_text_info and self.pixmap():
-            painter.setPen(QPen(QColor(255, 165, 0), 3))  # 주황색 테두리
-            painter.setBrush(QBrush(QColor(255, 165, 0, 50)))
+        if not painter.isActive():
+            return
             
-            # 조정 중인 텍스트 영역 표시
-            adjust_rect = self._pdf_rect_to_screen_rect(self.selected_text_info['original_bbox'])
-            if adjust_rect:
-                painter.drawRect(adjust_rect)
-                
-                # 중앙에 십자가 표시
-                center_x = adjust_rect.x() + adjust_rect.width() // 2
-                center_y = adjust_rect.y() + adjust_rect.height() // 2
-                cross_size = 10
-                painter.drawLine(center_x - cross_size, center_y, center_x + cross_size, center_y)
-                painter.drawLine(center_x, center_y - cross_size, center_x, center_y + cross_size)
-        
-        # 빠른 조정 모드 표시 + 애니메이션 초록 사각형 복구
-        elif self.quick_adjustment_mode and self.selected_text_info and self.pixmap():
-            # 조정 중인 텍스트 영역 표시
-            adjust_rect = self._pdf_rect_to_screen_rect(self.selected_text_info.get('current_bbox', self.selected_text_info['original_bbox']))
-            if adjust_rect:
-                pen = QPen(QColor(0, 200, 0), 2)
-                pen.setStyle(Qt.PenStyle.CustomDashLine)
-                pen.setDashPattern([6, 4])
-                pen.setDashOffset(self._anim_phase)
-                painter.setPen(pen)
-                painter.setBrush(QBrush(QColor(0, 200, 0, 30)))
-                painter.drawRect(adjust_rect)
-                # 중앙 표식(십자) 표시
-                center_x = adjust_rect.x() + adjust_rect.width() // 2
-                center_y = adjust_rect.y() + adjust_rect.height() // 2
-                arrow_size = 8
-                painter.setPen(QPen(QColor(0, 150, 0), 2))
-                painter.drawLine(center_x - arrow_size, center_y, center_x + arrow_size, center_y)
-                painter.drawLine(center_x, center_y - arrow_size, center_x, center_y + arrow_size)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
 
-        # 일반 선택 강조 표시
-        if self.active_overlay and self.pixmap():
+        # 테마 모드 안전하게 확인
+        theme = 'light'
+        if hasattr(self, 'parent_window') and self.parent_window:
+            theme = getattr(self.parent_window, 'theme_mode', 'light')
+        elif isinstance(self.parent(), QWidget): # 폴백
+            win = self.window()
+            if hasattr(win, 'theme_mode'):
+                theme = win.theme_mode
+
+        bg_color = QColor(30, 31, 34) if theme == 'dark' else QColor(240, 240, 240)
+        
+        pixmap = self.pixmap()
+        if not pixmap or pixmap.isNull():
+            painter.fillRect(self.rect(), bg_color) # 테마 배경색 사용
+            painter.end()
+            return
+
+        # 1. 위젯 배경 및 PDF 픽스맵 렌더링 (중앙 정렬)
+        painter.fillRect(self.rect(), bg_color) 
+        
+        crect = self.contentsRect()
+        # 정밀한 부동소수점 오프셋 계산 (정합성 핵심)
+        scale = self.pixmap_scale_factor
+        
+        # 실제 PDF 페이지 크기 (포인트 단위)
+        try:
+            page = self.doc.load_page(self.current_page_num)
+            pw_pt = page.rect.width
+            ph_pt = page.rect.height
+        except:
+            pw_pt = pixmap.width() / scale if scale > 0 else pixmap.width()
+            ph_pt = pixmap.height() / scale if scale > 0 else pixmap.height()
+
+        # 화면상의 실제 픽셀 크기 (float)
+        pw_px = pw_pt * scale
+        ph_px = ph_pt * scale
+        
+        offset_x = crect.left() + (crect.width() - pw_px) / 2.0
+        offset_y = crect.top() + (crect.height() - ph_px) / 2.0
+        
+        # PDF 배경 픽스맵은 픽셀 단위로 정확히 그림
+        painter.drawPixmap(QPointF(offset_x, offset_y), pixmap)
+        
+        # --- [좌표 변환 시작] ---
+        # 이후 모든 그리기는 PDF 좌표계(포인트)에서 수행하도록 설정
+        painter.save()
+        painter.translate(offset_x, offset_y)
+        painter.scale(scale, scale)
+        
+        # 2. 배경 패치 렌더링 (PDF 좌표계)
+        if hasattr(self, 'background_patches') and self.current_page_num in self.background_patches:
+            for pentry in self.background_patches[self.current_page_num]:
+                painter.save()
+                try:
+                    patch_bbox = pentry.get('bbox')
+                    stored_color = pentry.get('color')
+                    patch_overlay_id = pentry.get('overlay_id')
+                    
+                    if not patch_bbox: continue
+                    
+                    is_active = False
+                    if self.active_overlay and isinstance(self.active_overlay, (tuple, list)):
+                        is_active = (self.active_overlay[0] == self.current_page_num and 
+                                    self.active_overlay[1] == patch_overlay_id)
+                    
+                    # 편집 중인 패치는 50% 투명도(128) 적용하여 원본이 보이게 함, 일반 패치는 100%(255)
+                    alpha = 128 if is_active else 255 
+                    
+                    if stored_color:
+                        c = QColor(int(stored_color[0]*255), int(stored_color[1]*255), int(stored_color[2]*255), alpha)
+                    else:
+                        c = QColor(255, 255, 255, alpha)
+                    
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QBrush(c))
+                    # PDF 좌표계이므로 bbox 그대로 사용
+                    painter.drawRect(QRectF(patch_bbox.x0, patch_bbox.y0, patch_bbox.width, patch_bbox.height))
+                    
+                    if is_active:
+                        # 점선 테두리는 눈에 보여야 하므로 스케일 역산하여 1px 유지
+                        pen_w = 1.0 / scale if scale > 0 else 1.0
+                        painter.setPen(QPen(QColor(0, 0, 0, 150), pen_w, Qt.PenStyle.DashLine))
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        painter.drawRect(QRectF(patch_bbox.x0, patch_bbox.y0, patch_bbox.width, patch_bbox.height))
+                finally:
+                    painter.restore()
+
+        # 3. 호버 하이라이트 (PDF 좌표계)
+        if self.hover_rect:
+            painter.save()
+            try:
+                is_ov = isinstance(self.hover_span_info, dict) and self.hover_span_info.get('is_overlay', False)
+                pen_w = 1.5 / scale if scale > 0 else 1.5
+                if is_ov:
+                    pen = QPen(QColor(0, 200, 0), pen_w)
+                    pen.setStyle(Qt.PenStyle.CustomDashLine)
+                    pen.setDashPattern([6/scale, 4/scale])
+                    pen.setDashOffset(self._anim_phase / scale)
+                    painter.setPen(pen)
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                else:
+                    painter.setPen(QPen(QColor(0, 120, 255, 220), pen_w))
+                    painter.setBrush(QBrush(QColor(0, 120, 255, 50)))
+                painter.drawRect(QRectF(self.hover_rect.x0, self.hover_rect.y0, self.hover_rect.width, self.hover_rect.height))
+            finally:
+                painter.restore()
+
+        # 4. 일반 선택 강조 표시 (활성 오버레이)
+        if self.active_overlay and not self.text_adjustment_mode:
             page_num, overlay_id = self.active_overlay
             if page_num == self.current_page_num:
                 overlay = self.get_overlay_by_id(page_num, overlay_id)
                 if overlay:
-                    if self.quick_adjustment_mode and self.selected_text_info and self.selected_text_info.get('overlay_id') == overlay_id:
-                        base_rect = overlay.bbox
-                        highlight_rect = self._pdf_rect_to_screen_rect(base_rect)
-                        if highlight_rect:
-                            pen = QPen(QColor(0, 200, 0), 2)
-                            pen.setStyle(Qt.PenStyle.CustomDashLine)
-                            pen.setDashPattern([6, 4])
-                            pen.setDashOffset(self._anim_phase)
-                            painter.setPen(pen)
-                            painter.setBrush(QBrush(Qt.GlobalColor.transparent))
-                            painter.drawRect(highlight_rect)
-                    else:
-                        highlight_rect = self._pdf_rect_to_screen_rect(overlay.bbox)
-                        if highlight_rect:
-                            pen = QPen(QColor(0, 200, 0), 2)
-                            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-                            painter.setPen(pen)
-                            painter.setBrush(Qt.BrushStyle.NoBrush)
-                            painter.drawRect(highlight_rect.adjusted(-1, -1, 1, 1))
-        
-        # 레이어 방식 텍스트 오버레이 렌더링
-        if hasattr(self, 'text_overlays') and self.current_page_num in self.text_overlays:
-            overlays = self.text_overlays[self.current_page_num]
-            # z_index 순서로 정렬하여 레이어 순서대로 렌더링
-            sorted_overlays = sorted(overlays, key=lambda overlay: overlay.z_index)
-            
-            for overlay in sorted_overlays:
-                if overlay.visible:
+                    painter.save()
                     try:
-                        # TextOverlay의 render_to_painter 메서드 사용 (정교한 스케일팩터 적용)
-                        # 화면 확대축소에 맞춰 동적으로 스케일팩터 전달
-                        overlay.render_to_painter(painter, self.pixmap_scale_factor)
-                        
-                        # 디버깅: 오버레이 경계 표시 (개발 중에만 사용)
-                        if False:  # 디버깅 필요시 True로 변경
-                            screen_rect = self._pdf_rect_to_screen_rect(overlay.bbox)
-                            if screen_rect:
-                                painter.setPen(QPen(QColor(255, 0, 255, 100), 1))
-                                painter.setBrush(QBrush())
-                                painter.drawRect(screen_rect)
-                    except Exception as e:
-                        print(f"경고 오버레이 렌더링 오류: {overlay.text} - {e}")
-        
-        # 사각형 선택 영역 그리기
+                        pen_w = 2.0 / scale if scale > 0 else 2.0
+                        pen = QPen(QColor(0, 200, 0), pen_w)
+                        pen.setStyle(Qt.PenStyle.CustomDashLine)
+                        pen.setDashPattern([6/scale, 4/scale])
+                        pen.setDashOffset(self._anim_phase / scale)
+                        painter.setPen(pen)
+                        painter.setBrush(QBrush(QColor(0, 200, 0, 30)))
+                        painter.drawRect(QRectF(overlay.bbox.x0, overlay.bbox.y0, overlay.bbox.width, overlay.bbox.height))
+                    finally:
+                        painter.restore()
+
+        # 5. 텍스트 조정 모드 강조 (주황색)
+        if self.text_adjustment_mode and self.selected_text_info:
+            abox = self.selected_text_info.get('original_bbox')
+            if abox:
+                painter.save()
+                try:
+                    pen_w = 2.5 / scale if scale > 0 else 2.5
+                    painter.setPen(QPen(QColor(255, 165, 0), pen_w))
+                    painter.setBrush(QBrush(QColor(255, 165, 0, 60)))
+                    painter.drawRect(QRectF(abox.x0, abox.y0, abox.width, abox.height))
+                    # 십자선 (픽셀 단위 시인성 확보를 위해 조정)
+                    center = QRectF(abox.x0, abox.y0, abox.width, abox.height).center()
+                    line_l = 15.0 / scale
+                    painter.drawLine(QPointF(center.x() - line_l, center.y()), QPointF(center.x() + line_l, center.y()))
+                    painter.drawLine(QPointF(center.x(), center.y() - line_l), QPointF(center.x(), center.y() + line_l))
+                finally:
+                    painter.restore()
+
+        # 6. 텍스트 오버레이 실제 내용 렌더링
+        if hasattr(self, 'text_overlays') and self.current_page_num in self.text_overlays:
+            sorted_ovs = sorted(self.text_overlays[self.current_page_num], key=lambda x: x.z_index)
+            for ov in sorted_ovs:
+                if ov.visible:
+                    try:
+                        # 절대 좌표계에서 직접 렌더링
+                        ov.render_to_painter(painter, scale, offsets=(0, 0))
+                    except Exception as e_ov:
+                        print(f"오버레이 렌더링 에러: {e_ov}")
+
+        # PDF 좌표계 변환 종료 (반드시 호출)
+        try:
+            painter.restore()
+        except Exception:
+            pass
+
+        # 7. 사각형 영역 선택 (Ctrl + 드래그) - 이건 화면 좌표계 유지
         if self.selection_mode and self.selection_rect:
-            painter.setPen(QPen(QColor(255, 0, 0, 180), 2))  # 빨간색 테두리
-            painter.setBrush(QBrush(QColor(255, 0, 0, 50)))   # 반투명 빨간색 채우기
-            painter.drawRect(self.selection_rect)
-        
+            painter.save()
+            try:
+                painter.setPen(QPen(QColor(255, 0, 0, 200), 2))
+                painter.setBrush(QBrush(QColor(255, 0, 0, 50)))
+                painter.drawRect(self.selection_rect)
+            finally:
+                painter.restore()
+
         painter.end()
     
     def _pdf_rect_to_screen_rect(self, pdf_rect):
@@ -2747,6 +2761,40 @@ class PdfViewerWidget(QLabel):
                         int(screen_x1 - screen_x0), int(screen_y1 - screen_y0))
         except:
             return None
+
+    def _pdf_rect_to_screen_rect_f(self, pdf_rect):
+        """PDF 좌표 사각형을 화면 좌표 사각형(부동소수점)으로 정밀 변환"""
+        try:
+            pixmap = self.pixmap()
+            if not pixmap or pixmap.isNull():
+                return None
+            
+            crect = self.contentsRect()
+            scale = getattr(self, 'pixmap_scale_factor', 1.0)
+            
+            # 실제 PDF 페이지 크기 (포인트 단위) 기반 정밀 오프셋
+            try:
+                page = self.doc.load_page(self.current_page_num)
+                pw_pt = page.rect.width
+                ph_pt = page.rect.height
+            except:
+                pw_pt = pixmap.width() / scale if scale > 0 else pixmap.width()
+                ph_pt = pixmap.height() / scale if scale > 0 else pixmap.height()
+
+            pw_px = pw_pt * scale
+            ph_px = ph_pt * scale
+            
+            offset_x = crect.left() + (crect.width() - pw_px) / 2.0
+            offset_y = crect.top() + (crect.height() - ph_px) / 2.0
+            
+            screen_x0 = pdf_rect.x0 * scale + offset_x
+            screen_y0 = pdf_rect.y0 * scale + offset_y
+            screen_x1 = pdf_rect.x1 * scale + offset_x
+            screen_y1 = pdf_rect.y1 * scale + offset_y
+            
+            return QRectF(screen_x0, screen_y0, screen_x1 - screen_x0, screen_y1 - screen_y0)
+        except:
+            return None
     
     def _pdf_point_to_screen_point(self, pdf_x, pdf_y):
         """PDF 좌표 점을 화면 좌표 점으로 변환"""
@@ -2755,10 +2803,9 @@ class PdfViewerWidget(QLabel):
             if not pixmap:
                 return None, None
             
-            widget_rect = self.rect()
-            pixmap_rect = pixmap.rect()
-            offset_x = (widget_rect.width() - pixmap_rect.width()) // 2
-            offset_y = (widget_rect.height() - pixmap_rect.height()) // 2
+            crect = self.contentsRect()
+            offset_x = crect.left() + (crect.width() - pixmap.width()) / 2.0
+            offset_y = crect.top() + (crect.height() - pixmap.height()) / 2.0
             
             screen_x = pdf_x * self.pixmap_scale_factor + offset_x
             screen_y = pdf_y * self.pixmap_scale_factor + offset_y
@@ -2768,28 +2815,34 @@ class PdfViewerWidget(QLabel):
             return None, None
 
     def _widget_point_to_pdf(self, widget_point: QPoint):
+        """위젯 좌표(QPoint)를 PDF 좌표로 변환 (마진/테두리 반영)"""
         try:
             pixmap = self.pixmap()
-            if pixmap is None:
+            if pixmap is None or pixmap.isNull():
                 return None, None
 
-            scroll_area = self.parent()
-            scroll_x = scroll_area.horizontalScrollBar().value() if hasattr(scroll_area, 'horizontalScrollBar') else 0
-            scroll_y = scroll_area.verticalScrollBar().value() if hasattr(scroll_area, 'verticalScrollBar') else 0
-
-            widget_rect = self.rect()
-            pixmap_rect = pixmap.rect()
-            offset_x = (widget_rect.width() - pixmap_rect.width()) // 2
-            offset_y = (widget_rect.height() - pixmap_rect.height()) // 2
-
-            pixmap_x = widget_point.x() - offset_x + scroll_x
-            pixmap_y = widget_point.y() - offset_y + scroll_y
-
-            if self.pixmap_scale_factor == 0:
+            crect = self.contentsRect()
+            scale = getattr(self, 'pixmap_scale_factor', 1.0)
+            if scale <= 0:
                 return None, None
 
-            pdf_x = pixmap_x / self.pixmap_scale_factor
-            pdf_y = pixmap_y / self.pixmap_scale_factor
+            # 실제 PDF 페이지 크기 (포인트 단위) 기반 정밀 오프셋
+            try:
+                page = self.doc.load_page(self.current_page_num)
+                pw_pt = page.rect.width
+                ph_pt = page.rect.height
+            except:
+                pw_pt = pixmap.width() / scale
+                ph_pt = pixmap.height() / scale
+
+            pw_px = pw_pt * scale
+            ph_px = ph_pt * scale
+            
+            offset_x = crect.left() + (crect.width() - pw_px) / 2.0
+            offset_y = crect.top() + (crect.height() - ph_px) / 2.0
+
+            pdf_x = (widget_point.x() - offset_x) / scale
+            pdf_y = (widget_point.y() - offset_y) / scale
             return pdf_x, pdf_y
         except Exception as e:
             print(f"_widget_point_to_pdf error: {e}")
@@ -2979,6 +3032,7 @@ class PdfViewerWidget(QLabel):
                 chosen_font, chosen_size, chosen_color = 'Arial', 12.0, 0
 
             # 시스템 폰트 매칭
+            chosen_font_orig = chosen_font
             try:
                 fmgr = SystemFontManager()
                 matched = fmgr.find_best_font_match(chosen_font) or chosen_font
@@ -2990,6 +3044,7 @@ class PdfViewerWidget(QLabel):
             span_info = {
                 'text': region_text,
                 'font': chosen_font,
+                'pdf_font_name': chosen_font_orig,
                 'size': chosen_size,
                 'flags': 0,
                 'color': chosen_color,
@@ -3052,12 +3107,22 @@ class PdfViewerWidget(QLabel):
                 except Exception:
                     pass
 
-                keep_enabled = getattr(main_window, 'patch_precise_mode', False)
+                # 패치 적용 후 화면 픽스맵 갱신 (중요: 그래야 실제 반영된 모습이 보임)
+                if hasattr(main_window, 'render_page'):
+                    main_window.render_page(page_to_render=page)
+
+                # UX 개선: 작업 완료 후 모드 해제
+                if hasattr(main_window, 'set_patch_mode'):
+                    main_window.set_patch_mode(False)
+                if hasattr(main_window, 'set_patch_eraser_mode'):
+                    main_window.set_patch_eraser_mode(False)
+
+                keep_enabled = False # 무조건 해제
                 self.selection_mode = False
                 self.selection_rect = None
                 self.ctrl_pressed = keep_enabled
                 try:
-                    self.setCursor(Qt.CursorShape.CrossCursor if keep_enabled else Qt.CursorShape.ArrowCursor)
+                    self.setCursor(Qt.CursorShape.ArrowCursor)
                 except Exception:
                     pass
                 self.update()
@@ -3084,20 +3149,23 @@ class PdfViewerWidget(QLabel):
             if hasattr(main_window, 'undo_manager') and self.doc:
                 main_window.undo_manager.save_state(self.doc, self)
 
-            # 2) 배경 패치 PDF 적용 + UI 등록 (항상 새로운 패치 생성)
-            try:
-                patch_rect, patch_color = main_window.apply_background_patch(page, pdf_selection_rect, new_values, overlay=None, preview=False)
-            except Exception:
-                patch_rect, patch_color = (pdf_selection_rect, None)
-            print("OK 선택 영역 배경 패치 적용 완료")
-            
-            # 3) 오버레이 생성 (레이어 방식)
+            # 1) 오버레이 생성 (레이어 방식)을 먼저 수행하여 최적화된 영역(new_bbox) 확보
             overlay = None
             try:
+                # insert_overlay_text 내부에서 new_bbox가 계산되고 span['original_bbox']가 업데이트됨
                 overlay = main_window.insert_overlay_text(page, span_info, new_values)
             except Exception as e:
                 print(f"경고 insert_overlay_text 실패, Fallback 시도: {e}")
                 overlay = main_window._insert_overlay_text_fallback(page, span_info, new_values)
+
+            # 2) 배경 패치 PDF 적용 + UI 등록 (최적화된 영역으로 생성)
+            # overlay.original_bbox는 insert_overlay_text에서 텍스트 크기에 맞춰 조정된 상태임
+            patch_target_rect = overlay.original_bbox if overlay else pdf_selection_rect
+            try:
+                patch_rect, patch_color = main_window.apply_background_patch(page, patch_target_rect, new_values, overlay=overlay, preview=False)
+            except Exception:
+                patch_rect, patch_color = (patch_target_rect, None)
+            print(f"OK 최적화 영역 배경 패치 적용 완료: {patch_rect}")
 
             if overlay:
                 print(f"OK 새 텍스트 오버레이 생성 완료 (ID: {getattr(overlay, 'z_index', '?')})")
@@ -3111,7 +3179,10 @@ class PdfViewerWidget(QLabel):
                     'current_bbox': overlay.bbox,
                     'is_overlay': True,
                     'overlay_id': overlay.z_index,
-                    'page_num': self.current_page_num
+                    'page_num': self.current_page_num,
+                    'synth_bold_weight': getattr(overlay, 'synth_bold_weight', 120),
+                    'underline_weight': getattr(overlay, 'underline_weight', 0.6),
+                    'underline_offset': getattr(overlay, 'underline_offset', 1.5)
                 }
                 self.selected_text_info = overlay_info
                 self.active_overlay = (self.current_page_num, overlay.z_index)
@@ -3124,11 +3195,15 @@ class PdfViewerWidget(QLabel):
                 main_window.mark_as_changed()
 
             # Ctrl 상태 및 선택 모드 해제 (최종)
-            keep_enabled = getattr(main_window, 'patch_precise_mode', False)
-            self.ctrl_pressed = keep_enabled
+            if hasattr(main_window, 'set_patch_mode'):
+                main_window.set_patch_mode(False)
+            if hasattr(main_window, 'set_patch_eraser_mode'):
+                main_window.set_patch_eraser_mode(False)
+
+            self.ctrl_pressed = False
             self.selection_mode = False
             try:
-                self.setCursor(Qt.CursorShape.CrossCursor if keep_enabled else Qt.CursorShape.ArrowCursor)
+                self.setCursor(Qt.CursorShape.ArrowCursor)
             except Exception:
                 pass
 
@@ -3145,37 +3220,8 @@ class PdfViewerWidget(QLabel):
             self.selection_mode = False
     
     def _screen_to_pdf_coordinates(self, screen_x, screen_y):
-        """화면 좌표를 PDF 좌표로 변환"""
-        try:
-            scroll_area = self.parent()
-            
-            if hasattr(scroll_area, 'horizontalScrollBar'):
-                scroll_offset_x = scroll_area.horizontalScrollBar().value()
-                scroll_offset_y = scroll_area.verticalScrollBar().value()
-                
-                pixmap = self.pixmap()
-                if pixmap:
-                    widget_rect = self.rect()
-                    pixmap_rect = pixmap.rect()
-                    
-                    offset_x = (widget_rect.width() - pixmap_rect.width()) // 2
-                    offset_y = (widget_rect.height() - pixmap_rect.height()) // 2
-                    
-                    pixmap_x = screen_x - offset_x + scroll_offset_x
-                    pixmap_y = screen_y - offset_y + scroll_offset_y
-                    
-                    pdf_x = pixmap_x / self.pixmap_scale_factor
-                    pdf_y = pixmap_y / self.pixmap_scale_factor
-                else:
-                    pdf_x = screen_x / self.pixmap_scale_factor
-                    pdf_y = screen_y / self.pixmap_scale_factor
-            else:
-                pdf_x = screen_x / self.pixmap_scale_factor
-                pdf_y = screen_y / self.pixmap_scale_factor
-            
-            return (pdf_x, pdf_y)
-        except:
-            return (None, None)
+        """화면 좌표를 PDF 좌표로 변환 - _widget_point_to_pdf와 통합"""
+        return self._widget_point_to_pdf(QPoint(int(screen_x), int(screen_y)))
     
     def _screen_rect_to_pdf_rect(self, screen_rect):
         """화면 사각형을 PDF 좌표계로 변환"""
@@ -3369,8 +3415,9 @@ class PdfViewerWidget(QLabel):
         flags=0,
         font_path=None,
         synth_bold=False,
-        synth_bold_weight=150,
-        underline_weight=1,
+        synth_bold_weight=120,
+        underline_weight=0.6,
+        underline_offset=1.5,
         patch_margin=None,
         patch_margin_h=None,
         patch_margin_v=None,
@@ -3379,14 +3426,18 @@ class PdfViewerWidget(QLabel):
         descent_ratio=None,
         source_bbox=None,
         preview_height_ratio=None,
-        hwp_space_mode=False
+        hwp_space_mode=False,
+        text_only_mode=False,
+        origin=None,
+        new_values=None,
+        pdf_font_name=None
     ):
         """새로운 텍스트 오버레이 추가 (레이어 방식) - 완전한 속성 지원"""
         print(f"TextOverlay 생성 중 - 폰트: '{font}', 크기: {size}, 플래그: {flags}")
         norm_height = TextOverlay._normalize_height_ratio(height_ratio if height_ratio is not None else 1.15)
         preview_norm = TextOverlay._normalize_height_ratio(preview_height_ratio if preview_height_ratio is not None else norm_height)
         if ascent_ratio is None:
-            ascent_ratio = norm_height * 0.86
+            ascent_ratio = norm_height * 0.85
         if descent_ratio is None:
             descent_ratio = max(0.0, norm_height - ascent_ratio)
         overlay = TextOverlay(
@@ -3403,8 +3454,12 @@ class PdfViewerWidget(QLabel):
             source_bbox=source_bbox,
             preview_height_ratio=preview_norm,
             hwp_space_mode=hwp_space_mode,
+            text_only_mode=text_only_mode,
             synth_bold_weight=synth_bold_weight,
-            underline_weight=underline_weight
+            underline_weight=underline_weight,
+            underline_offset=underline_offset,
+            origin=origin,
+            pdf_font_name=pdf_font_name
         )
         overlay.z_index = self.overlay_id_counter
         self.overlay_id_counter += 1
@@ -3415,6 +3470,7 @@ class PdfViewerWidget(QLabel):
                 patch_margin=patch_margin,
                 patch_margin_h=patch_margin_h,
                 patch_margin_v=patch_margin_v,
+                new_values=new_values
             )
 
         if page_num not in self.text_overlays:
@@ -3651,7 +3707,10 @@ class PdfViewerWidget(QLabel):
                                 'current_bbox': ov.bbox,
                                 'is_overlay': True,
                                 'overlay_id': ov.z_index,
-                                'page_num': self.current_page_num
+                                'page_num': self.current_page_num,
+                                'synth_bold_weight': getattr(ov, 'synth_bold_weight', 120),
+                                'underline_weight': getattr(ov, 'underline_weight', 0.6),
+                                'underline_offset': getattr(ov, 'underline_offset', 1.5)
                             }
                             self.enter_quick_adjustment_mode(overlay_info)
                             self.pending_single_click_pos = None
@@ -3750,7 +3809,7 @@ class UndoRedoManager:
                         'visible': ov.visible,
                         'font_path': getattr(ov, 'font_path', None),
                         'synth_bold': getattr(ov, 'synth_bold', False),
-                        'synth_bold_weight': int(getattr(ov, 'synth_bold_weight', 150)),
+                        'synth_bold_weight': int(getattr(ov, 'synth_bold_weight', 120)),
                         'underline_weight': int(getattr(ov, 'underline_weight', 1)),
                         'hwp_space_mode': bool(getattr(ov, 'hwp_space_mode', False)),
                         'patch_margin_h': float(getattr(ov, 'patch_margin_h', 0.0)),
@@ -3807,7 +3866,8 @@ class UndoRedoManager:
                     descent_ratio=descent_ratio,
                     source_bbox=source_bbox,
                     hwp_space_mode=bool(it.get('hwp_space_mode', False)),
-                    synth_bold_weight=int(it.get('synth_bold_weight', 150)),
+                    text_only_mode=bool(it.get('text_only_mode', False)),
+                    synth_bold_weight=int(it.get('synth_bold_weight', 120)),
                     underline_weight=int(it.get('underline_weight', 1))
                 )
                 ov.preview_height_ratio = TextOverlay._normalize_height_ratio(preview_height_ratio if preview_height_ratio is not None else height_ratio)
@@ -3916,13 +3976,29 @@ class UndoRedoManager:
         return None
 
 class MainWindow(QMainWindow):
+    _instance = None # 전역 접근을 위한 클래스 변수
+
     def __init__(self, initial_pdf_path: Optional[str] = None):
         super().__init__()
+        MainWindow._instance = self # 인스턴스 저장
         self.settings = QSettings('yongpdf', 'main-codex1')
         self._init_translations()
+        
+        # Load available languages dynamically from the i18n directory
+        self.available_languages = sorted(self.translations.keys())
+        
         saved_lang = self.settings.value('language', 'ko') if self.settings else 'ko'
-        self.language = saved_lang if saved_lang in self.translations else 'ko'
-        self.available_languages = ['ko', 'en', 'ja', 'zh-CN', 'zh-TW']
+        self.language = str(saved_lang) if saved_lang in self.translations else 'ko'
+        
+        # 테마 미리 적용 (UI 생성 및 로딩창 표시 전)
+        try:
+            stored_theme = self.settings.value('theme_mode', 'dark')
+            self.theme_mode = str(stored_theme) if stored_theme in ('light', 'dark') else 'dark'
+            self.apply_theme(self.theme_mode)
+        except Exception:
+            self.theme_mode = 'dark'
+            self.apply_theme('dark')
+
         self.font_manager = SystemFontManager()
         self.undo_manager = UndoRedoManager()
         self.has_changes = False
@@ -3946,10 +4022,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(self.t('app_title'))
         self.setGeometry(100, 100, 1200, 900)
         self.zoom_factor = 1.0
+        self.zoom_levels = [0.25, 0.33, 0.50, 0.67, 0.75, 0.80, 0.90, 1.0, 1.10, 1.25, 1.50, 1.75, 2.00, 2.50, 3.00, 4.00, 5.00, 6.00, 7.00, 8.00]
         self.current_base_scale = 1.0
         
-        # 패치 크기 조절 설정 (기본값, 비율)
-        self.patch_margin = (0.02, 0.02)  # 가로/세로 2% 확장 기본값
+        # 패치 크기 조절 설정 (기본값, 비율: Left, Right, Top, Bottom)
+        self.patch_margin = (0.02, 0.02, 0.02, 0.02)  # 상하좌우 2% 확장 기본값
         self.patch_precise_mode = False  # 정밀 모드
         self.patch_only_mode = False
         self._patch_mode_restore_state: Optional[bool] = None
@@ -4017,7 +4094,8 @@ class MainWindow(QMainWindow):
             return None
         try:
             raw_font = QRawFont()
-            if not raw_font.loadFromFile(font_path, 1000.0):
+            # 3개의 인자를 명시적으로 전달 (경로, 크기, 힌트) - 일부 PySide6 버전 호환성 해결
+            if not raw_font.loadFromFile(font_path, 1000.0, QFont.HintingPreference.PreferDefaultHinting):
                 self._raw_font_metrics_cache[font_path] = None
                 return None
             ascent = float(raw_font.ascent())
@@ -4081,7 +4159,7 @@ class MainWindow(QMainWindow):
                 qfont.setStretch(int(max(1, min(400, float(stretch) * 100))))
             except Exception:
                 pass
-            metrics = QFontMetrics(qfont)
+            metrics = QFontMetricsF(qfont)
             denom = qfont.pixelSize() if qfont.pixelSize() > 0 else 1000.0
             try:
                 height_ratio = metrics.height() / float(denom)
@@ -4090,7 +4168,7 @@ class MainWindow(QMainWindow):
             try:
                 ascent_ratio = metrics.ascent() / float(denom)
             except Exception:
-                ascent_ratio = height_ratio * 0.86
+                ascent_ratio = height_ratio * 0.85
             try:
                 descent_ratio = metrics.descent() / float(denom)
             except Exception:
@@ -4125,16 +4203,19 @@ class MainWindow(QMainWindow):
             print(f"창 상태 복원 실패: {state_err}")
 
         try:
-            stored_theme = self.settings.value('theme_mode')
-            if stored_theme in ('light', 'dark'):
-                self.apply_theme(stored_theme)
+            # 테마를 다시 적용하여 setup_ui에서 생성된 위젯들에 스타일 반영
+            self.apply_theme(self.theme_mode)
+            self._sync_theme_actions()
         except Exception as theme_err:
-            print(f"테마 복원 실패: {theme_err}")
+            print(f"테마 상태 적용 및 싱크 실패: {theme_err}")
 
         zoom_value = self.settings.value('zoom_factor')
         if zoom_value is not None:
             try:
-                self.zoom_factor = max(0.2, min(8.0, float(zoom_value)))
+                val = float(zoom_value)
+                levels = getattr(self, 'zoom_levels', [1.0])
+                # 가장 가까운 단계로 스냅
+                self.zoom_factor = min(levels, key=lambda x: abs(x - val))
             except Exception as zoom_err:
                 print(f"줌 값 복원 실패: {zoom_err}")
 
@@ -4205,12 +4286,22 @@ class MainWindow(QMainWindow):
         if not self.settings:
             return
         try:
-            if isinstance(self.patch_margin, (tuple, list)) and len(self.patch_margin) >= 2:
-                self.settings.setValue('patch_margin_h', float(self.patch_margin[0]))
-                self.settings.setValue('patch_margin_v', float(self.patch_margin[1]))
+            if isinstance(self.patch_margin, (tuple, list)) and len(self.patch_margin) == 4:
+                self.settings.setValue('patch_margin_l', float(self.patch_margin[0]))
+                self.settings.setValue('patch_margin_r', float(self.patch_margin[1]))
+                self.settings.setValue('patch_margin_t', float(self.patch_margin[2]))
+                self.settings.setValue('patch_margin_b', float(self.patch_margin[3]))
+            elif isinstance(self.patch_margin, (tuple, list)) and len(self.patch_margin) >= 2:
+                self.settings.setValue('patch_margin_l', float(self.patch_margin[0]))
+                self.settings.setValue('patch_margin_r', float(self.patch_margin[0]))
+                self.settings.setValue('patch_margin_t', float(self.patch_margin[1]))
+                self.settings.setValue('patch_margin_b', float(self.patch_margin[1]))
             else:
-                self.settings.setValue('patch_margin_h', float(self.patch_margin))
-                self.settings.setValue('patch_margin_v', float(self.patch_margin))
+                val = float(self.patch_margin)
+                self.settings.setValue('patch_margin_l', val)
+                self.settings.setValue('patch_margin_r', val)
+                self.settings.setValue('patch_margin_t', val)
+                self.settings.setValue('patch_margin_b', val)
         except Exception:
             pass
 
@@ -4231,48 +4322,77 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def preview_patch_margin(self, overlay_key, percent_h, percent_v):
-        try:
-            value_h = float(percent_h)
-        except Exception:
-            value_h = 0.0
-        try:
-            value_v = float(percent_v)
-        except Exception:
-            value_v = 0.0
-        value_h = max(-0.5, min(0.5, value_h))
-        value_v = max(-0.5, min(0.5, value_v))
-        self.patch_margin = (value_h, value_v)
-        if not overlay_key:
+    def preview_edit_changes(self, overlay_key, new_values):
+        """텍스트 편집창의 변경사항을 실시간으로 화면에 반영"""
+        print(f"[Preview] Key={overlay_key}, Values received (text='{new_values.get('text')}')")
+        
+        if not overlay_key or not self.pdf_viewer or not self.pdf_viewer.doc:
+            print(f"[Preview] Early return: key={overlay_key}, viewer={bool(self.pdf_viewer)}")
             return
+
         page_num, overlay_id = overlay_key
-        if page_num is None or overlay_id is None:
-            return
-        if not self.pdf_viewer or not self.pdf_viewer.doc:
-            return
         overlay = self.pdf_viewer.get_overlay_by_id(page_num, overlay_id)
         if not overlay:
-            return
-        overlay.patch_margin_h = value_h
-        overlay.patch_margin_v = value_v
+            print(f"[Preview] Overlay not found on page {page_num} with ID {overlay_id}")
+            # 위치 기반으로 재시도 (ID 매칭 실패 대비)
+            try:
+                original_bbox = new_values.get('original_bbox')
+                if original_bbox:
+                    overlay = self.pdf_viewer.find_overlay_at_position(page_num, fitz.Rect(original_bbox))
+                    if overlay:
+                        print(f"[Preview] Found overlay via fallback position match: ID {overlay.z_index}")
+            except Exception: pass
+            
+            if not overlay: return
+
         try:
+            # 실시간 미리보기를 위해 insert_overlay_text 로직을 직접 활용
+            # 이 메서드는 이미 존재하는 오버레이를 업데이트하도록 설계됨
             page = self.pdf_viewer.doc.load_page(page_num)
-            color_int = overlay.color if isinstance(overlay.color, int) else 0
-            qcolor = QColor((color_int >> 16) & 0xFF, (color_int >> 8) & 0xFF, color_int & 0xFF)
-            preview_values = {
-                'text': overlay.text,
-                'font': overlay.font,
-                'size': overlay.size,
-                'color': qcolor,
-                'patch_margin_h': value_h,
-                'patch_margin_v': value_v,
-                'patch_margin': (value_h, value_v),
-                'use_custom_patch_color': False
+            
+            # span 더미 정보 생성 (insert_overlay_text 호출용)
+            span_dummy = {
+                'original_bbox': overlay.original_bbox,
+                'current_bbox': overlay.bbox,
+                'is_overlay': True,
+                'overlay_id': overlay.z_index,
+                'origin': getattr(overlay, 'origin', None),
+                'page_num': page_num,
+                'font': getattr(overlay, 'font', 'Arial'),
+                'size': getattr(overlay, 'size', 12.0),
+                'flags': getattr(overlay, 'flags', 0)
             }
-            self.apply_background_patch(page, overlay.original_bbox, preview_values, overlay=overlay, preview=True)
-            self.pdf_viewer.update()
-        except Exception as preview_err:
-            print(f"패치 미리보기 실패: {preview_err}")
+            
+            # 1. 오버레이 속성 및 텍스트 업데이트
+            print(f"[Preview] Calling insert_overlay_text for update...")
+            self.insert_overlay_text(page, span_dummy, new_values)
+            
+            # 2. 배경 패치(여백 포함) 실시간 업데이트
+            print(f"[Preview] Updating background patch...")
+            self.apply_background_patch(page, overlay.original_bbox, new_values, overlay=overlay, preview=True)
+            
+            # 3. 화면 즉시 갱신 강제
+            from PySide6.QtWidgets import QApplication
+            self.pdf_viewer.repaint() # 즉각적인 repaint 사용
+            QApplication.processEvents()
+            print(f"[Preview] UI Update triggered successfully (repaint used)")
+            
+        except Exception as e:
+            print(f"실시간 미리보기 업데이트 실패: {e}")
+            import traceback
+            traceback.print_exc()
+            import traceback
+            traceback.print_exc()
+
+    def preview_patch_margin(self, overlay_key, m_l, m_r, m_t, m_b):
+        # preview_edit_changes로 통합됨 (호환성을 위해 유지하거나 호출 전환)
+        nv = {
+            'patch_margin_l': m_l,
+            'patch_margin_r': m_r,
+            'patch_margin_t': m_t,
+            'patch_margin_b': m_b
+        }
+        self.preview_edit_changes(overlay_key, nv)
 
     def _compute_height_ratio(self, bbox, font_size, reference_size=None):
         try:
@@ -4288,1190 +4408,62 @@ class MainWindow(QMainWindow):
         return max(0.6, min(1.6, ratio))
 
     def _init_translations(self):
-        self.translations = {
-            'ko': {
-                'app_title': '용PDF_text',
-                'loading_app': '편집기를 준비하는 중입니다...',
-                'loading_external_editor': '외부 편집기를 실행하는 중입니다...',
-                'external_editor_ready': '외부 편집기를 열었습니다.',
-                'external_editor_running': '외부 편집기가 이미 실행 중입니다.',
-                'external_editor_refresh_notice': '외부 편집 저장을 감지하여 문서를 새로고침했습니다.',
-                'menu_file': '📁 파일',
-                'menu_edit': '✏️ 편집',
-                'menu_view': '🔍 보기',
-                'menu_tools': '🔧 도구',
-                'menu_help': 'ℹ️ 도움말',
-                'menu_language': '🌐 언어',
-                'lang_ko': '한국어',
-                'lang_en': 'English',
-                'lang_ja': '日本語',
-                'lang_zh-CN': '简体中文',
-                'lang_zh-TW': '繁體中文',
-                'action_open_pdf': '📂 PDF 열기',
-                'action_save_session': '💼 세션 저장',
-                'action_load_session': '💼 세션 불러오기',
-                'action_save': '💾 저장',
-                'action_save_as': '📝 다른 이름으로 저장',
-                'action_quit': '🚪 종료',
-                'action_undo': '↩️ 실행취소',
-                'action_redo': '↪️ 다시실행',
-                'action_precise_mode': '🩹 패치 모드',
-                'action_patch_eraser': '🧽 지우개 모드',
-                'action_zoom_out': '🔍➖ 축소',
-                'action_zoom_in': '🔍➕ 확대',
-                'action_fit_width': '↔️ 가로 맞춤',
-                'action_fit_height': '↕️ 세로 맞춤',
-                'action_optimize_patches': '⚡ 모든 패치 최적화',
-                'action_show_patch_info': '📊 패치 정보 표시',
-                'action_force_text_flatten': '🧱 텍스트 유지 정밀 플래튼',
-                'action_prev_page': '⬅️ 이전 페이지',
-                'action_next_page': '➡️ 다음 페이지',
-                'action_shortcuts': '⌨️ 단축키',
-                'action_usage_guide': '❓ 사용방법 안내',
-                'action_about': 'ℹ️ 정보',
-                'action_license': '오픈소스 라이선스',
-                'license_popup_title': '오픈소스 라이선스 정보',
-                'license_content_header': '본 앱은 다음 오픈소스 소프트웨어를 사용합니다.<br>각 라이선스 조건을 준수하며 배포됩니다.<br><br>',
-                'action_font_log_label': '글꼴 로그 상세도: {label}',
-                'font_log_level_0': '끔',
-                'font_log_level_1': '보통',
-                'font_log_level_2': '상세',
-                'progress_saving_pdf': '문서를 저장하는 중입니다...',
-                'progress_flatten_overlays': '오버레이 반영 중…',
-                'progress_writing_pdf': '파일 저장 중…',
-                'progress_preparing_fonts': '글꼴 적용을 준비하는 중입니다…',
-                'progress_ensuring_fonts': '페이지 {page} 글꼴을 적용하는 중입니다…',
-                'progress_applying_overlay': "페이지 {page} 오버레이 반영 중… '{text}'",
-                'dialog_save': '저장',
-                'dialog_save_as': '다른 이름으로 저장',
-                'save_success_message': 'PDF 저장을 완료했습니다.',
-                'save_failed_detail': 'PDF를 저장하지 못했습니다: {error}',
-                'save_permission_error_detail': '현재 위치에 저장할 수 없습니다. 다른 위치를 선택해 주세요.\\n에러: {error}',
-                'overlay_deleted': '선택한 텍스트 레이어를 삭제했습니다.',
-                'title_unsaved_changes': '변경 사항이 저장되지 않았습니다',
-                'msg_unsaved_changes': '변경 사항이 저장되지 않았습니다. 새 파일을 열기 전에 저장하시겠습니까?',
-                'title_error': '오류',
-                'title_warning': '경고',
-                'title_success': '완료',
-                'title_info': '알림',
-                'msg_no_pdf': '열려 있는 PDF 문서가 없습니다.',
-                'msg_open_failed': 'PDF를 열 수 없습니다: {error}',
-                'tooltip_open': 'PDF 열기 (Ctrl+O)',
-                'tooltip_save': '저장 (Ctrl+S)',
-                'tooltip_undo': '실행취소 (Ctrl+Z)',
-                'tooltip_redo': '다시실행 (Ctrl+Y)',
-                'tooltip_zoom_in': '확대 (Ctrl++)',
-                'tooltip_zoom_out': '축소 (Ctrl+-)',
-                'tooltip_fit_width': '가로 맞춤 (Ctrl+0)',
-                'tooltip_fit_height': '세로 맞춤 (Ctrl+Shift+0)',
-                'tooltip_prev_page': '이전 페이지 (Page Up)',
-                'tooltip_next_page': '다음 페이지 (Page Down)',
-                'tooltip_goto_page': '이동할 페이지 입력 후 Enter',
-                'goto_page_placeholder': '페이지',
-                'tooltip_patch_mode': '패치 모드 전환',
-                'tooltip_patch_eraser': '지우개 모드 (패치만 생성)',
-                'tooltip_theme': '라이트/다크 테마 전환',
-                'status_patch_mode_on': '🩹 패치 모드가 활성화되었습니다.',
-                'status_patch_mode_off': '🩹 패치 모드가 해제되었습니다.',
-                'status_patch_eraser_on': '🧽 지우개 모드가 활성화되었습니다.',
-                'status_patch_eraser_off': '🧽 지우개 모드가 해제되었습니다.',
-                'action_light_mode': '🌞 라이트 모드',
-                'action_dark_mode': '🌙 다크 모드',
-                'page_label_template': '페이지: {current}/{total}',
-                'page_label_empty': '페이지: 0/0',
-                'zoom_label_template': '배율: {percent}%',
-                'viewer_placeholder': 'PDF 파일을 열어 편집을 시작하세요.',
-                'shortcuts_text': (
-                    "📋 주요 단축키:\n\n"
-                    "🔍 보기:\n"
-                    " • Ctrl + '+' : 확대\n"
-                    " • Ctrl + '-' : 축소\n"
-                    " • Ctrl + 0 : 가로 맞춤\n"
-                    " • Ctrl + Shift + 0 : 세로 맞춤\n\n"
-                    "📖 페이지 이동:\n"
-                    " • Page Up : 이전 페이지\n"
-                    " • Page Down : 다음 페이지\n\n"
-                    "✏️ 편집:\n"
-                    " • 방향키 : 선택된 텍스트 위치 조정\n\n"
-                    "📁 파일:\n"
-                    " • Ctrl + O : PDF 열기\n"
-                    " • Ctrl + S : 저장\n"
-                    " • Ctrl + Q : 종료"
-                ),
-                'about_text': (
-                    "📄 용PDF_text\n\n"
-                    "🛠️ 주요 기능:\n"
-                    " • 텍스트와 패치 편집 지원\n"
-                    " • 패치 모드로 빠르게 배경 정리\n"
-                    " • 글꼴 설치 안내 제공\n"
-                    " • 다국어 인터페이스 지원\n\n"
-                    "💻 개발 및 채널:\n"
-                    " • Python + PySide6 + PyMuPDF\n"
-                    " • 채널: <a href='https://www.youtube.com/playlist?list=PLs36bSFfggCC3OmaZ57B-UBiWWsrTzGXs'>용툴즈 스튜디오</a>\n\n"
-                ),
-                'text_editor_title': '텍스트 편집',
-                'text_label': '텍스트',
-                'font_label': '폰트',
-                'size_label': '크기',
-                'stretch_label': '장평',
-                'tracking_label': '자간 (%)',
-                'color_label': '색상',
-                'style_label': '스타일',
-                'style_bold': '굵게',
-                'style_italic': '기울임',
-                'style_underline': '밑줄',
-                'force_image_label': '이미지로 렌더링 (텍스트를 비트맵으로 저장)',
-                'patch_color_label': '패치 색상',
-                'patch_color_pick': '패치 색상 직접 지정',
-                'patch_group_title': '패치 설정',
-                'patch_margin_label_horizontal': '가로 여백 (%)',
-                'patch_margin_label_vertical': '세로 여백 (%)',
-                'patch_margin_hint': '텍스트 크기를 기준으로 가로·세로 방향을 각각 -50%~50% 범위에서 조절합니다.',
-                'btn_yes': '예',
-                'btn_no': '아니오',
-                'btn_cancel': '취소',
-                'btn_clear_text': '지우기',
-                'font_combo_all_fonts': '--- 전체 폰트 ---',
-                'install_font_button': '폰트 설치 안내',
-                'original_font_group': '원본 폰트 정보',
-                'original_font_label': '🔤 원본 폰트',
-                'font_alias_label': '🆔 폰트 별칭',
-                'original_size_label': '📐 원본 크기',
-                'original_style_label': '✨ 원본 스타일',
-                'install_status_label': '💾 설치 상태',
-                'installed_label': "<span style='color: green;'>✅ 설치됨 ({font})</span>",
-                'install_path_label': '📁 경로',
-                'not_installed_label': "<span style='color: red;'>❌ 미설치</span>",
-                'recommended_font_label': '🤖 추천 대체 폰트',
-                'no_alternative_label': "<i style='color: #999;'>대체 폰트 없음</i>",
-                'install_method_label': '📥 설치 방법',
-                'font_install_link_text': "'{font}' 설치 가이드",
-                'font_install_dialog_title': "'{font}' 폰트 설치 안내",
-                'font_install_general_title': '폰트 설치 안내',
-                'font_install_intro_html': (
-                    "<h3>'{font}' 폰트 설치 방법</h3>\n"
-                    "<p><b>필요한 폰트:</b> {font}</p>\n"
-                    "<h4>폰트 검색 및 다운로드</h4>\n"
-                    "<p>다음 사이트에서 폰트를 검색하여 다운로드할 수 있습니다:</p>\n"
-                    "<ul>\n"
-                    "<li><b>눈누(국문 폰트):</b> <a href=\\\"https://noonnu.cc/\\\">noonnu.cc</a></li>\n"
-                    "<li><b>Adobe Fonts</b></li>\n"
-                    "<li><b>기타 공개 폰트 라이브러리</b></li>\n"
-                    "</ul>\n"
-                    "<h4>다운로드한 폰트 설치</h4>\n"
-                ),
-                'font_install_general_intro_html': (
-                    "<h3>폰트 설치 안내</h3>\n"
-                    "<p><b>원본 폰트:</b> {original}</p>\n"
-                    "<p><b>폰트명:</b> {clean}</p>\n"
-                    "<h4>폰트 검색 및 다운로드</h4>\n"
-                    "<p>다음 사이트에서 폰트를 검색하여 다운로드할 수 있습니다:</p>\n"
-                    "<ul>\n"
-                    "<li><b>눈누(국문 폰트):</b> <a href=\\\"https://noonnu.cc/\\\">noonnu.cc</a></li>\n"
-                    "<li><b>Adobe Fonts</b></li>\n"
-                    "<li><b>기타 공개 폰트 라이브러리</b></li>\n"
-                    "</ul>\n"
-                    "<h4>다운로드한 폰트 설치</h4>\n"
-                ),
-                'font_install_windows_html': (
-                    "<p><b>Windows:</b></p>\n"
-                    "<ol>\n"
-                    "<li>.ttf 또는 .otf 파일을 마우스 오른쪽 버튼으로 클릭하여 \"설치\" 선택</li>\n"
-                    "<li>또는 C:\\\\Windows\\\\Fonts 폴더에 복사</li>\n"
-                    "<li>설치 후 애플리케이션을 재시작</li>\n"
-                    "</ol>\n"
-                ),
-                'font_install_mac_html': (
-                    "<p><b>macOS:</b></p>\n"
-                    "<ol>\n"
-                    "<li>다운로드한 .ttf 또는 .otf 파일을 더블 클릭</li>\n"
-                    "<li>Font Book에서 \"Install Font\" 클릭</li>\n"
-                    "<li>또는 ~/Library/Fonts 폴더에 복사</li>\n"
-                    "<li>설치 후 애플리케이션을 재시작</li>\n"
-                    "</ol>\n"
-                ),
-                'font_install_linux_html': (
-                    "<p><b>Linux:</b></p>\n"
-                    "<ol>\n"
-                    "<li>폰트 파일을 ~/.fonts 또는 ~/.local/share/fonts에 복사</li>\n"
-                    "<li>터미널에서 'fc-cache -fv' 실행</li>\n"
-                    "<li>설치 후 애플리케이션을 재시작</li>\n"
-                    "</ol>\n"
-                ),
-                'font_install_warning_html': (
-                    "<h4>주의 사항</h4>\n"
-                    "<ul>\n"
-                    "<li>폰트 설치 후 애플리케이션을 재시작해야 새 폰트가 인식됩니다.</li>\n"
-                    "<li>유료 폰트 사용 시 라이선스를 반드시 확인하세요.</li>\n"
-                    "<li>정확한 폰트명으로 검색하면 더 쉽게 찾을 수 있습니다.</li>\n"
-                    "</ul>\n"
-                ),
-                'font_install_sites_html': (
-                    "<h4>추천 사이트</h4>\n"
-                    "<ul>\n"
-                    "<li><b>눈누(국문 폰트):</b> <a href=\\\"https://noonnu.cc/\\\">noonnu.cc</a></li>\n"
-                    "<li><b>Adobe Fonts:</b> <a href=\\\"https://fonts.adobe.com\\\">fonts.adobe.com</a></li>\n"
-                    "<li><b>기타 공개 폰트 아카이브</b></li>\n"
-                    "</ul>\n"
-                ),
-                'font_install_google_button': "Google에서 \"{font} {suffix}\" 검색",
-                'font_install_google_query_suffix': '눈누',
-                'font_install_noonnu_button': '눈누 홈 열기',
-                'button_close': '닫기',
-                'support_menu': '❣️개발자 후원하기❣️',
-                'donate_kakao': '카카오페이로 후원하기',
-                'donate_paypal': 'PayPal로 후원하기',
-                'donate_paypal_message': '<a href="https://www.paypal.com/paypalme/1hwangjinsu">https://www.paypal.com/paypalme/1hwangjinsu</a> 에서 후원해주세요🙏 진심으로 감사합니다❣️',
-                'donate_image_missing': '후원 이미지를 찾을 수 없습니다.'
-            },
-            'en': {
-                'app_title': 'YongPDF_text',
-                'loading_app': 'Preparing the editor...',
-                'loading_external_editor': 'Launching the external editor...',
-                'external_editor_ready': 'External editor started.',
-                'external_editor_running': 'External editor is already running.',
-                'external_editor_refresh_notice': 'Detected external edits and reloaded the document.',
-                'menu_file': '📁 File',
-                'menu_edit': '✏️ Edit',
-                'menu_view': '🔍 View',
-                'menu_tools': '🔧 Tools',
-                'menu_help': 'ℹ️ Help',
-                'menu_language': '🌐 Language',
-                'lang_ko': 'Korean',
-                'lang_en': 'English',
-                'lang_ja': 'Japanese',
-                'lang_zh-CN': 'Simplified Chinese',
-                'lang_zh-TW': 'Traditional Chinese',
-                'action_open_pdf': '📂 Open PDF',
-                'action_save_session': '💼 Save Session',
-                'action_load_session': '💼 Load Session',
-                'action_save': '💾 Save',
-                'action_save_as': '📝 Save As',
-                'action_quit': '🚪 Quit',
-                'action_undo': '↩️ Undo',
-                'action_redo': '↪️ Redo',
-                'action_precise_mode': '🩹 Patch Mode',
-                'action_patch_eraser': '🧽 Eraser mode',
-                'action_zoom_out': '🔍➖ Zoom Out',
-                'action_zoom_in': '🔍➕ Zoom In',
-                'action_fit_width': '↔️ Fit Width',
-                'action_fit_height': '↕️ Fit Height',
-                'action_optimize_patches': '⚡ Optimize All Patches',
-                'action_show_patch_info': '📊 Show Patch Info',
-                'action_force_text_flatten': '🧱 Preserve Text Flatten',
-                'action_prev_page': '⬅️ Previous Page',
-                'action_next_page': '➡️ Next Page',
-                'action_shortcuts': '⌨️ Shortcuts',
-                'action_usage_guide': '❓ User Guide',
-                'action_about': 'ℹ️ About',
-                'action_license': 'Open Source Licenses',
-                'license_popup_title': 'Open Source Licenses',
-                'license_content_header': 'This app uses the following open source software.<br>Distributed in compliance with each license.<br><br>',
-                'action_font_log_label': 'Font log verbosity: {label}',
-                'font_log_level_0': 'Off',
-                'font_log_level_1': 'Normal',
-                'font_log_level_2': 'Verbose',
-                'progress_saving_pdf': 'Saving document…',
-                'progress_flatten_overlays': 'Merging text layers…',
-                'progress_writing_pdf': 'Writing PDF file…',
-                'progress_preparing_fonts': 'Preparing font application…',
-                'progress_ensuring_fonts': 'Ensuring fonts on page {page}…',
-                'progress_applying_overlay': "Applying overlay on page {page}… '{text}'",
-                'dialog_save': 'Save',
-                'dialog_save_as': 'Save As',
-                'save_success_message': 'Saved the PDF successfully.',
-                'save_failed_detail': 'Failed to save the PDF: {error}',
-                'save_permission_error_detail': 'Cannot save to the current location. Please choose a different folder.\\nError: {error}',
-                'overlay_deleted': 'Deleted the selected text layer.',
-                'title_unsaved_changes': 'Unsaved Changes',
-                'msg_unsaved_changes': 'You have unsaved changes. Save before opening another file?',
-                'title_error': 'Error',
-                'title_warning': 'Warning',
-                'title_success': 'Success',
-                'title_info': 'Information',
-                'msg_no_pdf': 'No PDF document is open.',
-                'msg_open_failed': 'Failed to open PDF: {error}',
-                'tooltip_open': 'Open PDF (Ctrl+O)',
-                'tooltip_save': 'Save (Ctrl+S)',
-                'tooltip_undo': 'Undo (Ctrl+Z)',
-                'tooltip_redo': 'Redo (Ctrl+Y)',
-                'tooltip_zoom_in': 'Zoom In (Ctrl++)',
-                'tooltip_zoom_out': 'Zoom Out (Ctrl+-)',
-                'tooltip_fit_width': 'Fit width (Ctrl+0)',
-                'tooltip_fit_height': 'Fit height (Ctrl+Shift+0)',
-                'tooltip_prev_page': 'Previous Page (Page Up)',
-                'tooltip_next_page': 'Next Page (Page Down)',
-                'tooltip_goto_page': 'Enter page number and press Enter',
-                'goto_page_placeholder': 'Page',
-                'tooltip_patch_mode': 'Toggle patch mode',
-                'tooltip_patch_eraser': 'Eraser mode (patch only)',
-                'tooltip_theme': 'Toggle light/dark theme',
-                'status_patch_mode_on': '🩹 Patch mode enabled.',
-                'status_patch_mode_off': '🩹 Patch mode disabled.',
-                'status_patch_eraser_on': '🧽 Eraser mode enabled.',
-                'status_patch_eraser_off': '🧽 Eraser mode disabled.',
-                'action_light_mode': '🌞 Light mode',
-                'action_dark_mode': '🌙 Dark mode',
-                'page_label_template': 'Page: {current}/{total}',
-                'page_label_empty': 'Page: 0/0',
-                'zoom_label_template': 'Zoom: {percent}%',
-                'viewer_placeholder': 'Open a PDF to begin editing.',
-                'shortcuts_text': (
-                    "📋 Key Shortcuts:\n\n"
-                    "🔍 View:\n"
-                    " • Ctrl + '+' : Zoom in\n"
-                    " • Ctrl + '-' : Zoom out\n"
-                    " • Ctrl + 0 : Fit width\n"
-                    " • Ctrl + Shift + 0 : Fit height\n\n"
-                    "📖 Navigation:\n"
-                    " • Page Up : Previous page\n"
-                    " • Page Down : Next page\n\n"
-                    "✏️ Editing:\n"
-                    " • Arrow keys : Move selected text\n\n"
-                    "📁 File:\n"
-                    " • Ctrl + O : Open PDF\n"
-                    " • Ctrl + S : Save\n"
-                    " • Ctrl + Q : Quit"
-                ),
-                'about_text': (
-                    "📄 YongPDF_text\n\n"
-                    "🛠️ Key Features:\n"
-                    " • Edit text overlays and background patches\n"
-                    " • Patch mode for quick background cleanup\n"
-                    " • Font installation guidance\n"
-                    " • Multilingual interface\n\n"
-                    "💻 Dev & Channel:\n"
-                    " • Python + PySide6 + PyMuPDF\n"
-                    " • Channel: <a href='https://www.youtube.com/playlist?list=PLs36bSFfggCC3OmaZ57B-UBiWWsrTzGXs'>YongTools Studio</a>\n\n"
-                ),
-                'text_editor_title': 'Edit Text',
-                'text_label': 'Text',
-                'font_label': 'Font',
-                'size_label': 'Size',
-                'stretch_label': 'Stretch',
-                'tracking_label': 'Tracking (%)',
-                'color_label': 'Color',
-                'style_label': 'Style',
-                'style_bold': 'Bold',
-                'style_italic': 'Italic',
-                'style_underline': 'Underline',
-                'force_image_label': 'Render as image (embed text as bitmap)',
-                'patch_color_label': 'Patch color',
-                'patch_color_pick': 'Specify patch color manually',
-                'patch_group_title': 'Patch settings',
-                'patch_margin_label_horizontal': 'Horizontal margin (%)',
-                'patch_margin_label_vertical': 'Vertical margin (%)',
-                'patch_margin_hint': 'Adjust the cover horizontally and vertically between -50% and +50% of the text size.',
-                'btn_yes': 'Yes',
-                'btn_no': 'No',
-                'btn_cancel': 'Cancel',
-                'btn_clear_text': 'Clear',
-                'font_combo_all_fonts': '--- All Fonts ---',
-                'install_font_button': 'Font installation guide',
-                'original_font_group': 'Original font information',
-                'original_font_label': '🔤 Original font',
-                'font_alias_label': '🆔 Font alias',
-                'original_size_label': '📐 Original size',
-                'original_style_label': '✨ Original style',
-                'install_status_label': '💾 Install status',
-                'installed_label': "<span style='color: green;'>✅ Installed ({font})</span>",
-                'install_path_label': '📁 Path',
-                'not_installed_label': "<span style='color: red;'>❌ Not installed</span>",
-                'recommended_font_label': '🤖 Suggested alternative',
-                'no_alternative_label': "<i style='color: #999;'>No alternative fonts</i>",
-                'install_method_label': '📥 How to install',
-                'font_install_link_text': '"{font}" installation guide',
-                'font_install_dialog_title': '"{font}" Font Installation',
-                'font_install_general_title': 'Font installation guide',
-                'font_install_intro_html': (
-                    "<h3>Installing '{font}'</h3>\n"
-                    "<p><b>Required font:</b> {font}</p>\n"
-                    "<h4>Search and download</h4>\n"
-                    "<p>You can find downloads on the following sites:</p>\n"
-                    "<ul>\n"
-                    "<li><b>Noonnu (Korean fonts):</b> <a href=\\\"https://noonnu.cc/\\\">noonnu.cc</a></li>\n"
-                    "<li><b>Adobe Fonts</b></li>\n"
-                    "<li><b>Other public font libraries</b></li>\n"
-                    "</ul>\n"
-                    "<h4>Installing the downloaded font</h4>\n"
-                ),
-                'font_install_general_intro_html': (
-                    "<h3>Font installation guide</h3>\n"
-                    "<p><b>Original font:</b> {original}</p>\n"
-                    "<p><b>Font name:</b> {clean}</p>\n"
-                    "<h4>Search and download</h4>\n"
-                    "<p>You can find downloads on the following sites:</p>\n"
-                    "<ul>\n"
-                    "<li><b>Noonnu (Korean fonts):</b> <a href=\\\"https://noonnu.cc/\\\">noonnu.cc</a></li>\n"
-                    "<li><b>Adobe Fonts</b></li>\n"
-                    "<li><b>Other public font libraries</b></li>\n"
-                    "</ul>\n"
-                    "<h4>Installing the downloaded font</h4>\n"
-                ),
-                'font_install_windows_html': (
-                    "<p><b>Windows:</b></p>\n"
-                    "<ol>\n"
-                    "<li>Right-click the .ttf or .otf file and choose \"Install\"</li>\n"
-                    "<li>Or copy it into C:\\\\Windows\\\\Fonts</li>\n"
-                    "<li>Restart this application after installation</li>\n"
-                    "</ol>\n"
-                ),
-                'font_install_mac_html': (
-                    "<p><b>macOS:</b></p>\n"
-                    "<ol>\n"
-                    "<li>Double-click the downloaded .ttf or .otf file</li>\n"
-                    "<li>Click \"Install Font\" in Font Book</li>\n"
-                    "<li>Or copy it to ~/Library/Fonts</li>\n"
-                    "<li>Restart this application after installation</li>\n"
-                    "</ol>\n"
-                ),
-                'font_install_linux_html': (
-                    "<p><b>Linux:</b></p>\n"
-                    "<ol>\n"
-                    "<li>Copy the font file into ~/.fonts or ~/.local/share/fonts</li>\n"
-                    "<li>Run 'fc-cache -fv' in the terminal</li>\n"
-                    "<li>Restart this application after installation</li>\n"
-                    "</ol>\n"
-                ),
-                'font_install_warning_html': (
-                    "<h4>Important notes</h4>\n"
-                    "<ul>\n"
-                    "<li>Restart this application so the new font is detected.</li>\n"
-                    "<li>Verify the license before using commercial fonts.</li>\n"
-                    "<li>Search using the exact font name to get accurate results.</li>\n"
-                    "</ul>\n"
-                ),
-                'font_install_sites_html': (
-                    "<h4>Recommended sources</h4>\n"
-                    "<ul>\n"
-                    "<li><b>Noonnu (Korean fonts):</b> <a href=\\\"https://noonnu.cc/\\\">noonnu.cc</a></li>\n"
-                    "<li><b>Adobe Fonts:</b> <a href=\\\"https://fonts.adobe.com\\\">fonts.adobe.com</a></li>\n"
-                    "<li><b>Other public archives</b></li>\n"
-                    "</ul>\n"
-                ),
-                'font_install_google_button': "Search \"{font} {suffix}\" on Google",
-                'font_install_google_query_suffix': 'Noonnu',
-                'font_install_noonnu_button': 'Open noonnu home',
-                'button_close': 'Close',
-                'support_menu': '❣️Support the Developer❣️',
-                'donate_kakao': 'Support via KakaoPay',
-                'donate_paypal': 'Support via PayPal',
-                'donate_paypal_message': 'Please support via <a href="https://www.paypal.com/paypalme/1hwangjinsu">https://www.paypal.com/paypalme/1hwangjinsu</a> 🙏 Thank you so much ❣️',
-                'donate_image_missing': 'Unable to locate the donation image.'
-            },
-            'ja': {
-                'app_title': 'YongPDF_text',
-                'loading_app': 'エディタを準備しています...',
-                'loading_external_editor': '外部エディタを起動しています...',
-                'external_editor_ready': '外部エディタを起動しました。',
-                'external_editor_running': '外部エディタは既に実行中です。',
-                'external_editor_refresh_notice': '外部エディタでの保存を検知し、文書を再読み込みしました。',
-                'menu_file': '📁 ファイル',
-                'menu_edit': '✏️ 編集',
-                'menu_view': '🔍 表示',
-                'menu_tools': '🔧 ツール',
-                'menu_help': 'ℹ️ ヘルプ',
-                'menu_language': '🌐 言語',
-                'lang_ko': '韓国語',
-                'lang_en': '英語',
-                'lang_ja': '日本語',
-                'lang_zh-CN': '簡体字中国語',
-                'lang_zh-TW': '繁体字中国語',
-                'action_open_pdf': '📂 PDF を開く',
-                'action_save_session': '💼 セッション保存',
-                'action_load_session': '💼 セッション読込',
-                'action_save': '💾 保存',
-                'action_save_as': '📝 名前を付けて保存',
-                'action_quit': '🚪 終了',
-                'action_undo': '↩️ 元に戻す',
-                'action_redo': '↪️ やり直し',
-                'action_precise_mode': '🩹 パッチモード',
-                'action_patch_eraser': '🧽 消しゴムモード',
-                'action_zoom_out': '🔍➖ 縮小',
-                'action_zoom_in': '🔍➕ 拡大',
-                'action_fit_width': '↔️ 横幅に合わせる',
-                'action_fit_height': '↕️ 高さに合わせる',
-                'action_optimize_patches': '⚡ パッチを最適化',
-                'action_show_patch_info': '📊 パッチ情報',
-                'action_force_text_flatten': '🧱 テキスト保持フラッテン',
-                'action_prev_page': '⬅️ 前のページ',
-                'action_next_page': '➡️ 次のページ',
-                'action_shortcuts': '⌨️ ショートカット',
-                'action_usage_guide': '❓ 使い方ガイド',
-                'action_about': 'ℹ️ 情報',
-                'action_license': 'オープンソースライセンス',
-                'license_popup_title': 'オープンソースライセンス情報',
-                'license_content_header': '本アプリは以下のオープンソースソフトウェアを使用しています。<br>各ライセンス条件を遵守して配布されます。<br><br>',
-                'action_font_log_label': 'フォントログ詳細度: {label}',
-                'font_log_level_0': 'オフ',
-                'font_log_level_1': '標準',
-                'font_log_level_2': '詳細',
-                'progress_saving_pdf': 'ドキュメントを保存しています...',
-                'progress_flatten_overlays': 'オーバーレイを反映しています…',
-                'progress_writing_pdf': 'PDF ファイルを書き込んでいます...',
-                'progress_preparing_fonts': 'フォント適用を準備しています…',
-                'progress_ensuring_fonts': 'ページ {page} のフォントを適用中…',
-                'progress_applying_overlay': "ページ {page} のオーバーレイを反映中…『{text}』",
-                'dialog_save': '保存',
-                'dialog_save_as': '名前を付けて保存',
-                'save_success_message': 'PDF の保存が完了しました。',
-                'save_failed_detail': 'PDF を保存できませんでした: {error}',
-                'save_permission_error_detail': '現在の場所に保存できません。別の保存先を選択してください。\\nエラー: {error}',
-                'overlay_deleted': '選択したテキストレイヤーを削除しました。',
-                'title_unsaved_changes': '未保存の変更',
-                'msg_unsaved_changes': '変更が保存されていません。新しいファイルを開く前に保存しますか？',
-                'title_error': 'エラー',
-                'title_warning': '警告',
-                'title_success': '完了',
-                'title_info': '情報',
-                'msg_no_pdf': 'PDF 文書が開かれていません。',
-                'msg_open_failed': 'PDF を開けませんでした: {error}',
-                'tooltip_open': 'PDF を開く (Ctrl+O)',
-                'tooltip_save': '保存 (Ctrl+S)',
-                'tooltip_undo': '元に戻す (Ctrl+Z)',
-                'tooltip_redo': 'やり直し (Ctrl+Y)',
-                'tooltip_zoom_in': '拡大 (Ctrl++)',
-                'tooltip_zoom_out': '縮小 (Ctrl+-)',
-                'tooltip_fit_width': '横幅に合わせる (Ctrl+0)',
-                'tooltip_fit_height': '高さに合わせる (Ctrl+Shift+0)',
-                'tooltip_prev_page': '前のページ (Page Up)',
-                'tooltip_next_page': '次のページ (Page Down)',
-                'tooltip_goto_page': 'ページ番号を入力して Enter を押します',
-                'goto_page_placeholder': 'ページ',
-                'tooltip_patch_mode': 'パッチモード切替',
-                'tooltip_patch_eraser': '消しゴムモード (パッチのみ)',
-                'tooltip_theme': 'ライト/ダークテーマ切替',
-                'status_patch_mode_on': '🩹 パッチモードを有効にしました。',
-                'status_patch_mode_off': '🩹 パッチモードを無効にしました。',
-                'status_patch_eraser_on': '🧽 消しゴムモードを有効にしました。',
-                'status_patch_eraser_off': '🧽 消しゴムモードを無効にしました。',
-                'action_light_mode': '🌞 ライトモード',
-                'action_dark_mode': '🌙 ダークモード',
-                'page_label_template': 'ページ: {current}/{total}',
-                'page_label_empty': 'ページ: 0/0',
-                'zoom_label_template': 'ズーム: {percent}%',
-                'viewer_placeholder': 'PDF を開いて編集を開始してください。',
-                'shortcuts_text': (
-                    "📋 主なショートカット:\n\n"
-                    "🔍 表示:\n"
-                    " • Ctrl + '+' : 拡大\n"
-                    " • Ctrl + '-' : 縮小\n"
-                    " • Ctrl + 0 : 横幅に合わせる\n"
-                    " • Ctrl + Shift + 0 : 高さに合わせる\n\n"
-                    "📖 ページ移動:\n"
-                    " • Page Up : 前のページ\n"
-                    " • Page Down : 次のページ\n\n"
-                    "✏️ 編集:\n"
-                    " • 矢印キー : 選択テキストを移動\n"
-                    "\n"
-                    "📁 ファイル:\n"
-                    " • Ctrl + O : PDF を開く\n"
-                    " • Ctrl + S : 保存\n"
-                    " • Ctrl + Q : 終了"
-                ),
-                'about_text': (
-                    "📄 YongPDF_text\n\n"
-                    "🛠️ 主な機能:\n"
-                    " • テキストとパッチの編集\n"
-                    " • パッチモードで背景をすばやく整理\n"
-                    " • フォント導入ガイドの提供\n"
-                    " • 多言語インターフェース支援\n\n"
-                    "💻 開発とチャンネル:\n"
-                    " • Python + PySide6 + PyMuPDF\n"
-                    " • チャンネル: <a href='https://www.youtube.com/playlist?list=PLs36bSFfggCC3OmaZ57B-UBiWWsrTzGXs'>YongTools Studio</a>\n\n"
-                ),
-                'text_editor_title': 'テキスト編集',
-                'text_label': 'テキスト',
-                'font_label': 'フォント',
-                'size_label': 'サイズ',
-                'stretch_label': '字幅',
-                'tracking_label': 'トラッキング (%)',
-                'color_label': '色',
-                'style_label': 'スタイル',
-                'style_bold': '太字',
-                'style_italic': '斜体',
-                'style_underline': '下線',
-                'force_image_label': '画像として描画（テキストをビットマップ化）',
-                'patch_color_label': 'パッチ色',
-                'patch_color_pick': 'パッチ色を指定する',
-                'patch_group_title': 'パッチ設定',
-                'patch_margin_label_horizontal': '横余白 (%)',
-                'patch_margin_label_vertical': '縦余白 (%)',
-                'patch_margin_hint': 'テキストサイズを基準に、横方向と縦方向をそれぞれ±50%の範囲で調整します。',
-                'btn_yes': 'はい',
-                'btn_no': 'いいえ',
-                'btn_cancel': 'キャンセル',
-                'btn_clear_text': 'クリア',
-                'font_combo_all_fonts': '--- すべてのフォント ---',
-                'install_font_button': 'フォントインストール案内',
-                'original_font_group': '元のフォント情報',
-                'original_font_label': '🔤 元のフォント',
-                'font_alias_label': '🆔 フォント別名',
-                'original_size_label': '📐 元のサイズ',
-                'original_style_label': '✨ 元のスタイル',
-                'install_status_label': '💾 インストール状況',
-                'installed_label': "<span style='color: green;'>✅ インストール済み ({font})</span>",
-                'install_path_label': '📁 パス',
-                'not_installed_label': "<span style='color: red;'>❌ 未インストール</span>",
-                'recommended_font_label': '🤖 推奨代替フォント',
-                'no_alternative_label': "<i style='color: #999;'>代替フォントはありません</i>",
-                'install_method_label': '📥 インストール方法',
-                'font_install_link_text': '「{font}」 インストールガイド',
-                'font_install_dialog_title': '「{font}」 フォントインストール',
-                'font_install_general_title': 'フォントインストールガイド',
-                'font_install_intro_html': (
-                    "<h3>「{font}」をインストール</h3>\n"
-                    "<p><b>必要なフォント:</b> {font}</p>\n"
-                    "<h4>検索とダウンロード</h4>\n"
-                    "<p>以下のサイトからダウンロードできます:</p>\n"
-                    "<ul>\n"
-                    "<li><b>Noonnu (韓国語フォント):</b> <a href=\\\"https://noonnu.cc/\\\">noonnu.cc</a></li>\n"
-                    "<li><b>Adobe Fonts</b></li>\n"
-                    "<li><b>その他の公開フォントライブラリ</b></li>\n"
-                    "</ul>\n"
-                    "<h4>ダウンロードしたフォントをインストール</h4>\n"
-                ),
-                'font_install_general_intro_html': (
-                    "<h3>フォントインストールガイド</h3>\n"
-                    "<p><b>元のフォント:</b> {original}</p>\n"
-                    "<p><b>フォント名:</b> {clean}</p>\n"
-                    "<h4>検索とダウンロード</h4>\n"
-                    "<p>以下のサイトからダウンロードできます:</p>\n"
-                    "<ul>\n"
-                    "<li><b>Noonnu (韓国語フォント):</b> <a href=\\\"https://noonnu.cc/\\\">noonnu.cc</a></li>\n"
-                    "<li><b>Adobe Fonts</b></li>\n"
-                    "<li><b>その他の公開フォントライブラリ</b></li>\n"
-                    "</ul>\n"
-                    "<h4>ダウンロードしたフォントをインストール</h4>\n"
-                ),
-                'font_install_windows_html': (
-                    "<p><b>Windows:</b></p>\n"
-                    "<ol>\n"
-                    "<li>.ttf または .otf ファイルを右クリックして \"インストール\" を選択</li>\n"
-                    "<li>または C:\\\\Windows\\\\Fonts にコピー</li>\n"
-                    "<li>インストール後にアプリを再起動</li>\n"
-                    "</ol>\n"
-                ),
-                'font_install_mac_html': (
-                    "<p><b>macOS:</b></p>\n"
-                    "<ol>\n"
-                    "<li>.ttf または .otf ファイルをダブルクリック</li>\n"
-                    "<li>Font Book で \"フォントを追加\" をクリック</li>\n"
-                    "<li>または ~/Library/Fonts にコピー</li>\n"
-                    "<li>インストール後にアプリを再起動</li>\n"
-                    "</ol>\n"
-                ),
-                'font_install_linux_html': (
-                    "<p><b>Linux:</b></p>\n"
-                    "<ol>\n"
-                    "<li>フォントファイルを ~/.fonts または ~/.local/share/fonts にコピー</li>\n"
-                    "<li>ターミナルで 'fc-cache -fv' を実行</li>\n"
-                    "<li>インストール後にアプリを再起動</li>\n"
-                    "</ol>\n"
-                ),
-                'font_install_warning_html': (
-                    "<h4>注意事項</h4>\n"
-                    "<ul>\n"
-                    "<li>フォントをインストールした後はアプリを再起動してください。</li>\n"
-                    "<li>商用フォントを使用する場合はライセンスを確認してください。</li>\n"
-                    "<li>正確なフォント名で検索すると見つけやすくなります。</li>\n"
-                    "</ul>\n"
-                ),
-                'font_install_sites_html': (
-                    "<h4>おすすめサイト</h4>\n"
-                    "<ul>\n"
-                    "<li><b>Noonnu (韓国語フォント):</b> <a href=\\\"https://noonnu.cc/\\\">noonnu.cc</a></li>\n"
-                    "<li><b>Adobe Fonts:</b> <a href=\\\"https://fonts.adobe.com\\\">fonts.adobe.com</a></li>\n"
-                    "<li><b>その他の公開アーカイブ</b></li>\n"
-                    "</ul>\n"
-                ),
-                'font_install_google_button': "Google で「{font} {suffix}」を検索", 
-                'font_install_google_query_suffix': 'Noonnu',
-                'font_install_noonnu_button': 'Noonnu ホームを開く',
-                'button_close': '閉じる',
-                'support_menu': '❣️開発者を支援する❣️',
-                'donate_kakao': 'KakaoPayで支援する',
-                'donate_paypal': 'PayPalで支援する',
-                'donate_paypal_message': '<a href="https://www.paypal.com/paypalme/1hwangjinsu">https://www.paypal.com/paypalme/1hwangjinsu</a> で支援してください🙏 本当にありがとうございます❣️',
-                'donate_image_missing': '支援用の画像が見つかりません。'
-            },
-            'zh-CN': {
-                'app_title': 'YongPDF_text',
-                'loading_app': '正在准备编辑器...',
-                'loading_external_editor': '正在启动外部编辑器...',
-                'external_editor_ready': '外部编辑器已启动。',
-                'external_editor_running': '外部编辑器已在运行。',
-                'external_editor_refresh_notice': '检测到外部保存并已重新载入文档。',
-                'menu_file': '📁 文件',
-                'menu_edit': '✏️ 编辑',
-                'menu_view': '🔍 视图',
-                'menu_tools': '🔧 工具',
-                'menu_help': 'ℹ️ 帮助',
-                'menu_language': '🌐 语言',
-                'lang_ko': '韩语',
-                'lang_en': '英语',
-                'lang_ja': '日语',
-                'lang_zh-CN': '简体中文',
-                'lang_zh-TW': '繁体中文',
-                'action_open_pdf': '📂 打开 PDF',
-                'action_save_session': '💼 保存会话',
-                'action_load_session': '💼 载入会话',
-                'action_save': '💾 保存',
-                'action_save_as': '📝 另存为',
-                'action_quit': '🚪 退出',
-                'action_undo': '↩️ 撤销',
-                'action_redo': '↪️ 重做',
-                'action_precise_mode': '🩹 补丁模式',
-                'action_patch_eraser': '🧽 橡皮模式',
-                'action_zoom_out': '🔍➖ 缩小',
-                'action_zoom_in': '🔍➕ 放大',
-                'action_fit_width': '↔️ 适应宽度',
-                'action_fit_height': '↕️ 适应高度',
-                'action_optimize_patches': '⚡ 优化所有补丁',
-                'action_show_patch_info': '📊 显示补丁信息',
-                'action_force_text_flatten': '🧱 保留文字压平',
-                'action_prev_page': '⬅️ 上一页',
-                'action_next_page': '➡️ 下一页',
-                'action_shortcuts': '⌨️ 快捷键',
-                'action_about': 'ℹ️ 关于',
-                'action_license': '开源许可证',
-                'license_popup_title': '开源许可证信息',
-                'license_content_header': '本应用使用以下开源软件。<br>遵守各许可证条件分发。<br><br>',
-                'action_font_log_label': '字体日志详细度：{label}',
-                'font_log_level_0': '关闭',
-                'font_log_level_1': '普通',
-                'font_log_level_2': '详细',
-                'progress_saving_pdf': '正在保存文档...',
-                'progress_flatten_overlays': '正在合并文本图层…',
-                'progress_writing_pdf': '正在写入 PDF 文件...',
-                'progress_preparing_fonts': '正在准备字体应用…',
-                'progress_ensuring_fonts': '正在为第 {page} 页应用字体…',
-                'progress_applying_overlay': "正在为第 {page} 页应用覆盖层…“{text}”",
-                'dialog_save': '保存',
-                'dialog_save_as': '另存为',
-                'save_success_message': 'PDF 已成功保存。',
-                'save_failed_detail': '无法保存 PDF：{error}',
-                'save_permission_error_detail': '无法保存到当前位置。请选择其他位置。\\n错误: {error}',
-                'overlay_deleted': '已删除所选文本图层。',
-                'title_unsaved_changes': '尚未保存的更改',
-                'msg_unsaved_changes': '存在未保存的更改。打开新文件前是否保存？',
-                'title_error': '错误',
-                'title_warning': '警告',
-                'title_success': '完成',
-                'title_info': '信息',
-                'msg_no_pdf': '没有打开任何 PDF 文档。',
-                'msg_open_failed': '打开 PDF 失败: {error}',
-                'tooltip_open': '打开 PDF (Ctrl+O)',
-                'tooltip_save': '保存 (Ctrl+S)',
-                'tooltip_undo': '撤销 (Ctrl+Z)',
-                'tooltip_redo': '重做 (Ctrl+Y)',
-                'tooltip_zoom_in': '放大 (Ctrl++)',
-                'tooltip_zoom_out': '缩小 (Ctrl+-)',
-                'tooltip_fit_width': '适应宽度 (Ctrl+0)',
-                'tooltip_fit_height': '适应高度 (Ctrl+Shift+0)',
-                'tooltip_prev_page': '上一页 (Page Up)',
-                'tooltip_next_page': '下一页 (Page Down)',
-                'tooltip_goto_page': '输入页码后按 Enter',
-                'goto_page_placeholder': '页码',
-                'tooltip_patch_mode': '切换补丁模式',
-                'tooltip_patch_eraser': '橡皮模式（仅创建补丁）',
-                'tooltip_theme': '切换明暗主题',
-                'status_patch_mode_on': '🩹 补丁模式已开启。',
-                'status_patch_mode_off': '🩹 补丁模式已关闭。',
-                'status_patch_eraser_on': '🧽 橡皮模式已开启。',
-                'status_patch_eraser_off': '🧽 橡皮模式已关闭。',
-                'action_light_mode': '🌞 亮色模式',
-                'action_dark_mode': '🌙 深色模式',
-                'page_label_template': '页面: {current}/{total}',
-                'page_label_empty': '页面: 0/0',
-                'zoom_label_template': '缩放: {percent}%',
-                'viewer_placeholder': '请打开 PDF 后开始编辑。',
-                'shortcuts_text': (
-                    "📋 常用快捷键:\n\n"
-                    "🔍 视图:\n"
-                    " • Ctrl + '+' : 放大\n"
-                    " • Ctrl + '-' : 缩小\n"
-                    " • Ctrl + 0 : 适应宽度\n"
-                    " • Ctrl + Shift + 0 : 适应高度\n\n"
-                    "📖 翻页:\n"
-                    " • Page Up : 上一页\n"
-                    " • Page Down : 下一页\n\n"
-                    "✏️ 编辑:\n"
-                    " • 方向键 : 移动选中内容\n"
-                    "\n"
-                    "📁 文件:\n"
-                    " • Ctrl + O : 打开 PDF\n"
-                    " • Ctrl + S : 保存\n"
-                    " • Ctrl + Q : 退出"
-                ),
-                'about_text': (
-                    "📄 YongPDF_text\n\n"
-                    "🛠️ 主要功能:\n"
-                    " • 编辑文字覆盖与补丁\n"
-                    " • 补丁模式快速整理背景\n"
-                    " • 提供字体安装指引\n"
-                    " • 多语言界面\n\n"
-                    "💻 开发与频道:\n"
-                    " • Python + PySide6 + PyMuPDF\n"
-                    " • 频道: <a href='https://www.youtube.com/playlist?list=PLs36bSFfggCC3OmaZ57B-UBiWWsrTzGXs'>YongTools Studio</a>\n\n" 
-                ),
-                'text_editor_title': '文本编辑',
-                'text_label': '文本',
-                'font_label': '字体',
-                'size_label': '字号',
-                'stretch_label': '拉伸',
-                'tracking_label': '字距 (%)',
-                'color_label': '颜色',
-                'style_label': '样式',
-                'style_bold': '加粗',
-                'style_italic': '斜体',
-                'style_underline': '下划线',
-                'force_image_label': '以图像渲染（将文本嵌入位图）',
-                'patch_color_label': '补丁颜色',
-                'patch_color_pick': '手动指定补丁颜色',
-                'patch_group_title': '补丁设置',
-                'patch_margin_label_horizontal': '水平边距 (%)',
-                'patch_margin_label_vertical': '垂直边距 (%)',
-                'patch_margin_hint': '以文字大小为基准，分别在水平与垂直方向上于 -50% 至 +50% 范围内调节覆盖范围。',
-                'btn_yes': '是',
-                'btn_no': '否',
-                'btn_cancel': '取消',
-                'btn_clear_text': '清除',
-                'font_combo_all_fonts': '--- 所有字体 ---',
-                'install_font_button': '字体安装指南',
-                'original_font_group': '原字体信息',
-                'original_font_label': '🔤 原字体',
-                'font_alias_label': '🆔 字体别名',
-                'original_size_label': '📐 原字号',
-                'original_style_label': '✨ 原样式',
-                'install_status_label': '💾 安装状态',
-                'installed_label': "<span style='color: green;'>✅ 已安装 ({font})</span>",
-                'install_path_label': '📁 路径',
-                'not_installed_label': "<span style='color: red;'>❌ 未安装</span>",
-                'recommended_font_label': '🤖 推荐替代字体',
-                'no_alternative_label': "<i style='color: #999;'>暂无替代字体</i>",
-                'install_method_label': '📥 安装方法',
-                'font_install_link_text': '“{font}” 安装指南',
-                'font_install_dialog_title': '“{font}” 字体安装',
-                'font_install_general_title': '字体安装指南',
-                'font_install_intro_html': (
-                    "<h3>安装“{font}”</h3>\n"
-                    "<p><b>所需字体：</b> {font}</p>\n"
-                    "<h4>搜索并下载</h4>\n"
-                    "<p>可以从以下网站获取：</p>\n"
-                    "<ul>\n"
-                    "<li><b>Noonnu（韩文字体）：</b> <a href=\\\"https://noonnu.cc/\\\">noonnu.cc</a></li>\n"
-                    "<li><b>Adobe Fonts</b></li>\n"
-                    "<li><b>其他公共字体库</b></li>\n"
-                    "</ul>\n"
-                    "<h4>安装已下载的字体</h4>\n"
-                ),
-                'font_install_general_intro_html': (
-                    "<h3>字体安装指南</h3>\n"
-                    "<p><b>原字体：</b> {original}</p>\n"
-                    "<p><b>字体名称：</b> {clean}</p>\n"
-                    "<h4>搜索并下载</h4>\n"
-                    "<p>可以从以下网站获取：</p>\n"
-                    "<ul>\n"
-                    "<li><b>Noonnu（韩文字体）：</b> <a href=\\\"https://noonnu.cc/\\\">noonnu.cc</a></li>\n"
-                    "<li><b>Adobe Fonts</b></li>\n"
-                    "<li><b>其他公共字体库</b></li>\n"
-                    "</ul>\n"
-                    "<h4>安装已下载的字体</h4>\n"
-                ),
-                'font_install_windows_html': (
-                    "<p><b>Windows：</b></p>\n"
-                    "<ol>\n"
-                    "<li>右键单击 .ttf 或 .otf 文件并选择“安装”</li>\n"
-                    "<li>或复制到 C:\\\\Windows\\\\Fonts</li>\n"
-                    "<li>安装完成后请重启本应用</li>\n"
-                    "</ol>\n"
-                ),
-                'font_install_mac_html': (
-                    "<p><b>macOS：</b></p>\n"
-                    "<ol>\n"
-                    "<li>双击下载的 .ttf 或 .otf 文件</li>\n"
-                    "<li>在 Font Book 中点击“Install Font”</li>\n"
-                    "<li>或复制到 ~/Library/Fonts</li>\n"
-                    "<li>安装完成后请重启本应用</li>\n"
-                    "</ol>\n"
-                ),
-                'font_install_linux_html': (
-                    "<p><b>Linux：</b></p>\n"
-                    "<ol>\n"
-                    "<li>将字体文件复制到 ~/.fonts 或 ~/.local/share/fonts</li>\n"
-                    "<li>在终端运行 'fc-cache -fv'</li>\n"
-                    "<li>安装完成后请重启本应用</li>\n"
-                    "</ol>\n"
-                ),
-                'font_install_warning_html': (
-                    "<h4>注意事项</h4>\n"
-                    "<ul>\n"
-                    "<li>安装字体后请重启本应用以加载新字体。</li>\n"
-                    "<li>使用商业字体前请确认授权。</li>\n"
-                    "<li>使用完整的字体名称可获得更准确的结果。</li>\n"
-                    "</ul>\n"
-                ),
-                'font_install_sites_html': (
-                    "<h4>推荐资源</h4>\n"
-                    "<ul>\n"
-                    "<li><b>Noonnu（韩文字体）：</b> <a href=\\\"https://noonnu.cc/\\\">noonnu.cc</a></li>\n"
-                    "<li><b>Adobe Fonts：</b> <a href=\\\"https://fonts.adobe.com\\\">fonts.adobe.com</a></li>\n"
-                    "<li><b>其他公共字体库</b></li>\n"
-                    "</ul>\n"
-                ),
-                'font_install_google_button': '在 Google 搜索 “{font} {suffix}”',
-                'font_install_google_query_suffix': '字体',
-                'font_install_noonnu_button': '打开 noonnu 首页',
-                'button_close': '关闭',
-                'support_menu': '❣️支持开发者❣️',
-                'donate_kakao': '通过 KakaoPay 支持',
-                'donate_paypal': '通过 PayPal 支持',
-                'donate_paypal_message': '请通过 <a href="https://www.paypal.com/paypalme/1hwangjinsu">https://www.paypal.com/paypalme/1hwangjinsu</a> 支持我们🙏 非常感谢❣️',
-                'donate_image_missing': '未能找到捐赠图片。'
-            },
-            'zh-TW': {
-                'app_title': 'YongPDF_text',
-                'loading_app': '正在準備編輯器...',
-                'loading_external_editor': '正在啟動外部編輯器...',
-                'external_editor_ready': '外部編輯器已啟動。',
-                'external_editor_running': '外部編輯器已在執行。',
-                'external_editor_refresh_notice': '偵測到外部編輯儲存並重新載入文件。',
-                'menu_file': '📁 檔案',
-                'menu_edit': '✏️ 編輯',
-                'menu_view': '🔍 檢視',
-                'menu_tools': '🔧 工具',
-                'menu_help': 'ℹ️ 說明',
-                'menu_language': '🌐 語言',
-                'lang_ko': '韓文',
-                'lang_en': '英文',
-                'lang_ja': '日文',
-                'lang_zh-CN': '簡體中文',
-                'lang_zh-TW': '繁體中文',
-                'action_open_pdf': '📂 開啟 PDF',
-                'action_save_session': '💼 儲存工作階段',
-                'action_load_session': '💼 載入工作階段',
-                'action_save': '💾 儲存',
-                'action_save_as': '📝 另存新檔',
-                'action_quit': '🚪 結束',
-                'action_undo': '↩️ 復原',
-                'action_redo': '↪️ 重做',
-                'action_precise_mode': '🩹 補丁模式',
-                'action_patch_eraser': '🧽 橡皮模式',
-                'action_zoom_out': '🔍➖ 縮小',
-                'action_zoom_in': '🔍➕ 放大',
-                'action_fit_width': '↔️ 適應寬度',
-                'action_fit_height': '↕️ 適應高度',
-                'action_optimize_patches': '⚡ 最佳化所有補丁',
-                'action_show_patch_info': '📊 顯示補丁資訊',
-                'action_force_text_flatten': '🧱 保留文字壓平',
-                'action_prev_page': '⬅️ 上一頁',
-                'action_next_page': '➡️ 下一頁',
-                'action_shortcuts': '⌨️ 快捷鍵',
-                'action_usage_guide': '❓ 使用指南',
-                'action_about': 'ℹ️ 關於',
-                'action_license': '開源授權',
-                'license_popup_title': '開源授權資訊',
-                'license_content_header': '本應用程式使用以下開源軟體。<br>遵守各授權條款分發。<br><br>',
-                'action_font_log_label': '字型日誌詳細度: {label}',
-                'font_log_level_0': '關閉',
-                'font_log_level_1': '一般',
-                'font_log_level_2': '詳細',
-                'progress_saving_pdf': '正在儲存文件...',
-                'progress_flatten_overlays': '正在合併文字圖層…',
-                'progress_writing_pdf': '正在寫入 PDF 檔案...',
-                'progress_preparing_fonts': '正在準備字體套用…',
-                'progress_ensuring_fonts': '正在為第 {page} 頁套用字體…',
-                'progress_applying_overlay': "正在於第 {page} 頁套用覆蓋層…「{text}」",
-                'dialog_save': '儲存',
-                'dialog_save_as': '另存新檔',
-                'save_success_message': 'PDF 已成功儲存。',
-                'save_failed_detail': '無法儲存 PDF：{error}',
-                'save_permission_error_detail': '無法儲存至目前位置。請選擇其他位置。\\n錯誤：{error}',
-                'overlay_deleted': '已刪除所選的文字圖層。',
-                'title_unsaved_changes': '尚未儲存的變更',
-                'msg_unsaved_changes': '尚未儲存變更，要在開啟新檔前先儲存嗎？',
-                'title_error': '錯誤',
-                'title_warning': '警告',
-                'title_success': '完成',
-                'title_info': '資訊',
-                'msg_no_pdf': '尚未開啟任何 PDF 文件。',
-                'msg_open_failed': '無法開啟 PDF：{error}',
-                'tooltip_open': '開啟 PDF (Ctrl+O)',
-                'tooltip_save': '儲存 (Ctrl+S)',
-                'tooltip_undo': '復原 (Ctrl+Z)',
-                'tooltip_redo': '重做 (Ctrl+Y)',
-                'tooltip_zoom_in': '放大 (Ctrl++)',
-                'tooltip_zoom_out': '縮小 (Ctrl+-)',
-                'tooltip_fit_width': '適應寬度 (Ctrl+0)',
-                'tooltip_fit_height': '適應高度 (Ctrl+Shift+0)',
-                'tooltip_prev_page': '上一頁 (Page Up)',
-                'tooltip_next_page': '下一頁 (Page Down)',
-                'tooltip_goto_page': '輸入頁碼後按 Enter',
-                'goto_page_placeholder': '頁碼',
-                'tooltip_patch_mode': '切換補丁模式',
-                'tooltip_patch_eraser': '橡皮模式（僅建立補丁）',
-                'tooltip_theme': '切換亮色/深色主題',
-                'status_patch_mode_on': '🩹 補丁模式已啟用。',
-                'status_patch_mode_off': '🩹 補丁模式已停用。',
-                'status_patch_eraser_on': '🧽 橡皮模式已啟用。',
-                'status_patch_eraser_off': '🧽 橡皮模式已停用。',
-                'action_light_mode': '🌞 亮色模式',
-                'action_dark_mode': '🌙 深色模式',
-                'page_label_template': '頁面: {current}/{total}',
-                'page_label_empty': '頁面: 0/0',
-                'zoom_label_template': '縮放: {percent}%',
-                'viewer_placeholder': '請開啟 PDF 後開始編輯。',
-                'shortcuts_text': (
-                    "📋 常用快捷鍵:\n\n"
-                    "🔍 檢視:\n"
-                    " • Ctrl + '+' : 放大\n"
-                    " • Ctrl + '-' : 縮小\n"
-                    " • Ctrl + 0 : 適應寬度\n"
-                    " • Ctrl + Shift + 0 : 適應高度\n\n"
-                    "📖 頁面移動:\n"
-                    " • Page Up : 上一頁\n"
-                    " • Page Down : 下一頁\n\n"
-                    "✏️ 編輯:\n"
-                    " • 方向鍵 : 移動選取文字\n"
-                    "\n"
-                    "📁 檔案:\n"
-                    " • Ctrl + O : 開啟 PDF\n"
-                    " • Ctrl + S : 儲存\n"
-                    " • Ctrl + Q : 結束"
-                ),
-                'about_text': (
-                    "📄 YongPDF_text\n\n"
-                    "🛠️ 主要功能:\n"
-                    " • 編輯文字覆蓋與補丁\n"
-                    " • 補丁模式快速整理背景\n"
-                    " • 提供字體安裝指引\n"
-                    " • 多語系介面支援\n\n"
-                    "💻 開發與頻道:\n"
-                    " • Python + PySide6 + PyMuPDF\n"
-                    " • 頻道: <a href='https://www.youtube.com/playlist?list=PLs36bSFfggCC3OmaZ57B-UBiWWsrTzGXs'>YongTools Studio</a>\n\n"
-                ),
-                'text_editor_title': '文字編輯',
-                'text_label': '文字',
-                'font_label': '字體',
-                'size_label': '字級',
-                'stretch_label': '伸縮',
-                'tracking_label': '字距 (%)',
-                'color_label': '顏色',
-                'style_label': '樣式',
-                'style_bold': '粗體',
-                'style_italic': '斜體',
-                'style_underline': '底線',
-                'force_image_label': '以影像呈現（將文字嵌入點陣圖）',
-                'patch_color_label': '補丁顏色',
-                'patch_color_pick': '手動指定補丁顏色',
-                'patch_group_title': '補丁設定',
-                'patch_margin_label_horizontal': '水平邊距 (%)',
-                'patch_margin_label_vertical': '垂直邊距 (%)',
-                'patch_margin_hint': '以文字大小為基準，分別在水平與垂直方向於 -50% 至 +50% 範圍內調整覆蓋面積。',
-                'btn_yes': '是',
-                'btn_no': '否',
-                'btn_cancel': '取消',
-                'btn_clear_text': '清除',
-                'font_combo_all_fonts': '--- 所有字體 ---',
-                'install_font_button': '字體安裝指南',
-                'original_font_group': '原始字體資訊',
-                'original_font_label': '🔤 原始字體',
-                'font_alias_label': '🆔 字體別名',
-                'original_size_label': '📐 原始字級',
-                'original_style_label': '✨ 原始樣式',
-                'install_status_label': '💾 安裝狀態',
-                'installed_label': "<span style='color: green;'>✅ 已安裝 ({font})</span>",
-                'install_path_label': '📁 路徑',
-                'not_installed_label': "<span style='color: red;'>❌ 未安裝</span>",
-                'recommended_font_label': '🤖 建議替代字體',
-                'no_alternative_label': "<i style='color: #999;'>沒有替代字體</i>",
-                'install_method_label': '📥 安裝方式',
-                'font_install_link_text': '「{font}」 安裝指南',
-                'font_install_dialog_title': '「{font}」 字體安裝',
-                'font_install_general_title': '字體安裝指南',
-                'font_install_intro_html': (
-                    "<h3>安裝「{font}」</h3>\n"
-                    "<p><b>所需字體：</b> {font}</p>\n"
-                    "<h4>搜尋並下載</h4>\n"
-                    "<p>可從以下網站取得：</p>\n"
-                    "<ul>\n"
-                    "<li><b>Noonnu（韓文字體）：</b> <a href=\\\"https://noonnu.cc/\\\">noonnu.cc</a></li>\n"
-                    "<li><b>Adobe Fonts</b></li>\n"
-                    "<li><b>其他公開字體庫</b></li>\n"
-                    "</ul>\n"
-                    "<h4>安裝已下載的字體</h4>\n"
-                ),
-                'font_install_general_intro_html': (
-                    "<h3>字體安裝指南</h3>\n"
-                    "<p><b>原始字體：</b> {original}</p>\n"
-                    "<p><b>字體名稱：</b> {clean}</p>\n"
-                    "<h4>搜尋並下載</h4>\n"
-                    "<p>可從以下網站取得：</p>\n"
-                    "<ul>\n"
-                    "<li><b>Noonnu（韓文字體）：</b> <a href=\\\"https://noonnu.cc/\\\">noonnu.cc</a></li>\n"
-                    "<li><b>Adobe Fonts</b></li>\n"
-                    "<li><b>其他公開字體庫</b></li>\n"
-                    "</ul>\n"
-                    "<h4>安裝已下載的字體</h4>\n"
-                ),
-                'font_install_windows_html': (
-                    "<p><b>Windows：</b></p>\n"
-                    "<ol>\n"
-                    "<li>在 .ttf 或 .otf 檔案上按滑鼠右鍵並選擇「安裝」</li>\n"
-                    "<li>或將檔案複製到 C:\\\\Windows\\\\Fonts</li>\n"
-                    "<li>安裝後請重新啟動本應用程式</li>\n"
-                    "</ol>\n"
-                ),
-                'font_install_mac_html': (
-                    "<p><b>macOS：</b></p>\n"
-                    "<ol>\n"
-                    "<li>雙擊下載的 .ttf 或 .otf 檔案</li>\n"
-                    "<li>在 Font Book 中點選「Install Font」</li>\n"
-                    "<li>或將檔案複製到 ~/Library/Fonts</li>\n"
-                    "<li>安裝後請重新啟動本應用程式</li>\n"
-                    "</ol>\n"
-                ),
-                'font_install_linux_html': (
-                    "<p><b>Linux：</b></p>\n"
-                    "<ol>\n"
-                    "<li>將字體檔案複製到 ~/.fonts 或 ~/.local/share/fonts</li>\n"
-                    "<li>在終端機執行 'fc-cache -fv'</li>\n"
-                    "<li>安裝後請重新啟動本應用程式</li>\n"
-                    "</ol>\n"
-                ),
-                'font_install_warning_html': (
-                    "<h4>注意事項</h4>\n"
-                    "<ul>\n"
-                    "<li>安裝字體後請重新啟動本應用程式以載入新字體。</li>\n"
-                    "<li>使用商用字體前請確認授權。</li>\n"
-                    "<li>使用完整的字體名稱可獲得更精確的搜尋結果。</li>\n"
-                    "</ul>\n"
-                ),
-                'font_install_sites_html': (
-                    "<h4>推薦資源</h4>\n"
-                    "<ul>\n"
-                    "<li><b>Noonnu（韓文字體）：</b> <a href=\\\"https://noonnu.cc/\\\">noonnu.cc</a></li>\n"
-                    "<li><b>Adobe Fonts：</b> <a href=\\\"https://fonts.adobe.com\\\">fonts.adobe.com</a></li>\n"
-                    "<li><b>其他公開字體庫</b></li>\n"
-                    "</ul>\n"
-                ),
-                'font_install_google_button': '在 Google 搜尋「{font} {suffix}」',
-                'font_install_google_query_suffix': '字體',
-                'font_install_noonnu_button': '開啟 noonnu 首頁',
-                'button_close': '關閉',
-                'support_menu': '❣️支持開發者❣️',
-                'donate_kakao': '以 KakaoPay 支援',
-                'donate_paypal': '以 PayPal 支援',
-                'donate_paypal_message': '請前往 <a href="https://www.paypal.com/paypalme/1hwangjinsu">https://www.paypal.com/paypalme/1hwangjinsu</a> 支援我們🙏 真心感謝❣️',
-                'donate_image_missing': '找不到支援用的圖片。'
-            }
-        }
+        self.translations = {}
+        try:
+            # 설정에서 저장된 언어 불러오기 (기본값 ko)
+            self.language = str(self.settings.value('language', 'ko'))
+            
+            i18n_dir = _resolve_static_path('i18n')
+            if not os.path.isdir(i18n_dir):
+                i18n_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'i18n')
+            
+            print(f"[i18n] Loading translations from: {i18n_dir}")
+            
+            if os.path.isdir(i18n_dir):
+                for filename in os.listdir(i18n_dir):
+                    if filename.endswith('.json'):
+                        lang_code = filename[:-5]
+                        try:
+                            file_path = os.path.join(i18n_dir, filename)
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                self.translations[lang_code] = json.load(f)
+                        except Exception as e:
+                            print(f"[i18n] Failed to load {filename}: {e}")
+            
+            if self.translations:
+                print(f"[i18n] Successfully loaded {len(self.translations)} languages: {', '.join(sorted(self.translations.keys()))}")
+                if self.language not in self.translations:
+                    self.language = 'ko' if 'ko' in self.translations else list(self.translations.keys())[0]
+            else:
+                print("[i18n] Critical Warning: No translation files found!")
+                self.translations = {'en': {'app_title': 'YongPDF_text'}}
+            
+            print(f"[i18n] Current active language: {self.language}")
+            return
+        except Exception as e:
+            print(f"[i18n] Error during initialization: {e}")
+            self.translations = {'en': {'app_title': 'YongPDF_text'}}
+            self.language = 'en'
 
-    def t(self, key: str, **kwargs) -> str:
-        lang_dict = self.translations.get(self.language, {})
-        fallback = self.translations.get('ko', {})
-        text = lang_dict.get(key, fallback.get(key, key))
+    # Old hardcoded translations removed - now loading from i18n/*.json
+
+    @classmethod
+    def t(cls, key: str, **kwargs) -> str:
+        """전역 번역 유틸리티 (MainWindow._instance 활용)"""
+        if cls._instance:
+            # 1. 현재 선택된 언어 딕셔너리
+            lang_dict = cls._instance.translations.get(cls._instance.language, {})
+            # 2. 한국어 딕셔너리 (최종 폴백용)
+            fallback_ko = cls._instance.translations.get('ko', {})
+            # 3. 영어 딕셔너리 (차선 폴백용)
+            fallback_en = cls._instance.translations.get('en', {})
+            
+            # 순서대로 찾음: 현재 언어 -> 한국어 -> 영어 -> 키 자체
+            text = lang_dict.get(key, fallback_ko.get(key, fallback_en.get(key, key)))
+        else:
+            # 인스턴스가 없을 때의 기본 폴백 (사실상 발생 안함)
+            text = key
+        
         if kwargs:
             try:
                 return text.format(**kwargs)
@@ -5483,6 +4475,13 @@ class MainWindow(QMainWindow):
         if lang not in self.translations:
             return
         self.language = lang
+        
+        # RTL(Right-to-Left) 언어 지원
+        if lang in ('ar', 'fa', 'ur'):
+            QApplication.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        else:
+            QApplication.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+
         try:
             if self.settings:
                 self.settings.setValue('language', lang)
@@ -5631,9 +4630,9 @@ class MainWindow(QMainWindow):
         menubar = self.menuBar()
         
         # 📁 파일 메뉴
-        file_menu = menubar.addMenu(self.t('menu_file'))
+        file_menu = menubar.addMenu(self.t('file_menu'))
         
-        open_action = file_menu.addAction(self.t('action_open_pdf'))
+        open_action = file_menu.addAction(self.t('open'))
         open_action.triggered.connect(self.open_pdf)
         open_action.setShortcut('Ctrl+O')
 
@@ -5647,29 +4646,29 @@ class MainWindow(QMainWindow):
         
         file_menu.addSeparator()
 
-        save_action = file_menu.addAction(self.t('action_save'))
+        save_action = file_menu.addAction(self.t('save'))
         save_action.triggered.connect(self.save_pdf)
         save_action.setShortcut('Ctrl+S')
 
         # 다른 이름으로 저장
-        save_as_action = file_menu.addAction(self.t('action_save_as'))
+        save_as_action = file_menu.addAction(self.t('save_as'))
         save_as_action.triggered.connect(self.save_as_pdf)
         save_as_action.setShortcut('Ctrl+Shift+S')
 
         file_menu.addSeparator()
 
-        quit_action = file_menu.addAction(self.t('action_quit'))
+        quit_action = file_menu.addAction(self.t('exit'))
         quit_action.triggered.connect(self.close)
         quit_action.setShortcut('Ctrl+Q')
         
         # ✏️ 편집 메뉴
-        edit_menu = menubar.addMenu(self.t('menu_edit'))
+        edit_menu = menubar.addMenu(self.t('edit_menu'))
         
-        undo_action = edit_menu.addAction(self.t('action_undo'))
+        undo_action = edit_menu.addAction(self.t('undo'))
         undo_action.triggered.connect(self.undo_action)
         undo_action.setShortcut('Ctrl+Z')
         
-        redo_action = edit_menu.addAction(self.t('action_redo')) 
+        redo_action = edit_menu.addAction(self.t('redo')) 
         redo_action.triggered.connect(self.redo_action)
         redo_action.setShortcut('Ctrl+Y')
         
@@ -5687,38 +4686,38 @@ class MainWindow(QMainWindow):
         self.patch_eraser_action.toggled.connect(self.toggle_patch_eraser)
         
         # 🔍 보기 메뉴
-        view_menu = menubar.addMenu(self.t('menu_view'))
+        view_menu = menubar.addMenu(self.t('view_menu'))
         
         # 축소 / 확대 순서로 배치
-        zoom_out_action = view_menu.addAction(self.t('action_zoom_out'))
+        zoom_out_action = view_menu.addAction(self.t('zoom_out'))
         zoom_out_action.triggered.connect(self.zoom_out) 
         zoom_out_action.setShortcut('Ctrl+-')
 
-        zoom_in_action = view_menu.addAction(self.t('action_zoom_in'))
+        zoom_in_action = view_menu.addAction(self.t('zoom_in'))
         zoom_in_action.triggered.connect(self.zoom_in)
         zoom_in_action.setShortcut('Ctrl+=')
         
         view_menu.addSeparator()
 
-        fit_width_action = view_menu.addAction(self.t('action_fit_width'))
+        fit_width_action = view_menu.addAction(self.t('fit_width'))
         fit_width_action.triggered.connect(self.fit_to_width)
         fit_width_action.setShortcut('Ctrl+0')
 
-        fit_height_action = view_menu.addAction(self.t('action_fit_height'))
+        fit_height_action = view_menu.addAction(self.t('fit_height'))
         fit_height_action.triggered.connect(self.fit_to_height)
         fit_height_action.setShortcut('Ctrl+Shift+0')
 
         view_menu.addSeparator()
-        self.light_mode_action = view_menu.addAction(self.t('action_light_mode'))
+        self.light_mode_action = view_menu.addAction(self.t('theme_light_mode'))
         self.light_mode_action.setCheckable(True)
         self.light_mode_action.triggered.connect(lambda: self.set_theme_mode('light'))
 
-        self.dark_mode_action = view_menu.addAction(self.t('action_dark_mode'))
+        self.dark_mode_action = view_menu.addAction(self.t('theme_dark_mode'))
         self.dark_mode_action.setCheckable(True)
         self.dark_mode_action.triggered.connect(lambda: self.set_theme_mode('dark'))
 
         # 🔧 도구 메뉴
-        tools_menu = menubar.addMenu(self.t('menu_tools'))
+        tools_menu = menubar.addMenu(self.t('tools_menu'))
         
         optimize_patches_action = tools_menu.addAction(self.t('action_optimize_patches'))
         optimize_patches_action.triggered.connect(self.optimize_all_patches)
@@ -5739,20 +4738,27 @@ class MainWindow(QMainWindow):
         self.font_log_action = tools_menu.addAction(self._font_log_action_text())
         self.font_log_action.triggered.connect(self.toggle_font_log_verbosity)
         
-        # 언어 메뉴
-        language_menu = menubar.addMenu(self.t('menu_language'))
+        # 언어 메뉴 (i18n 폴더의 파일에 따라 동적 생성)
+        language_menu = menubar.addMenu(self.t('language_menu'))
         self.language_actions = {}
         language_labels = {
-            'ko': '한국어',
-            'en': 'English',
-            'ja': '日本語',
-            'zh-CN': '简体中文',
-            'zh-TW': '繁體中文'
+            'ko': '한국어', 'en': 'English', 'ja': '日本語', 'zh-CN': '简体中文', 'zh-TW': '繁體中文',
+            'de': 'Deutsch', 'fr': 'Français', 'it': 'Italiano', 'es': 'Español', 'pt': 'Português',
+            'sv': 'Svenska', 'fi': 'Suomi', 'no': 'Norsk', 'da': 'Dansk', 'ru': 'Русский',
+            'pl': 'Polski', 'cs': 'Čeština', 'ro': 'Română', 'uk': 'Українська', 'hu': 'Magyar',
+            'bg': 'Български', 'vi': 'Tiếng Việt', 'th': 'ไทย', 'hi': 'हिन्दी', 'ar': 'العربية',
+            'fa': 'فارسی', 'mn': 'Монгол', 'id': 'Bahasa Indonesia', 'ms': 'Bahasa Melayu',
+            'fil': 'Filipino', 'kk': 'Қазақ тілі', 'uz': 'Oʻzbek tili', 'bn': 'বাংলা',
+            'ur': 'اردو', 'tr': 'Türkçe'
         }
-        for code in ('ko', 'en', 'ja', 'zh-CN', 'zh-TW'):
-            action = language_menu.addAction(language_labels.get(code, code))
+        
+        # 로드된 모든 번역에 대해 메뉴 아이템 생성
+        for code in sorted(self.translations.keys()):
+            label = language_labels.get(code, code)
+            action = language_menu.addAction(label)
             action.setCheckable(True)
             action.setChecked(self.language == code)
+            # 람다 캡처 문제 방지를 위해 기본 매개변수 사용
             action.triggered.connect(lambda checked, c=code: self.set_language(c) if checked else None)
             self.language_actions[code] = action
 
@@ -5765,18 +4771,18 @@ class MainWindow(QMainWindow):
         support_menu.addActions([donate_kakao_action, donate_paypal_action])
 
         # ℹ️ 도움말 메뉴
-        help_menu = menubar.addMenu(self.t('menu_help'))
+        help_menu = menubar.addMenu(self.t('help_menu'))
         
-        usage_guide_action = help_menu.addAction(self.t('action_usage_guide'))
-        usage_guide_action.triggered.connect(lambda: webbrowser.open("https://www.youtube.com/playlist?list=PLs36bSFfggCC3OmaZ57B-UBiWWsrTzGXs"))
+        usage_guide_action = help_menu.addAction(self.t('usage_guide'))
+        usage_guide_action.triggered.connect(lambda: webbrowser.open("https://www.youtube.com/playlist?list=PLs36bSFfggCCUX31PYEH_SNgAmVc3dk_B"))
 
         shortcuts_action = help_menu.addAction(self.t('action_shortcuts'))
         shortcuts_action.triggered.connect(self.show_shortcuts)
 
-        about_action = help_menu.addAction(self.t('action_about'))
+        about_action = help_menu.addAction(self.t('about'))
         about_action.triggered.connect(self.show_about)
 
-        license_action = help_menu.addAction(self.t('action_license'))
+        license_action = help_menu.addAction(self.t('licenses_menu'))
         license_action.triggered.connect(self.show_license_info)
 
         self._sync_theme_actions()
@@ -5791,49 +4797,49 @@ class MainWindow(QMainWindow):
         self.zoom_label = QLabel(self.t('zoom_label_template', percent=100))
 
         # PDF 뷰어 (스크롤 영역 포함)
-        self.pdf_viewer = PdfViewerWidget()
+        self.pdf_viewer = PdfViewerWidget(parent=self)
         self.pdf_viewer.setText(self.t('viewer_placeholder'))
-        self.pdf_viewer.setStyleSheet("border: 1px solid gray; background-color: white;")
         
         # 스크롤 영역
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidget(self.pdf_viewer)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame) # 프레임 제거 (테마에서 관리)
         
         # 이모지 버튼 툴바 레이아웃
         toolbar_layout = QHBoxLayout()
         
         # 파일 관련 버튼들 (가로 확장)
         self.open_button = QPushButton("📂")
-        self.open_button.setToolTip("PDF 열기 (Ctrl+O)")
+        self.open_button.setToolTip(self.t('tooltip_open'))
         self.open_button.setFixedSize(50, 40)
         self.open_button.setStyleSheet("font-size: 13px; font-weight: bold;")
         
         self.save_button = QPushButton("💾")
-        self.save_button.setToolTip("저장 (Ctrl+S)")
+        self.save_button.setToolTip(self.t('tooltip_save'))
         self.save_button.setFixedSize(50, 40)
         self.save_button.setStyleSheet("font-size: 13px; font-weight: bold;")
         
         # 편집 관련 버튼들 (가로 확장)
         self.undo_button = QPushButton("↩️")
-        self.undo_button.setToolTip("실행취소 (Ctrl+Z)")
+        self.undo_button.setToolTip(self.t('tooltip_undo'))
         self.undo_button.setFixedSize(50, 40)
         self.undo_button.setStyleSheet("font-size: 13px; font-weight: bold;")
         
         self.redo_button = QPushButton("↪️")
-        self.redo_button.setToolTip("다시실행 (Ctrl+Y)")
+        self.redo_button.setToolTip(self.t('tooltip_redo'))
         self.redo_button.setFixedSize(50, 40)
         self.redo_button.setStyleSheet("font-size: 13px; font-weight: bold;")
         
         # 보기 관련 버튼들 (가로 확장)
         self.zoom_in_button = QPushButton("🔍➕")
-        self.zoom_in_button.setToolTip("확대 (Ctrl++)")
+        self.zoom_in_button.setToolTip(self.t('tooltip_zoom_in'))
         self.zoom_in_button.setFixedSize(55, 40)
         self.zoom_in_button.setStyleSheet("font-size: 13px; font-weight: bold;")
         
         self.zoom_out_button = QPushButton("🔍➖")
-        self.zoom_out_button.setToolTip("축소 (Ctrl+-)")
+        self.zoom_out_button.setToolTip(self.t('tooltip_zoom_out'))
         self.zoom_out_button.setFixedSize(55, 40)
         self.zoom_out_button.setStyleSheet("font-size: 13px; font-weight: bold;")
 
@@ -5841,7 +4847,7 @@ class MainWindow(QMainWindow):
         self.theme_button = QPushButton("☀️")
         self.theme_button.setToolTip(self.t('tooltip_theme'))
         self.theme_button.setFixedSize(50, 40)
-        self.theme_button.setStyleSheet("font-size: 182x; font-weight: bold;")
+        self.theme_button.setStyleSheet("font-size: 13px; font-weight: bold;")
 
         # 뷰 맞춤 버튼들
         self.fit_width_button = QPushButton("↔️")
@@ -6050,8 +5056,11 @@ class MainWindow(QMainWindow):
                 return
         if not file_path:
             initial_dir = getattr(self, 'last_open_dir', '') or ''
+            pdf_filter = self.t('file_type_pdf')
+            if '(*.pdf)' not in pdf_filter:
+                pdf_filter = "PDF Files (*.pdf)"
             file_path, _ = QFileDialog.getOpenFileName(
-                self, "Open PDF", initial_dir, "PDF Files (*.pdf)"
+                self, self.t('dialog_open'), initial_dir, pdf_filter
             )
         if file_path:
             self.load_pdf_from_path(file_path)
@@ -6076,8 +5085,10 @@ class MainWindow(QMainWindow):
             if self.settings:
                 stored_zoom = self.settings.value('zoom_factor')
             try:
+                levels = getattr(self, 'zoom_levels', [1.0])
                 if stored_zoom is not None:
-                    self.zoom_factor = max(0.2, min(8.0, float(stored_zoom)))
+                    val = float(stored_zoom)
+                    self.zoom_factor = min(levels, key=lambda x: abs(x - val))
                 else:
                     self.zoom_factor = 1.0
             except Exception:
@@ -6208,8 +5219,11 @@ class MainWindow(QMainWindow):
             return False
             
         initial_dir = getattr(self, 'last_open_dir', '') or ''
+        pdf_filter = self.t('file_type_pdf')
+        if '(*.pdf)' not in pdf_filter:
+            pdf_filter = "PDF Files (*.pdf)"
         file_path, _ = QFileDialog.getSaveFileName(
-            self, self.t('dialog_save_as'), initial_dir, "PDF Files (*.pdf)"
+            self, self.t('dialog_save_as'), initial_dir, pdf_filter
         )
         if file_path:
             progress = None
@@ -6456,13 +5470,31 @@ class MainWindow(QMainWindow):
         self.update_page_navigation()
 
     def zoom_in(self):
-        self.zoom_factor = min(8.0, self.zoom_factor + 0.2)
+        current = getattr(self, 'zoom_factor', 1.0)
+        levels = getattr(self, 'zoom_levels', [1.0])
+        # 현재 배율보다 큰 단계 중 가장 작은 것을 선택
+        for val in levels:
+            if val > current + 0.001:
+                self.zoom_factor = val
+                break
+        else:
+            self.zoom_factor = levels[-1]
+            
         self.render_page()
         self.update_zoom_label()
         self._store_zoom_factor()
 
     def zoom_out(self):
-        self.zoom_factor = max(0.2, self.zoom_factor - 0.2)
+        current = getattr(self, 'zoom_factor', 1.0)
+        levels = getattr(self, 'zoom_levels', [1.0])
+        # 현재 배율보다 작은 단계 중 가장 큰 것을 선택
+        for val in reversed(levels):
+            if val < current - 0.001:
+                self.zoom_factor = val
+                break
+        else:
+            self.zoom_factor = levels[0]
+            
         self.render_page()
         self.update_zoom_label()
         self._store_zoom_factor()
@@ -6481,11 +5513,9 @@ class MainWindow(QMainWindow):
             page = page_to_render if page_to_render is not None else \
                    self.pdf_viewer.doc.load_page(self.pdf_viewer.current_page_num)
             
-            # 기본 스케일 계산
-            page_rect = page.rect
-            base_scale = min(1.0, 800 / page_rect.width, 600 / page_rect.height)
-            self.current_base_scale = base_scale
-            final_scale = base_scale * self.zoom_factor
+            # 절대 배율 시스템 사용 (zoom_factor 자체가 절대 배율임)
+            self.current_base_scale = 1.0
+            final_scale = self.zoom_factor
             
             self.pdf_viewer.pixmap_scale_factor = final_scale
             
@@ -6510,8 +5540,8 @@ class MainWindow(QMainWindow):
     def update_zoom_label(self):
         """현재 화면 렌더 배율을 퍼센트로 정확히 표시"""
         try:
-            visual_scale = max(0.01, float(self.current_base_scale) * float(self.zoom_factor))
-            percent = int(round(visual_scale * 100))
+            # 절대 배율 시스템: zoom_factor 자체가 1.0일 때 100%임
+            percent = int(round(self.zoom_factor * 100))
             self.zoom_label.setText(self.t('zoom_label_template', percent=percent))
         except Exception:
             self.zoom_label.setText(self.t('zoom_label_template', percent='-'))
@@ -6524,6 +5554,63 @@ class MainWindow(QMainWindow):
         g = (color_int >> 8) & 0xFF
         b = color_int & 0xFF
         return (r/255.0, g/255.0, b/255.0)
+
+    def _flatten_overlay_as_image(self, page, ov):
+        """오버레이를 고해상도 이미지로 변환하여 PDF에 삽입 (폰트 오류 등 대비 최후의 수단)"""
+        try:
+            from PySide6.QtGui import QImage, QPainter
+            from PySide6.QtCore import QBuffer, QIODevice, Qt
+            
+            bbox = ov.bbox if ov.bbox else ov.original_bbox
+            if bbox.width <= 0 or bbox.height <= 0:
+                return False
+                
+            # 고해상도 렌더링 (600 DPI 요청 반영)
+            dpi = 600
+            render_scale = dpi / 72.0 
+            img_w = int(math.ceil(bbox.width * render_scale))
+            img_h = int(math.ceil(bbox.height * render_scale))
+            
+            if img_w <= 0 or img_h <= 0:
+                return False
+                
+            image = QImage(img_w, img_h, QImage.Format.Format_ARGB32)
+            # DPI 정보 설정
+            dpm = int(dpi / 0.0254)
+            image.setDotsPerMeterX(dpm)
+            image.setDotsPerMeterY(dpm)
+            image.fill(Qt.GlobalColor.transparent)
+            
+            painter = QPainter(image)
+            try:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+                
+                # 고해상도 스케일 적용 후, 오버레이의 bbox 위치만큼 역이동하여
+                # 오버레이의 절대 좌표가 이미지의 (0,0)에 오도록 설정
+                painter.scale(render_scale, render_scale)
+                painter.translate(-bbox.x0, -bbox.y0)
+                
+                # 오버레이 렌더링 (절대 좌표 기반)
+                ov.render_to_painter(painter, scale_factor=1.0, offsets=(0, 0))
+            finally:
+                painter.end()
+            
+            # 이미지를 PNG 데이터로 변환하여 PDF 삽입
+            buffer = QBuffer()
+            buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+            image.save(buffer, "PNG")
+            img_data = bytes(buffer.data())
+            
+            page.insert_image(bbox, stream=img_data)
+            print(f"    -> [Fallback] 오버레이 이미지 렌더링 완료(600 DPI): ID {ov.z_index} ('{ov.text[:10]}...')")
+            return True
+        except Exception as e:
+            print(f"    -> [Critical] 이미지 폴백 실패: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
     def enforce_single_overlay_view(self, page, overlay, new_values):
         """요청사항: 편집 시 해당 세로 밴드를 전부 패치로 가리고, 오직 현재 오버레이만 보이도록 강제"""
@@ -6642,647 +5729,268 @@ class MainWindow(QMainWindow):
             print(f"   Fonts dump skipped: {e}")
 
     def flatten_overlays_to_pdf(self, progress=None):
-        """현재 레이어 오버레이를 PDF 콘텐츠로 반영 (진행메시지/폰트로그 포함)"""
+        """현재 레이어 오버레이를 PDF 콘텐츠로 반영 (진행메시지/폰트로그 포함)
+        정합성 극대화를 위해 3단계(패치 -> 텍스트 -> 스타일/밑줄) 순서로 페이지별 처리함.
+        """
         if not hasattr(self.pdf_viewer, 'text_overlays') or not self.pdf_viewer.text_overlays:
             return
 
-        print("\n오버레이 플래튼 시작")
+        print("\n오버레이 플래튼 시작 (3단계 레이어 방식)")
+        
+        # 모든 오버레이의 이미지 플래튼 상태 초기화 (폴백 제어용)
+        for v in self.pdf_viewer.text_overlays.values():
+            for ov in v:
+                ov.image_flattened = False
+
         self._set_progress(progress, self.t('progress_preparing_fonts'))
-        # 진행 단계 총량 추산: 글꼴 수집(1) + 페이지 글꼴 보장(len(doc)) + 오버레이 수(합계)
+        
         try:
             total_pages = len(self.pdf_viewer.doc)
         except Exception:
             total_pages = 0
-        try:
-            overlay_steps = sum(len(v) for v in self.pdf_viewer.text_overlays.values())
-        except Exception:
-            overlay_steps = 0
-        self._init_progress(progress, 1 + total_pages + overlay_steps)
-        self._step_progress(progress, 1)
-        # 0) 사전 준비: 문서 전체에서 사용된 사용자 폰트를 전역/페이지에 선임베딩
-        try:
-            fonts_global = set()
-            for p, ovs in self.pdf_viewer.text_overlays.items():
-                for ov in ovs:
-                    if getattr(ov, 'font', None):
-                        fonts_global.add(ov.font)
-            # 공통 CJK 후보도 포함(문자 누락 방지)
-            for fam in ['HANdotum', 'HMKMAMI', 'Noto Sans CJK KR', 'Malgun Gothic', 'NanumGothic', 'Dotum', 'Gulim']:
-                fonts_global.add(fam)
-            # 0-1) 문서 전역 폰트 파일 사전 로드(인코딩 안정성 강화)
-            if not hasattr(self, '_doc_font_ref_cache'):
-                self._doc_font_ref_cache = {}
-            for fam in list(fonts_global):
-                try:
-                    fpath = self.font_manager.get_font_path(fam) if hasattr(self, 'font_manager') else None
-                    if fpath and os.path.exists(fpath) and fpath not in self._doc_font_ref_cache:
-                        try:
-                            # 문서 레벨 임베딩은 일부 버전에서 미지원 → 파일 로드 검증만 수행
-                            _ = fitz.Font(fontfile=fpath)
-                            self._doc_font_ref_cache[fpath] = True
-                            print(f"  폰트 파일 사전 로드 OK: {fam}")
-                        except Exception as ide:
-                            print(f"  경고 폰트 파일 사전 로드 실패({fam}): {ide}")
-                except Exception as e:
-                    print(f"  경고 폰트 경로 확인 실패({fam}): {e}")
-            if fonts_global:
-                for pn in range(len(self.pdf_viewer.doc)):
-                    try:
-                        pg = self.pdf_viewer.doc.load_page(pn)
-                        self._set_progress(progress, self.t('progress_ensuring_fonts', page=pn))
-                        self._dump_page_fonts(pg, "before ensure")
-                        for fam in fonts_global:
-                            _ = self._ensure_font_ref(pg, fam)
-                        self._dump_page_fonts(pg, "after ensure")
-                        self._step_progress(progress, 1)
-                    except Exception as pree:
-                        print(f"  경고 글로벌 폰트 선임베딩 경고 p{pn}: {pree}")
-        except Exception as glob:
-            print(f"  경고 글로벌 폰트 선임베딩 단계 경고: {glob}")
-        for page_num, overlays in list(self.pdf_viewer.text_overlays.items()):
-            if not overlays:
-                continue
+        
+        # 진행 단계 총량 추산
+        overlay_count = sum(len(v) for v in self.pdf_viewer.text_overlays.values())
+        self._init_progress(progress, total_pages * 3) # 페이지당 3단계
+
+        # 0) 사전 준비: 전역 폰트 임베딩 (생략 가능하나 안정성을 위해 유지)
+        self._set_progress(progress, self.t('progress_preparing_fonts'))
+        
+        # 페이지별 루프
+        for page_num in range(total_pages):
             try:
                 page = self.pdf_viewer.doc.load_page(page_num)
-            except Exception as e:
-                print(f"  X 페이지 로드 실패 {page_num}: {e}")
-                continue
+                overlays = self.pdf_viewer.text_overlays.get(page_num, [])
+                patches = self.pdf_viewer.background_patches.get(page_num, [])
+                
+                # --- [1단계: 모든 배경 패치] ---
+                for patch in patches:
+                    try:
+                        bbox = patch.get('bbox')
+                        color = patch.get('color')
+                        if bbox and color:
+                            page.draw_rect(bbox, color=color, fill=color, width=0)
+                    except Exception: pass
+                self._step_progress(progress, 1)
 
-            # 사전 임베딩: 이 페이지에서 사용할 가능성이 높은 폰트들을 미리 보장
-            try:
-                fonts_to_ensure = set()
+                # --- [2단계: 모든 텍스트 본문] ---
                 for ov in overlays:
-                    if getattr(ov, 'text', ''):
-                        if getattr(ov, 'font', None):
-                            fonts_to_ensure.add(ov.font)
-                        # CJK 폴백 후보도 선임베딩 (문자 누락 방지)
-                        for fam in ['HANdotum', 'HMKMAMI', 'Noto Sans CJK KR', 'Malgun Gothic', 'NanumGothic', 'Dotum', 'Gulim']:
-                            fonts_to_ensure.add(fam)
-                self._set_progress(progress, self.t('progress_ensuring_fonts', page=page_num))
-                self._dump_page_fonts(page, "before page-ensure")
-                for fam in fonts_to_ensure:
-                    _ = self._ensure_font_ref(page, fam)
-                self._dump_page_fonts(page, "after page-ensure")
-            except Exception as pree:
-                print(f"  경고 폰트 사전 임베딩 경고: {pree}")
+                    if not ov.text: continue
+                    # 본문만 먼저 출력
+                    self._flatten_single_overlay(page, ov, mode='text_only')
+                self._step_progress(progress, 1)
 
-            for ov in list(overlays):
-                if getattr(ov, 'flattened', False):
-                    continue
+                # --- [3단계: 모든 스타일링 (밑줄 등)] ---
+                # 텍스트 위에 밑줄이 오도록 마지막에 드로잉
+                for ov in overlays:
+                    if not ov.text: continue
+                    self._flatten_single_overlay(page, ov, mode='style_only')
+                    ov.flattened = True # 최종 완료 처리
+                self._step_progress(progress, 1)
 
-                text_to_insert = ov.text or ''
-                if text_to_insert == '':
-                    ov.flattened = True
-                    continue
+            except Exception as pe:
+                print(f"  X 페이지 {page_num} 플래튼 중 오류: {pe}")
 
-                # 삽입 도우미
-                snippet = f"{text_to_insert[:12]}…" if text_to_insert else ''
-                self._set_progress(progress, self.t('progress_applying_overlay', page=page_num, text=snippet))
-                def _try_flatten_once():
-                    font_size = float(ov.size)
-                    color_tuple = self._rgbf_from_color_int(ov.color)
+        print("OK 모든 오버레이 플래튼 완료")
 
-                    # 폰트 준비
-                    selected_font_name = ov.font or 'Arial'
-                    # 저장 크기 미세 보정(예: +1.25%)
-                    eff_font_size = float(ov.size)
-                    try:
-                        tracking_percent = float(getattr(ov, 'tracking', 0.0))
-                    except Exception:
-                        tracking_percent = 0.0
-                    charspace_value = eff_font_size * (tracking_percent / 100.0)
-                    font_args = {"fontsize": eff_font_size, "color": color_tuple}
-                    if abs(charspace_value) > 1e-6:
-                        font_args["charspace"] = charspace_value
-                    # 사용자 폰트 실제 파일 경로 확보 (유니코드 ToUnicode 매핑 보장용)
-                    user_fontfile = None
-                    try:
-                        user_fontfile = self.font_manager.get_font_path(selected_font_name)
-                    except Exception:
-                        user_fontfile = None
+    def _do_insert_text(self, page, ov, font_ref, s_mat, font_args, baseline_y, text_x, line_height_pt, tracking_percent, stretch, fm_measure, is_hwp, need_synth_bold):
+        """실제 PDF 페이지에 텍스트를 글자 단위로 삽입하는 핵심 로직 (재시도 지원용)"""
+        text_to_insert = ov.text or ''
+        font_size = float(ov.size)
+        lines = text_to_insert.splitlines() if "\n" in text_to_insert else [text_to_insert]
+        
+        for li, line in enumerate(lines):
+            curr_y = baseline_y + li * line_height_pt
+            curr_x = text_x
+            t_ratio = 1.0 + (tracking_percent / 100.0)
+            
+            for ch in line:
+                ch_w_raw = fm_measure.horizontalAdvance(ch)
+                ch_w_stretched = ch_w_raw * stretch
+                advance = ch_w_stretched * 1.5 if (ch == ' ' and is_hwp) else ch_w_stretched
+                
+                if ch.strip():
+                    if need_synth_bold:
+                        synth_weight = float(getattr(ov, 'synth_bold_weight', 120))
+                        offset_factor = (synth_weight - 100.0) / 100.0 * 0.15
+                        total_bold_dx = font_size * offset_factor
+                        half_dx = total_bold_dx / 2.0
+                        step = 0.05
+                        sx = -half_dx
+                        while sx <= half_dx + 0.001:
+                            target_p = fitz.Point(curr_x + sx, curr_y)
+                            page.insert_text(target_p, ch, fontname=font_ref, 
+                                           morph=(target_p, s_mat), **font_args)
+                            sx += step
+                    else:
+                        target_p = fitz.Point(curr_x, curr_y)
+                        page.insert_text(target_p, ch, fontname=font_ref, 
+                                       morph=(target_p, s_mat), **font_args)
+                
+                curr_x += advance * t_ratio
+            ov._last_flatten_width = (curr_x - text_x)
 
-                    if not hasattr(self, 'font_manager'):
-                        self.font_manager = SystemFontManager()
+    def _flatten_single_overlay(self, page, ov, mode='all'):
+        """개별 오버레이를 특정 모드(본문/스타일/전체)로 PDF에 반영
+        UI 프리뷰(render_to_painter)와 100% 동일한 좌표 및 로직 사용.
+        """
+        # 이미 이미지로 플래튼된 경우 스타일 패스 건너뜀
+        if getattr(ov, 'image_flattened', False):
+            return True
 
-                    def choose_font_variant(base_name: str, flags: int):
-                        is_bold = bool(flags & 16)
-                        is_italic = bool(flags & 2)
-                        
-                        # 볼드체 검색 비활성화 (합성 볼드 강제 적용을 위해)
-                        if not is_italic:
-                            path = self.font_manager.get_font_path(base_name)
-                            return base_name, path
+        # [치명적 결함 해결] 이미지 렌더링 강제 옵션 처리
+        if getattr(ov, 'force_image', False) and mode in ('all', 'text_only'):
+            if self._flatten_overlay_as_image(page, ov):
+                ov.image_flattened = True
+                return True
 
-                        candidates = [base_name]
-                        # 이탤릭 변형만 검색
-                        suffixes = [' Italic', '-Italic', ' Oblique', '-Oblique']
-                        for suf in suffixes:
-                            candidates.append(base_name + suf)
-
-                        for name in candidates:
-                            p = self.font_manager.get_font_path(name)
-                            if p and os.path.exists(p):
-                                return name, p
-                        # fallback: keep original face if no variant found
-                        return base_name, self.font_manager.get_font_path(base_name)
-
-                    chosen_name, font_path = choose_font_variant(selected_font_name, ov.flags)
-                    if not user_fontfile and font_path:
-                        user_fontfile = font_path
-                    # 폰트 리소스도 페이지에 보장(중복 방지) → 참조명 반환
-                    font_ref = self._ensure_font_ref(page, chosen_name)
-                    
-                    # 현재 위치(bbox)를 기준으로 좌표 계산 (중요: original_bbox 사용 시 이동이 반영 안 됨)
-                    bbox = ov.bbox if ov.bbox else ov.original_bbox
-                    ov_height_ratio = getattr(ov, 'height_ratio', 1.15)
-                    ov_ascent_ratio = getattr(ov, 'ascent_ratio', 0.85)
-                    ov_descent_ratio = getattr(ov, 'descent_ratio', max(0.0, ov_height_ratio - ov_ascent_ratio))
-                    
-                    # 베이스라인 계산 (현재 Y 좌표인 bbox.y0 반영)
-                    baseline_y = bbox.y0 + ov_ascent_ratio * eff_font_size
-                    line_height = eff_font_size * ov_height_ratio
-                    insert_point = fitz.Point(bbox.x0, baseline_y)
-
-                    # 강제 이미지 옵션: 즉시 래스터 폴백 수행
-                    if bool(getattr(ov, 'force_image', False)):
-                        try:
-                            # 텍스트 폭(포인트) 계산
-                            text_len_pt = None
-                            try:
-                                if user_fontfile and os.path.exists(user_fontfile):
-                                    _f = fitz.Font(fontfile=user_fontfile)
-                                    text_len_pt = float(_f.text_length(text_to_insert, font_size))
-                            except Exception:
-                                text_len_pt = None
-                            if not text_len_pt:
-                                cjk = sum(1 for ch in text_to_insert if 0xAC00 <= ord(ch) <= 0xD7A3)
-                                other = len(text_to_insert) - cjk
-                                text_len_pt = font_size * (0.9 * cjk + 0.6 * other)
-                            width_scale = max(0.1, 1.0 + tracking_percent / 100.0)
-                            text_len_pt *= width_scale
-                            # 이미지 렌더링 (품질 스케일만 적용)
-                            scale_px = float(getattr(self, 'fallback_image_scale', 8.0))
-                            text_pt_h = line_height
-                            effective_width_pt = max(bbox.width, text_len_pt)
-                            rect_px_w = max(4, int(effective_width_pt * scale_px))
-                            rect_px_h = max(4, int(text_pt_h * scale_px))
-                            img = QImage(rect_px_w, rect_px_h, QImage.Format.Format_ARGB32)
-                            img.fill(QColor(0, 0, 0, 0))
-                            qp = QPainter(img)
-                            try:
-                                qp.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-                                qp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-                                qfont = QFont(chosen_name if chosen_name else selected_font_name)
-                                try:
-                                    qfont.setPixelSize(int(font_size * scale_px))
-                                except Exception:
-                                    qfont.setPointSizeF(max(1.0, float(font_size) * scale_px))
-                                # 장평/자간 반영
-                                try:
-                                    qfont.setStretch(int(max(1, min(400, float(getattr(ov, 'stretch', 1.0)) * 100))))
-                                except Exception:
-                                    pass
-                                try:
-                                    qfont.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 100.0 + tracking_percent)
-                                except Exception:
-                                    pass
-                                try:
-                                    qp.setFont(qfont)
-                                except Exception:
-                                    pass
-                                qp.setPen(QColor(int(color_tuple[0]*255), int(color_tuple[1]*255), int(color_tuple[2]*255)))
-                                # 한 줄 표시 (래핑 없음)
-                                qp.drawText(0, 0, rect_px_w, rect_px_h, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text_to_insert)
-                            finally:
-                                qp.end()
-                            ba = QByteArray()
-                            buf = QBuffer(ba)
-                            buf.open(QBuffer.OpenModeFlag.WriteOnly)
-                            img.save(buf, 'PNG')
-                            buf.close()
-                            page.insert_image(
-                                fitz.Rect(bbox.x0, bbox.y0, bbox.x0 + effective_width_pt, bbox.y0 + text_pt_h),
-                                stream=bytes(ba)
-                            )
-                            return True
-                        except Exception as e_force_img:
-                            print(f"  X 강제 이미지 폴백 실패: {e_force_img}")
-
-                    # 이미지 강제 옵션 또는 스타일/지원 상태에 따라 경로 분기
-                    try:
-                        # 0) 사용자 강제 이미지 옵션이면 바로 래스터 경로
-                        if bool(getattr(ov, 'force_image', False)):
-                            raise RuntimeError("force_image option enabled")
-                        # CJK 포함 여부 및 비-CJK 폰트 사용 시 정밀 경로로 유도
-                        text_has_cjk = any('\u3131' <= ch <= '\uD7A3' or '\u4E00' <= ch <= '\u9FFF' for ch in text_to_insert)
-                        cjk_families = {'Noto Sans CJK KR', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', 'NanumGothic', 'Dotum', 'Gulim', 'HANdotum', 'HMKMAMI'}
-                        needs_cjk_precise = text_has_cjk and (selected_font_name not in cjk_families)
-                        user_supports_all = False
-                        try:
-                            user_supports_all = self._font_supports_all(user_fontfile, text_to_insert) if user_fontfile else False
-                        except Exception:
-                            user_supports_all = False
-                        # 정밀 경로 사용 조건: 자간/장평 또는 CJK 보정, 혹은 합성볼드 필요
-                        is_bold_flag = bool(ov.flags & 16)
-                        chose_bold_variant = ('bold' in (chosen_name or '').lower()) or ('black' in (chosen_name or '').lower())
-                        if chose_bold_variant and not is_bold_flag:
-                            print(f"  ⚠️ {chosen_name}은 Bold 변형이지만 오버레이는 Bold가 아님 → 기본 폰트 유지")
-                        chosen_name = selected_font_name
-                        font_path = self.font_manager.get_font_path(chosen_name)
-                        font_ref = self._ensure_font_ref(page, chosen_name)
-                        chose_bold_variant = False
-                        setattr(ov, 'synth_bold', False)
-                        need_synth_bold = bool(getattr(ov, 'synth_bold', False) or (is_bold_flag and (not chose_bold_variant)))
-                        setattr(ov, 'synth_bold', need_synth_bold)
-                        if (abs(float(getattr(ov, 'stretch', 1.0)) - 1.0) > 1e-3 or
-                            abs(float(getattr(ov, 'tracking', 0.0))) > 1e-3 or
-                            getattr(ov, 'hwp_space_mode', False) or
-                            needs_cjk_precise or
-                            need_synth_bold or
-                            not user_supports_all):
-                            # 2.1 정밀 텍스트 플래튼: 문자 단위 배치로 stretch/track 근사 (page.insert_text 사용)
-                            try:
-                                # 폰트 이름/경로 준비
-                                eff_fontfile = user_fontfile
-                                lines = text_to_insert.splitlines() if "\n" in text_to_insert else [text_to_insert]
-                                stretch = float(getattr(ov, 'stretch', 1.0))
-                                tracking_percent = float(getattr(ov, 'tracking', 0.0))
-                                charspace_precise = charspace_value
-                                # 정밀 폭 측정기: 폰트파일 → Page.get_text_length → 근사 순으로 시도
-                                calc_font = None
-                                try:
-                                    if font_path and os.path.exists(font_path):
-                                        calc_font = fitz.Font(fontfile=font_path)
-                                except Exception:
-                                    calc_font = None
-                                
-                                # 라인 높이 및 베이스라인
-                                line_h = line_height
-                                base_y = baseline_y
-                                
-                                # 최적화: HWP 공백 모드이고 장평 변형이 없을 경우 '단어 단위' 배치 (자간/커닝 보존)
-                                use_word_mode = (
-                                    getattr(ov, 'hwp_space_mode', False) and 
-                                    abs(float(getattr(ov, 'stretch', 1.0)) - 1.0) < 1e-3
-                                )
-                                
-                                # 합성 볼드 두께 계산 (사용자 설정값 반영 - 강도 대폭 상향 및 부드러운 렌더링)
-                                synth_weight = float(getattr(ov, 'synth_bold_weight', 150))
-                                offset_factor = (synth_weight - 100.0) / 100.0 * 0.15
-                                total_bold_dx = eff_font_size * offset_factor
-
-                                # 자간 비율 (%)
-                                tracking_ratio = tracking_percent / 100.0
-
-                                # 재시도 로직 헬퍼
-                                def _attempt_insert_text(x_pos, y_pos, txt, target_fontname):
-                                    # tracking(자간)이 있으면 charspace 파라미터로 전달
-                                    # 중요: Qt의 % 자간을 완벽히 매칭하기 위해 Word Mode에서는 평균 너비 기반 근사 포인트값 사용
-                                    f_args = {"fontsize": eff_font_size, "color": color_tuple}
-                                    if abs(tracking_ratio) > 0.001 and len(txt) > 1:
-                                        # 글자당 평균 너비(size*0.5)의 %를 charspace(pt)로 환산
-                                        f_args["charspace"] = eff_font_size * 0.5 * tracking_ratio
-                                        
-                                    if need_synth_bold and total_bold_dx > 0.005:
-                                        # 대칭형 다중 레이어 삽입 (틈새 방지 및 자연스러운 확장)
-                                        half_dx = total_bold_dx / 2.0
-                                        step = 0.2
-                                        curr_dx = -half_dx
-                                        max_iter = 100
-                                        while curr_dx <= half_dx and max_iter > 0:
-                                            page.insert_text(fitz.Point(x_pos + curr_dx, y_pos), txt, fontname=target_fontname, **f_args)
-                                            curr_dx += step
-                                            max_iter -= 1
-                                        # 최종 경계면 보정
-                                        page.insert_text(fitz.Point(x_pos + half_dx, y_pos), txt, fontname=target_fontname, **f_args)
-                                    else:
-                                        # 기본 레이어
-                                        page.insert_text(fitz.Point(x_pos, y_pos), txt, fontname=target_fontname, **f_args)
-
-                                if use_word_mode:
-                                    print(f"   -> HWP Word Mode Flatten (is_hwp={getattr(ov, 'hwp_space_mode', False)})")
-                                    for li, line in enumerate(lines):
-                                        # 공백을 포함하여 분리
-                                        parts = re.split(r'( +)', line)
-                                        x = bbox.x0
-                                        y = base_y + li * line_h
-                                        
-                                        for part in parts:
-                                            if not part: continue
-                                            
-                                            # 현재 파트의 기본 너비 측정 (커닝 포함, 자간 제외)
-                                            part_width = 0.0
-                                            if calc_font:
-                                                part_width = float(calc_font.text_length(part, eff_font_size))
-                                            else:
-                                                # 근사치
-                                                for ch in part:
-                                                    code = ord(ch)
-                                                    part_width += eff_font_size * 1.0 if 0xAC00 <= code <= 0xD7A3 else eff_font_size * 0.5
-                                            
-                                            if part.isspace():
-                                                # HWP 모드: 공백 너비 1.5배 + Qt PercentageSpacing 매칭
-                                                one_space_w = part_width / len(part)
-                                                # (기존너비 * 1.5) * (1 + %자간)
-                                                x += (one_space_w * 1.5) * (1.0 + tracking_ratio) * len(part)
-                                            else:
-                                                # 단어 단위 삽입 (커닝 유지)
-                                                inserted = False
-                                                if font_ref and font_ref != 'helv':
-                                                    try:
-                                                        _attempt_insert_text(x, y, part, font_ref)
-                                                        inserted = True
-                                                    except Exception:
-                                                        inserted = False
-                                                
-                                                if not inserted:
-                                                    try:
-                                                        if user_fontfile and os.path.exists(user_fontfile):
-                                                            import hashlib
-                                                            retry_ref = f"retry_{hashlib.md5((selected_font_name + str(uuid.uuid4())).encode('utf-8')).hexdigest()[:8]}"
-                                                            page.insert_font(fontfile=user_fontfile, fontname=retry_ref)
-                                                            _attempt_insert_text(x, y, part, retry_ref)
-                                                            inserted = True
-                                                    except Exception:
-                                                        inserted = False
-                                                
-                                                if not inserted:
-                                                    print(f"  X 단어 삽입 실패: '{part}'")
-                                                
-                                                # 다음 위치로 이동 (단어 너비 * Qt % 자간 반영)
-                                                x += part_width * (1.0 + tracking_ratio)
-                                                
-                                    return True
-
-                                # 기본 모드 (장평 적용 시 문자 단위 배치)
-                                for li, line in enumerate(lines):
-                                    x = bbox.x0
-                                    y = base_y + li * line_h
-                                    
-                                    for ch in line:
-                                        ch_w = 0.0
-                                        if calc_font:
-                                            ch_w = float(calc_font.text_length(ch, eff_font_size))
-                                        else:
-                                            code = ord(ch)
-                                            ch_w = eff_font_size * 1.0 if 0xAC00 <= code <= 0xD7A3 else eff_font_size * 0.6
-                                        
-                                        # HWP 모드일 때 공백 문자 너비만 보정 (1.5배)
-                                        current_w = ch_w
-                                        if ch == ' ' and getattr(ov, 'hwp_space_mode', False):
-                                            current_w = ch_w * 1.5
-
-                                        # 자간/장평 적용 (Qt의 PercentageSpacing 매칭)
-                                        step = current_w * (1.0 + tracking_ratio) * stretch
-                                        
-                                        if ch.strip():
-                                            inserted = False
-                                            if font_ref and font_ref != 'helv':
-                                                try:
-                                                    _attempt_insert_text(x, y, ch, font_ref)
-                                                    inserted = True
-                                                except Exception:
-                                                    inserted = False
-                                            
-                                            if not inserted:
-                                                try:
-                                                    if user_fontfile and os.path.exists(user_fontfile):
-                                                        import hashlib
-                                                        retry_ref = f"retry_{hashlib.md5((selected_font_name + str(uuid.uuid4())).encode('utf-8')).hexdigest()[:8]}"
-                                                        page.insert_font(fontfile=user_fontfile, fontname=retry_ref)
-                                                        _attempt_insert_text(x, y, ch, retry_ref)
-                                                        inserted = True
-                                                except Exception:
-                                                    inserted = False
-                                        
-                                        x += step
-                                    end_x, end_y = x, y
-                                if ov.flags & 4:
-                                    underline_y = y + eff_font_size * max(0.05, ov_descent_ratio * 0.5)
-                                    u_weight = int(getattr(ov, 'underline_weight', 1))
-                                    page.draw_line(fitz.Point(bbox.x0, underline_y), fitz.Point(end_x, underline_y), color=color_tuple, width=u_weight)
-                                return True
-                            except Exception as etw:
-                                print(f"  경고 정밀 텍스트 플래튼 실패: {etw}")
-                            # 2.2 실패 시 래스터 폴백 - 시각 충실도 보장 (텍스트 유지 강제 모드에서는 생략)
-                            if getattr(self, 'force_text_flatten', False):
-                                raise RuntimeError("정밀 플래튼 모드: 래스터 폴백 생략")
-                            # 텍스트 픽셀 폭을 텍스트 길이에 맞게 확장
-                            text_len_pt = None
-                            try:
-                                if user_fontfile and os.path.exists(user_fontfile):
-                                    _f = fitz.Font(fontfile=user_fontfile)
-                                    text_len_pt = float(_f.text_length(text_to_insert, font_size))
-                            except Exception:
-                                text_len_pt = None
-                            if not text_len_pt:
-                                cjk = sum(1 for ch in text_to_insert if 0xAC00 <= ord(ch) <= 0xD7A3)
-                                other = len(text_to_insert) - cjk
-                                text_len_pt = font_size * (0.9 * cjk + 0.6 * other)
-                            width_scale = max(0.1, 1.0 + tracking_percent / 100.0)
-                            text_len_pt *= width_scale
-                            scale_px = float(getattr(self, 'fallback_image_scale', 8.0))
-                            effective_width_pt = max(bbox.width, text_len_pt)
-                            text_pt_h = max(line_height, (bbox.y1 - bbox.y0))
-                            rect_px_w = max(4, int(effective_width_pt * scale_px))
-                            rect_px_h = max(4, int(text_pt_h * scale_px))
-                            img = QImage(rect_px_w, rect_px_h, QImage.Format.Format_ARGB32)
-                            img.fill(QColor(0, 0, 0, 0))
-                            qp = QPainter(img)
-                            try:
-                                qp.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-                                qp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-                                qfont = QFont(chosen_name if chosen_name else selected_font_name)
-                                try:
-                                    qfont.setPixelSize(int(font_size * scale_px))
-                                except Exception:
-                                    qfont.setPointSizeF(max(1.0, float(font_size) * scale_px))
-                                if ov.flags & 16:
-                                    qfont.setBold(True)
-                                if ov.flags & 2:
-                                    qfont.setItalic(True)
-                                if ov.flags & 4:
-                                    qfont.setUnderline(True)
-                                try:
-                                    qfont.setStretch(int(max(1, min(400, float(stretch) * 100))))
-                                except Exception:
-                                    pass
-                                try:
-                                    qfont.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 100.0 + tracking_percent)
-                                except Exception:
-                                    pass
-                                qp.setFont(qfont)
-                                qp.setPen(QColor(int(color_tuple[0]*255), int(color_tuple[1]*255), int(color_tuple[2]*255)))
-                                # 무조건 한 줄 표시: 래핑 옵션 제거
-                                qp.drawText(0, 0, rect_px_w, rect_px_h, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text_to_insert)
-                            finally:
-                                qp.end()
-                            ba = QByteArray()
-                            buf = QBuffer(ba)
-                            buf.open(QBuffer.OpenModeFlag.WriteOnly)
-                            img.save(buf, 'PNG')
-                            buf.close()
-                            # 베이스라인 하단 맞춤: 레이어 높이를 유지하여 원본과 동일한 시각 크기
-                            page.insert_image(
-                                fitz.Rect(bbox.x0, bbox.y1 - text_pt_h, bbox.x0 + effective_width_pt, bbox.y1),
-                                stream=bytes(ba)
-                            )
-                            return True
-                    except Exception as eextra:
-                        print(f"  경고 스타일 특수처리(래스터) 실패: {eextra}")
-
-                    # 1차: insert_textbox 경로는 클리핑을 유발하므로 사용하지 않음
-                    use_textbox = False
-                    if use_textbox:
-                        try:
-                            rect = fitz.Rect(bbox.x0, bbox.y0, bbox.x1, bbox.y1)
-                            if user_fontfile and os.path.exists(user_fontfile):
-                                leftover = page.insert_textbox(rect, text_to_insert, align=fitz.TEXT_ALIGN_LEFT, fontfile=user_fontfile, fontsize=font_size, color=color_tuple)
-                            else:
-                                raise RuntimeError("no user fontfile for textbox")
-                            if isinstance(leftover, str) and leftover.strip() == text_to_insert.strip():
-                                raise RuntimeError("insert_textbox did not render any text")
-                            try:
-                                vis = page.get_text("text", clip=rect)
-                                if not vis or not any(ch in vis for ch in text_to_insert.strip()[:5]):
-                                    raise RuntimeError("textbox visible check failed")
-                            except Exception as vc:
-                                raise vc
-                            style_values = {
-                                'size': font_size,
-                                'color': QColor(int(color_tuple[0]*255), int(color_tuple[1]*255), int(color_tuple[2]*255)),
-                                'bold': bool(ov.flags & 16),
-                                'italic': bool(ov.flags & 2),
-                                'underline': bool(ov.flags & 4),
-                                'synth_bold_weight': getattr(ov, 'synth_bold_weight', 150),
-                                'underline_weight': getattr(ov, 'underline_weight', 1),
-                            }
-                            try:
-                                font_args["fontname"] = font_ref
-                            except Exception:
-                                pass
-                            self._apply_text_styles(page, insert_point, text_to_insert, style_values, font_args, None)
-                            return True
-                        except Exception as e1:
-                            print(f"  경고 insert_textbox 실패: {e1}")
-
-                    # 2차: insert_text (베이스라인 좌표) - 선택 폰트만 사용
-                    try:
-                        if font_ref and font_ref != 'helv':
-                            # 베이스라인 경로(트래킹 없음): 크기 미세 보정값 반영
-                            page.insert_text(insert_point, text_to_insert, fontname=font_ref, **font_args)
-                        else:
-                            raise RuntimeError("no font_ref for baseline insert")
-                        # 가시성 검증
-                        try:
-                            vis = page.get_text("text", clip=fitz.Rect(bbox.x0, bbox.y0, bbox.x1, bbox.y0 + line_height))
-                            if not vis or not any(ch in vis for ch in text_to_insert.strip()[:5]):
-                                raise RuntimeError("insert_text visible check failed")
-                        except Exception as vc2:
-                            raise vc2
-                        # Bold/Underline 등 스타일 후처리(동일 폰트 참조)
-                        try:
-                            is_bold_flag = bool(ov.flags & 16)
-                            chose_bold_variant = False
-                            try:
-                                cname_l = (chosen_name or '').lower()
-                                chose_bold_variant = ('bold' in cname_l) or ('black' in cname_l)
-                            except Exception:
-                                pass
-                            style_values = {
-                                'size': font_size,
-                                'color': QColor(int(color_tuple[0]*255), int(color_tuple[1]*255), int(color_tuple[2]*255)),
-                                'bold': is_bold_flag,
-                                'italic': bool(ov.flags & 2),
-                                'underline': bool(ov.flags & 4),
-                                'synth_bold': (is_bold_flag and not chose_bold_variant),
-                                'synth_bold_weight': getattr(ov, 'synth_bold_weight', 150),
-                                'underline_weight': getattr(ov, 'underline_weight', 1)
-                            }
-                            self._apply_text_styles(page, insert_point, text_to_insert, style_values, font_args, None)
-                        except Exception as sty:
-                            print(f"  경고 스타일 후처리 경고: {sty}")
+        try:
+            text_to_insert = ov.text or ''
+            font_size = float(ov.size)
+            color_tuple = self._rgbf_from_color_int(ov.color)
+            selected_font_name = ov.font or 'Arial'
+            
+            # 폰트 준비
+            if not hasattr(self, 'font_manager'):
+                self.font_manager = SystemFontManager()
+            
+            chosen_name = selected_font_name
+            font_path = self.font_manager.get_font_path(selected_font_name)
+            if ov.flags & 2: # 이탤릭 변형 검색
+                suffixes = [' Italic', '-Italic', ' Oblique', '-Oblique']
+                for suf in suffixes:
+                    p = self.font_manager.get_font_path(selected_font_name + suf)
+                    if p:
+                        chosen_name = selected_font_name + suf
+                        font_path = p
+                        break
+            
+            # [중요] 폰트 파일이 없으면 즉각 이미지 폴백 시도 (사라짐 방지)
+            if not font_path or not os.path.exists(font_path):
+                if mode in ('all', 'text_only'):
+                    print(f"    -> 폰트 파일 없음({selected_font_name}), 이미지 폴백 실행")
+                    if self._flatten_overlay_as_image(page, ov):
+                        ov.image_flattened = True
                         return True
-                    except Exception as e2:
-                        print(f"  X insert_text 실패: {e2}")
-                        # 4차: 래스터 폴백 - 텍스트를 이미지로 렌더링하여 삽입 (텍스트 유지 강제 모드에서는 생략)
-                        if getattr(self, 'force_text_flatten', False):
-                            return False
-                        try:
-                            # 텍스트 폭에 맞춰 이미지 폭 확대
-                            text_len_pt = None
-                            try:
-                                if user_fontfile and os.path.exists(user_fontfile):
-                                    _f = fitz.Font(fontfile=user_fontfile)
-                                    text_len_pt = float(_f.text_length(text_to_insert, font_size))
-                            except Exception:
-                                text_len_pt = None
-                            if not text_len_pt:
-                                cjk = sum(1 for ch in text_to_insert if 0xAC00 <= ord(ch) <= 0xD7A3)
-                                other = len(text_to_insert) - cjk
-                                text_len_pt = font_size * (0.9 * cjk + 0.6 * other)
-                            scale_px = float(getattr(self, 'fallback_image_scale', 8.0))
-                            text_pt_h = max(font_size * 1.2, (bbox.y1 - bbox.y0))
-                            rect_px_w = max(2, int(text_len_pt * scale_px))
-                            rect_px_h = max(2, int(text_pt_h * scale_px))
-                            img = QImage(rect_px_w, rect_px_h, QImage.Format.Format_ARGB32)
-                            img.fill(QColor(0, 0, 0, 0))
-                            painter = QPainter(img)
-                            qfont = QFont(selected_font_name)
-                            try:
-                                qfont.setPixelSize(int(font_size * scale_px))
-                            except Exception:
-                                qfont.setPointSizeF(max(1.0, float(font_size) * scale_px))
-                            # 장평/자간 적용
-                            try:
-                                qfont.setStretch(int(max(1, min(400, float(getattr(ov, 'stretch', 1.0)) * 100))))
-                            except Exception:
-                                pass
-                            try:
-                                painter.setFont(qfont)
-                                painter.setPen(QColor(int(color_tuple[0]*255), int(color_tuple[1]*255), int(color_tuple[2]*255)))
-                                
-                                # 합성 볼드 처리 (래스터 경로)
-                                if getattr(ov, 'synth_bold', False):
-                                    synth_weight = float(getattr(ov, 'synth_bold_weight', 150))
-                                    offset_factor = (synth_weight - 100.0) / 100.0 * 0.15
-                                    total_bold_dx = (font_size * scale_px) * offset_factor
-                                    
-                                    if total_bold_dx > 0.1:
-                                        half_dx = total_bold_dx / 2.0
-                                        step = 0.5
-                                        curr_dx = -half_dx
-                                        while curr_dx <= half_dx:
-                                            painter.drawText(int(curr_dx), 0, rect_px_w, rect_px_h, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text_to_insert)
-                                            curr_dx += step
-                                        # 최종 위치 보정
-                                        painter.drawText(int(half_dx), 0, rect_px_w, rect_px_h, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text_to_insert)
-                                    else:
-                                        painter.drawText(0, 0, rect_px_w, rect_px_h, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text_to_insert)
-                                else:
-                                    # 일반 그리기
-                                    painter.drawText(0, 0, rect_px_w, rect_px_h, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text_to_insert)
-                            finally:
-                                painter.end()
-                            # PNG 바이트로 변환 후 이미지 삽입
-                            ba = QByteArray()
-                            buf = QBuffer(ba)
-                            buf.open(QBuffer.OpenModeFlag.WriteOnly)
-                            img.save(buf, 'PNG')
-                            buf.close()
-                            page.insert_image(fitz.Rect(bbox.x0, bbox.y1 - text_pt_h, bbox.x0 + text_len_pt, bbox.y1), stream=bytes(ba))
-                            return True
-                        except Exception as eimg:
-                            print(f"  X 래스터 폴백 실패: {eimg}")
-                            return False
+            
+            try:
+                font_ref = self._ensure_font_ref(page, chosen_name)
+            except Exception as e_ref:
+                print(f"    -> 폰트 임베딩 실패: {e_ref}, 이미지 폴백 실행")
+                if mode in ('all', 'text_only'):
+                    if self._flatten_overlay_as_image(page, ov):
+                        ov.image_flattened = True
+                        return True
+                return False
 
-                if _try_flatten_once():
-                    ov.flattened = True
-                    print(f"  OK 오버레이 반영: 페이지 {page_num}, '{text_to_insert[:20]}...' @ {ov.bbox}")
-                    self._step_progress(progress, 1)
-                else:
-                    print(f"  X 오버레이 반영 실패(최종): '{text_to_insert[:20]}...' @ {ov.bbox}")
-                    self._step_progress(progress, 1)
+            # [좌표 계산의 핵심: UI와 동일하게]
+            bbox = ov.bbox if ov.bbox else ov.original_bbox
+            ov_ascent_ratio = getattr(ov, 'ascent_ratio', 0.85)
+            ov_height_ratio = getattr(ov, 'height_ratio', 1.15)
+            
+            # 베이스라인 결정 (origin이 있으면 최우선, 없으면 ratio 기반 산출)
+            origin = getattr(ov, 'origin', None)
+            if origin:
+                dx = bbox.x0 - ov.original_bbox.x0
+                dy = bbox.y0 - ov.original_bbox.y0
+                baseline_y = origin[1] + dy
+                text_x = origin[0] + dx
+            else:
+                baseline_y = bbox.y0 + (font_size * ov_ascent_ratio)
+                text_x = bbox.x0
+            
+            line_height_pt = font_size * ov_height_ratio
+            tracking_percent = float(getattr(ov, 'tracking', 0.0))
+            stretch = float(getattr(ov, 'stretch', 1.0))
+            
+            # [정합성 극대화] UI와 동일한 너비 측정을 위해 QFontMetricsF 사용
+            # 72 DPI 환경 강제 (PDF 포인트 단위 일치)
+            from PySide6.QtGui import QImage, QFont, QFontMetricsF
+            dummy_device = QImage(1, 1, QImage.Format.Format_Mono)
+            dpm_72 = int(72 / 0.0254)
+            dummy_device.setDotsPerMeterX(dpm_72)
+            dummy_device.setDotsPerMeterY(dpm_72)
+            
+            qfont_measure = QFont(selected_font_name)
+            qfont_measure.setPointSizeF(font_size)
+            qfont_measure.setKerning(False)
+            qfont_measure.setStretch(100)
+            qfont_measure.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0)
+            if ov.flags & 16: qfont_measure.setBold(True)
+            if ov.flags & 2: qfont_measure.setItalic(True)
+            
+            # 72 DPI 장치 컨텍스트에서 측정 (PDF 포인트와 1:1 매칭)
+            fm_measure = QFontMetricsF(qfont_measure, dummy_device)
+
+            # [스타일 판단: UI와 동일하게]
+            is_bold_flag = bool(ov.flags & 16)
+            loaded_name_l = (chosen_name or '').lower()
+            has_bold_variant = any(kw in loaded_name_l for kw in ('bold', 'black', 'heavy'))
+            
+            if is_bold_flag:
+                need_synth_bold = not has_bold_variant
+            else:
+                need_synth_bold = False
+            
+            # 본문 출력 모드
+            if mode in ('all', 'text_only'):
+                font_args = {"fontsize": font_size, "color": color_tuple}
+                is_hwp = getattr(ov, 'hwp_space_mode', False)
+                s_mat = fitz.Matrix(stretch, 1)
+                
+                # [개선] 2단계 복구 전략: 실패 시 폰트 재로드 후 재시도
+                try:
+                    self._do_insert_text(page, ov, font_ref, s_mat, font_args, baseline_y, text_x, line_height_pt, tracking_percent, stretch, fm_measure, is_hwp, need_synth_bold)
+                except Exception as e_insert:
+                    print(f"    -> [Step 1] 텍스트 삽입 실패({e_insert}), 폰트 재로드 및 재시도 중...")
+                    try:
+                        # 폰트 리소스 강제 갱신
+                        new_font_ref = self._ensure_font_ref(page, chosen_name, force_reload=True)
+                        # 재시도
+                        self._do_insert_text(page, ov, new_font_ref, s_mat, font_args, baseline_y, text_x, line_height_pt, tracking_percent, stretch, fm_measure, is_hwp, need_synth_bold)
+                        print(f"    -> [Success] 폰트 재로드 후 텍스트 삽입 성공!")
+                    except Exception as e_retry:
+                        print(f"    -> [Step 2] 재시도 실패({e_retry}), 이미지 폴백 실행")
+                        if self._flatten_overlay_as_image(page, ov):
+                            ov.image_flattened = True
+                            return True
+                        return False
+
+            # 스타일(밑줄) 출력 모드
+            if mode in ('all', 'style_only'):
+                if ov.flags & 4:
+                    lines = text_to_insert.splitlines() if "\n" in text_to_insert else [text_to_insert]
+                    for li, line in enumerate(lines):
+                        curr_y = baseline_y + li * line_height_pt
+                        u_offset = float(getattr(ov, 'underline_offset', 1.5))
+                        u_y = curr_y + u_offset
+                        u_w = float(getattr(ov, 'underline_weight', 0.6))
+                        
+                        # [해결] 텍스트 본문 출력 시 계산된 실제 너비 사용
+                        t_w = getattr(ov, '_last_flatten_width', 0)
+                        if t_w <= 0:
+                            # fallback 너비 계산
+                            line_w_raw = fm_measure.horizontalAdvance(line)
+                            if is_hwp:
+                                line_w_raw += (line.count(' ') * fm_measure.horizontalAdvance(' ') * 0.5)
+                            t_w = line_w_raw * stretch * (1.0 + tracking_percent / 100.0)
+                        
+                        page.draw_line(fitz.Point(text_x, u_y), fitz.Point(text_x + t_w, u_y), 
+                                     color=color_tuple, width=u_w)
+
+            return True
+        except Exception as e:
+            print(f"  X 개별 오버레이 플래튼 실패: {e}, 이미지 폴백 시도")
+            if mode in ('all', 'text_only'):
+                if self._flatten_overlay_as_image(page, ov):
+                    ov.image_flattened = True
+                    return True
+            return False
+
+            return True
+        except Exception as e:
+            print(f"  X 개별 오버레이 플래튼 실패: {e}")
+            return False
 
     def get_precise_background_color(self, page, bbox):
         """선택된 텍스트 바로 인접 픽셀만 집중 샘플링하여 배경색 검출 (백업01 로직)"""
@@ -7444,10 +6152,23 @@ class MainWindow(QMainWindow):
 
     def apply_background_patch(self, page, original_bbox, new_values, overlay=None, preview=False):
         """각 텍스트 블록별 개별 배경 패치 적용"""
+        # 입력된 bbox가 튜플일 경우 fitz.Rect로 변환 (AttributeError 방지)
+        if isinstance(original_bbox, (tuple, list)):
+            original_bbox = fitz.Rect(original_bbox)
+            
         print(f"\n === 개별 텍스트 블록 배경 패치 적용 ===")
         print(f"   위치 처리할 텍스트 bbox: {original_bbox}")
         print(f"   텍스트 내용: {new_values.get('text', 'N/A')[:20]}...")
         
+        # '패치 없이 텍스트만 생성' 옵션 처리
+        if new_values.get('text_only_mode'):
+            print("   '패치 없이 텍스트만 생성' 모드 활성 - 패치 생략")
+            overlay_id = getattr(overlay, 'z_index', None) if overlay else None
+            page_index = overlay.page_num if overlay else self.pdf_viewer.current_page_num
+            if hasattr(self.pdf_viewer, 'remove_background_patch') and overlay_id is not None:
+                self.pdf_viewer.remove_background_patch(page_index, overlay_id=overlay_id)
+            return None, None
+
         try:
             # 1. 지능적 마진 계산
             text_width = original_bbox.width
@@ -7459,49 +6180,52 @@ class MainWindow(QMainWindow):
                 except Exception:
                     return fallback
 
-            margin_h_ratio = new_values.get('patch_margin_h')
-            margin_v_ratio = new_values.get('patch_margin_v')
+            # 상하좌우 개별 마진 추출
+            m_l = new_values.get('patch_margin_l')
+            m_r = new_values.get('patch_margin_r')
+            m_t = new_values.get('patch_margin_t')
+            m_b = new_values.get('patch_margin_b')
 
-            if margin_h_ratio is None or margin_v_ratio is None:
-                legacy_margin = new_values.get('patch_margin')
-                if isinstance(legacy_margin, dict):
-                    margin_h_ratio = legacy_margin.get('horizontal', margin_h_ratio)
-                    margin_v_ratio = legacy_margin.get('vertical', margin_v_ratio)
-                elif isinstance(legacy_margin, (tuple, list)) and len(legacy_margin) >= 2:
-                    if margin_h_ratio is None:
-                        margin_h_ratio = legacy_margin[0]
-                    if margin_v_ratio is None:
-                        margin_v_ratio = legacy_margin[1]
-                elif legacy_margin is not None:
-                    if margin_h_ratio is None:
-                        margin_h_ratio = legacy_margin
-                    if margin_v_ratio is None:
-                        margin_v_ratio = legacy_margin
+            # 레거시 호환 및 기본값 처리
+            if None in (m_l, m_r, m_t, m_b):
+                legacy_h = new_values.get('patch_margin_h')
+                legacy_v = new_values.get('patch_margin_v')
+                legacy_all = new_values.get('patch_margin')
+                
+                default_margin = getattr(self, 'patch_margin', (0.0, 0.0, 0.0, 0.0))
+                if not isinstance(default_margin, (tuple, list)) or len(default_margin) < 4:
+                    if isinstance(default_margin, (tuple, list)) and len(default_margin) >= 2:
+                        default_margin = (default_margin[0], default_margin[0], default_margin[1], default_margin[1])
+                    else:
+                        try: val = float(default_margin)
+                        except: val = 0.0
+                        default_margin = (val, val, val, val)
+                
+                if m_l is None: m_l = legacy_h if legacy_h is not None else (legacy_all[0] if isinstance(legacy_all, (list, tuple)) else (legacy_all if legacy_all is not None else default_margin[0]))
+                if m_r is None: m_r = legacy_h if legacy_h is not None else (legacy_all[1] if isinstance(legacy_all, (list, tuple)) and len(legacy_all) >= 2 else (legacy_all if legacy_all is not None else default_margin[1]))
+                if m_t is None: m_t = legacy_v if legacy_v is not None else (legacy_all[2] if isinstance(legacy_all, (list, tuple)) and len(legacy_all) >= 4 else (legacy_all[1] if isinstance(legacy_all, (list, tuple)) and len(legacy_all) >= 2 else (legacy_all if legacy_all is not None else default_margin[2])))
+                if m_b is None: m_b = legacy_v if legacy_v is not None else (legacy_all[3] if isinstance(legacy_all, (list, tuple)) and len(legacy_all) >= 4 else (legacy_all[1] if isinstance(legacy_all, (list, tuple)) and len(legacy_all) >= 2 else (legacy_all if legacy_all is not None else default_margin[3])))
 
-            default_margin = getattr(self, 'patch_margin', (0.0, 0.0))
-            if isinstance(default_margin, (tuple, list)) and len(default_margin) >= 2:
-                default_h, default_v = default_margin[0], default_margin[1]
-            else:
-                try:
-                    scalar_default = float(default_margin)
-                except Exception:
-                    scalar_default = 0.0
-                default_h = default_v = scalar_default
+            m_l = _coerce_margin(m_l, 0.0)
+            m_r = _coerce_margin(m_r, 0.0)
+            m_t = _coerce_margin(m_t, 0.0)
+            m_b = _coerce_margin(m_b, 0.0)
 
-            margin_h_ratio = _coerce_margin(margin_h_ratio, _coerce_margin(default_h, 0.0))
-            margin_v_ratio = _coerce_margin(margin_v_ratio, _coerce_margin(default_v, 0.0))
-
-            margin_h = text_width * margin_h_ratio
-            margin_v = text_height * margin_v_ratio
+            margin_l = text_width * m_l
+            margin_r = text_width * m_r
+            margin_t = text_height * m_t
+            margin_b = text_height * m_b
+            
             print(
                 "    사용자 지정 패치 여백 적용: "
-                f"가로={margin_h_ratio*100:.1f}%({margin_h:.2f}pt), "
-                f"세로={margin_v_ratio*100:.1f}%({margin_v:.2f}pt)"
+                f"L={m_l*100:.1f}%, R={m_r*100:.1f}%, T={m_t*100:.1f}%, B={m_b*100:.1f}%"
             )
 
             if overlay is not None:
-                overlay.patch_margin_h = margin_h_ratio
-                overlay.patch_margin_v = margin_v_ratio
+                overlay.patch_margin_l = m_l
+                overlay.patch_margin_r = m_r
+                overlay.patch_margin_t = m_t
+                overlay.patch_margin_b = m_b
             
             # 2. 새로운 정교한 배경색 검출 로직 사용 (사용자 지정이 우선)
             if new_values.get('use_custom_patch_color'):
@@ -7523,25 +6247,30 @@ class MainWindow(QMainWindow):
             # get_precise_background_color는 항상 유효한 색상을 반환함 (fallback 포함)
             
             print(f"    이 텍스트 블록의 검출된 배경색: {bg_color}")
-            print(f"   패치 영역 마진: 수평={margin_h:.1f}px, 수직={margin_v:.1f}px")
+            print(f"   패치 영역 마진: L={margin_l:.1f}, R={margin_r:.1f}, T={margin_t:.1f}, B={margin_b:.1f}px")
             
             # 3. 단색 사각형 패치 적용 (단순하고 깔끔하게)
+            # [개선사항] 이미 insert_overlay_text에서 original_bbox가 텍스트 크기에 맞춰 최적화됨
+            # 여기서는 추가 확장 없이 사용자 지정 마진만 적용
+            
             # 요청사항: 필요 시 해당 라인(세로 밴드) 전체를 가리는 풀폭 패치 옵션
             cover_all_band = bool(new_values.get('cover_all_band', False) or new_values.get('cover_all', False))
+            
+            base_x0 = original_bbox.x0 - margin_l
+            base_y0 = original_bbox.y0 - margin_t
+            base_x1 = original_bbox.x1 + margin_r
+            base_y1 = original_bbox.y1 + margin_b
+            
             if cover_all_band:
                 patch_rect = fitz.Rect(
                     page.rect.x0,
-                    original_bbox.y0 - margin_v,
+                    base_y0,
                     page.rect.x1,
-                    original_bbox.y1 + margin_v
+                    base_y1
                 )
             else:
-                patch_rect = fitz.Rect(
-                    original_bbox.x0 - margin_h,
-                    original_bbox.y0 - margin_v,
-                    original_bbox.x1 + margin_h,
-                    original_bbox.y1 + margin_v
-                )
+                patch_rect = fitz.Rect(base_x0, base_y0, base_x1, base_y1)
+
             
             overlay_id = getattr(overlay, 'z_index', None) if overlay else None
             page_index = overlay.page_num if overlay else self.pdf_viewer.current_page_num
@@ -7647,6 +6376,7 @@ class MainWindow(QMainWindow):
             
             # 원본 span 정보 추출 및 로깅
             original_font = span.get('font', 'Unknown')
+            pdf_font_name = span.get('pdf_font_name') or original_font # 원본 PDF 폰트명 보존
             original_size = span.get('size', 0)
             original_text = span.get('text', '')
             
@@ -7751,11 +6481,18 @@ class MainWindow(QMainWindow):
 
             print(f"스타일 flags: 편집창={edit_flags}, 원본={span.get('flags', 0)}")
 
-            existing_overlay = self.pdf_viewer.find_overlay_at_position(
-                self.pdf_viewer.current_page_num, layout_bbox)
-            if not existing_overlay and has_current_bbox:
+            # 기존 오버레이 찾기 (overlay_id가 있으면 최우선, 없으면 위치 기반)
+            existing_overlay = None
+            overlay_id_to_find = span.get('overlay_id')
+            if overlay_id_to_find is not None:
+                existing_overlay = self.pdf_viewer.get_overlay_by_id(self.pdf_viewer.current_page_num, overlay_id_to_find)
+            
+            if not existing_overlay:
                 existing_overlay = self.pdf_viewer.find_overlay_at_position(
-                    self.pdf_viewer.current_page_num, original_bbox)
+                    self.pdf_viewer.current_page_num, layout_bbox)
+                if not existing_overlay and has_current_bbox:
+                    existing_overlay = self.pdf_viewer.find_overlay_at_position(
+                        self.pdf_viewer.current_page_num, original_bbox)
 
             stretch_value = float(new_values.get('stretch', 1.0) or 1.0)
             if existing_overlay:
@@ -7772,47 +6509,128 @@ class MainWindow(QMainWindow):
                 descent_ratio = preview_descent_ratio
 
             source_bbox = original_bbox if not existing_overlay else (existing_overlay.original_bbox or original_bbox)
-            source_height = max(0.1, float(source_bbox.height))
+            
+            # 원본 베이스라인 정보(origin)가 있으면 이를 기반으로 정확한 ascent_ratio 계산
+            origin = span.get('origin')
             font_size_safe = max(0.5, float(font_size))
-            pdf_height_ratio_raw = source_height / font_size_safe
-            pdf_height_ratio = TextOverlay._normalize_height_ratio(pdf_height_ratio_raw)
-
-            raw_height_ratio = float(preview_height_ratio)
-            if raw_height_ratio <= 0:
-                raw_height_ratio = 1.15
-            # PDF bbox를 우선으로 하여 높이 비율 스케일링
-            scale_to_pdf = pdf_height_ratio / raw_height_ratio if raw_height_ratio > 0 else 1.0
-            if abs(scale_to_pdf - 1.0) > 0.002 or abs(raw_height_ratio - pdf_height_ratio) > 0.002:
-                height_ratio = pdf_height_ratio
-                ascent_ratio = float(ascent_ratio) * scale_to_pdf
-                descent_ratio = float(descent_ratio) * scale_to_pdf
+            
+            if existing_overlay:
+                # 기존 오버레이 편집 시: 기존에 설정된 메트릭 유지 (레이아웃 틀어짐 방지)
+                height_ratio = getattr(existing_overlay, 'height_ratio', 1.15)
+                ascent_ratio = getattr(existing_overlay, 'ascent_ratio', 0.85)
+                descent_ratio = getattr(existing_overlay, 'descent_ratio', 0.30)
+                preview_height_ratio = getattr(existing_overlay, 'preview_height_ratio', height_ratio)
+            elif origin:
+                # [중요] PDF에서 추출된 텍스트 스팬을 처음 편집할 때
+                # 1) 일반 텍스트 편집: 원본 PDF의 베이스라인 위치를 100% 보존해야 함
+                # 2) 단, 텍스트가 없는 사각형 선택(패치용)인 경우에만 폰트 메트릭으로 중앙 정렬
+                if span.get('text'):
+                    # 실제 텍스트가 있는 경우: 원본 베이스라인 비율 계산
+                    ascent_ratio = (origin[1] - source_bbox.y0) / font_size_safe
+                    height_ratio = source_bbox.height / font_size_safe
+                    descent_ratio = max(0.0, height_ratio - ascent_ratio)
+                    preview_height_ratio = height_ratio
+                    print(f"   [Original Text] 원본 베이스라인 보존 모드: ascent={ascent_ratio:.3f}")
+                else:
+                    # 텍스트가 없는 패치용 선택: 폰트 기반 메트릭 (중앙 정렬용)
+                    preview_metrics = self._compute_preview_metrics(selected_font_name, font_path, edit_flags, stretch_value)
+                    height_ratio, ascent_ratio, descent_ratio = preview_metrics
+                    preview_height_ratio = height_ratio
+                    print(f"   [Empty Patch] 신규 패치 모드 - 폰트 기반 metrics 적용")
             else:
-                height_ratio = pdf_height_ratio
-            preview_height_ratio = raw_height_ratio
+                # origin이 없는 경우 시스템 폰트 메트릭 사용
+                preview_metrics = self._compute_preview_metrics(selected_font_name, font_path, edit_flags, stretch_value)
+                height_ratio, ascent_ratio, descent_ratio = preview_metrics
+                preview_height_ratio = height_ratio
+                # PDF 실제 영역 높이에 맞춰 보정
+                pdf_h_ratio = source_bbox.height / font_size_safe
+                scale = pdf_h_ratio / height_ratio if height_ratio > 0 else 1.0
+                height_ratio = pdf_h_ratio
+                ascent_ratio *= scale
+                descent_ratio *= scale
 
-            total_ratio = float(ascent_ratio) + float(descent_ratio)
-            if total_ratio <= 0:
-                ascent_ratio = height_ratio * 0.86
-                descent_ratio = max(0.0, height_ratio - ascent_ratio)
-            else:
-                adjust_scale = height_ratio / total_ratio
-                if abs(adjust_scale - 1.0) > 0.002:
-                    ascent_ratio *= adjust_scale
-                    descent_ratio *= adjust_scale
-
-            print(f"   높이 정합: PDF={pdf_height_ratio_raw:.3f}, QFont={raw_height_ratio:.3f}, 적용={height_ratio:.3f}")
+            # 최종 값 정규화
+            height_ratio = TextOverlay._normalize_height_ratio(height_ratio)
             
             # 오버레이 레이어는 현재 조정된 위치를 유지 (수정 시 원위치 회귀 방지)
             if existing_overlay:
                 new_bbox = fitz.Rect(existing_overlay.bbox)
             else:
                 new_bbox = fitz.Rect(source_bbox)
+            
+            # 시작점 좌표 확보
+            target_y0 = new_bbox.y0
+
+            # [개선사항] 텍스트 실제 크기에 맞춰 오버레이 영역(bbox) 자동 확장 및 중앙 정렬
+            try:
+                from PySide6.QtGui import QFont, QFontMetricsF, QImage
+                dummy = QImage(1, 1, QImage.Format.Format_Mono)
+                dpm_72 = int(72 / 0.0254)
+                dummy.setDotsPerMeterX(dpm_72)
+                dummy.setDotsPerMeterY(dpm_72)
                 
+                qf = QFont(selected_font_name)
+                qf.setPointSizeF(float(font_size))
+                qf.setKerning(False)
+                qf.setStretch(int(max(1, min(400, new_values.get('stretch', 1.0) * 100))))
+                if edit_flags & 16: qf.setBold(True)
+                if edit_flags & 2: qf.setItalic(True)
+                fm = QFontMetricsF(qf, dummy)
+                
+                t_ratio = 1.0 + (float(new_values.get('tracking', 0.0)) / 100.0)
+                is_hwp_mode = bool(new_values.get('hwp_space_mode', False))
+                
+                calc_max_w = 0
+                lines_list = text_to_insert.splitlines()
+                for line in lines_list:
+                    if is_hwp_mode:
+                        lw = 0
+                        for ch in line:
+                            cw = fm.horizontalAdvance(ch)
+                            lw += (cw * 1.5 if ch == ' ' else cw) * t_ratio
+                    else:
+                        lw = fm.horizontalAdvance(line) * t_ratio
+                    calc_max_w = max(calc_max_w, lw)
+                
+                calc_h = len(lines_list) * (font_size * height_ratio)
+                
+                # [개선] 패치 모드(텍스트가 없던 영역에 새로 생성)에서만 Y축 중앙 배치 로직 적용
+                if not existing_overlay and source_bbox and not span.get('text'):
+                    # 선택 영역의 정중앙 Y좌표 계산
+                    source_center_y = source_bbox.y0 + (source_bbox.height / 2.0)
+                    # 텍스트 덩어리가 전체적으로 source_bbox 중앙에 오게 하는 시작점(target_y0)
+                    target_y0 = source_center_y - (calc_h / 2.0)
+                    
+                    # [중요] 텍스트 베이스라인(origin)을 새롭게 계산된 target_y0 기준으로 설정
+                    origin_y = target_y0 + (font_size * ascent_ratio)
+                    origin = [source_bbox.x0, origin_y]
+                    print(f"   [Vertical Center] 패치 영역 중앙 정렬 완료: baseline={origin_y:.1f}")
+
+                # [중요] 패치 크기 자동 맞춤 로직은 '신규 패치 생성(Patch Mode)' 시에만 적용
+                # 일반적인 더블클릭 편집은 사용자가 설정한 여백(Margin) 옵션이 작동해야 하므로 건너뜀
+                if not existing_overlay and not span.get('text'):
+                    # 새로운 bbox 설정 (텍스트 실제 크기에 1:1 맞춤)
+                    new_bbox = fitz.Rect(new_bbox.x0, target_y0, new_bbox.x0 + calc_max_w, target_y0 + calc_h)
+                    
+                    # [개선] 패치 영역(original_bbox)도 최종 텍스트 영역에 1:1 동기화
+                    span['original_bbox'] = new_bbox 
+                    
+                    # 패치 생성 시 여백을 0으로 강제 (자동 맞춤 시에만)
+                    for k in ['patch_margin_l', 'patch_margin_r', 'patch_margin_t', 'patch_margin_b']:
+                        new_values[k] = 0.0
+                    new_values['patch_margin'] = (0.0, 0.0, 0.0, 0.0)
+                    print(f"   [BBox Fit] 영역 동기화 완료: {new_bbox.width:.1f}x{new_bbox.height:.1f}")
+                else:
+                    print(f"   [Manual Margin] 일반 편집 모드 - 사용자 여백 설정을 유지합니다.")
+            except Exception as e_size:
+                print(f"   경고: 텍스트 크기 계산 실패: {e_size}")
+
             overlay = existing_overlay
             if existing_overlay:
                 existing_overlay.update_properties(
                     text=text_to_insert,
                     font=selected_font_name,
+                    pdf_font_name=pdf_font_name,
                     size=font_size,
                     color=color_int,
                     flags=edit_flags,
@@ -7820,8 +6638,9 @@ class MainWindow(QMainWindow):
                     tracking=new_values.get('tracking', 0.0),
                     font_path=font_path,
                     synth_bold=need_synth_bold,
-                    synth_bold_weight=new_values.get('synth_bold_weight', 150),
-                    underline_weight=new_values.get('underline_weight', 1),
+                    synth_bold_weight=new_values.get('synth_bold_weight', 120),
+                    underline_weight=new_values.get('underline_weight', 0.6),
+                    underline_offset=new_values.get('underline_offset', 1.5),
                     patch_margin=new_values.get('patch_margin'),
                     patch_margin_h=new_values.get('patch_margin_h'),
                     patch_margin_v=new_values.get('patch_margin_v'),
@@ -7829,15 +6648,21 @@ class MainWindow(QMainWindow):
                     ascent_ratio=ascent_ratio,
                     descent_ratio=descent_ratio,
                     preview_height_ratio=preview_height_ratio,
-                    hwp_space_mode=new_values.get('hwp_space_mode')
+                    hwp_space_mode=new_values.get('hwp_space_mode'),
+                    text_only_mode=new_values.get('text_only_mode'),
+                    origin=origin, # 원본 베이스라인 유지
+                    new_values=new_values # NameError 해결
                 )
                 existing_overlay.move_to(new_bbox)
+                # 오버레이의 기준 영역도 최적화된 영역으로 업데이트하여 패치와 일치시킴
+                existing_overlay.original_bbox = fitz.Rect(new_bbox)
                 setattr(existing_overlay, 'force_image', bool(new_values.get('force_image', False)))
                 print(f"레이어 오버레이 업데이트: '{text_to_insert}' (ID: {existing_overlay.z_index})")
             else:
                 overlay = self.pdf_viewer.add_text_overlay(
                     text=text_to_insert,
                     font=selected_font_name,
+                    pdf_font_name=pdf_font_name,
                     size=font_size,
                     color=color_int,
                     bbox=new_bbox,
@@ -7845,21 +6670,26 @@ class MainWindow(QMainWindow):
                     flags=edit_flags,
                     font_path=font_path,
                     synth_bold=need_synth_bold,
-                    synth_bold_weight=new_values.get('synth_bold_weight', 150),
-                    underline_weight=new_values.get('underline_weight', 1),
+                    synth_bold_weight=new_values.get('synth_bold_weight', 120),
+                    underline_weight=new_values.get('underline_weight', 0.6),
+                    underline_offset=new_values.get('underline_offset', 1.5),
                     patch_margin=new_values.get('patch_margin'),
                     patch_margin_h=new_values.get('patch_margin_h'),
                     patch_margin_v=new_values.get('patch_margin_v'),
                     height_ratio=height_ratio,
                     ascent_ratio=ascent_ratio,
                     descent_ratio=descent_ratio,
-                    source_bbox=original_bbox,
+                    source_bbox=new_bbox, # 패치와 일치시키기 위해 fitted bbox 전달
+                    origin=origin, # 원본 베이스라인 저장
                     preview_height_ratio=preview_height_ratio,
-                    hwp_space_mode=new_values.get('hwp_space_mode')
+                    hwp_space_mode=new_values.get('hwp_space_mode'),
+                    text_only_mode=new_values.get('text_only_mode'),
+                    new_values=new_values # 인자 추가
                 )
                 overlay.update_properties(
                     stretch=new_values.get('stretch', 1.0),
-                    tracking=new_values.get('tracking', 0.0)
+                    tracking=new_values.get('tracking', 0.0),
+                    new_values=new_values # NameError 해결
                 )
                 setattr(overlay, 'force_image', bool(new_values.get('force_image', False)))
                 print(f"OK 새 레이어 오버레이 생성: '{text_to_insert}' (ID: {overlay.z_index})")
@@ -7880,14 +6710,12 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-            print(f"배경 패치 적용 호출...")
+            print(f"배경 패치 적용 준비...")
             new_values['overlay_id'] = overlay.z_index
             
             # HWP 공백 보정 모드 업데이트
             if 'hwp_space_mode' in new_values:
                 overlay.update_properties(hwp_space_mode=new_values['hwp_space_mode'])
-            
-            self.apply_background_patch(page, original_bbox, new_values, overlay=overlay, preview=False)
             
             if hasattr(self.pdf_viewer, 'register_overlay_text'):
                 self.pdf_viewer.register_overlay_text(self.pdf_viewer.current_page_num, original_bbox)
@@ -7899,8 +6727,6 @@ class MainWindow(QMainWindow):
                     self.enforce_single_overlay_view(page, overlay, new_values)
                 except Exception as enf:
                     print(f"경고 enforce_single_overlay_view 경고: {enf}")
-            # 화면 갱신 - 레이어 방식이므로 PDF 재렌더링 불필요
-            self.pdf_viewer.update()
             
             if overlay:
                 self.pdf_viewer.active_overlay = (self.pdf_viewer.current_page_num, overlay.z_index)
@@ -8022,37 +6848,39 @@ class MainWindow(QMainWindow):
         
         # 굵게: 변형 폰트를 우선 사용. 변형이 없는 경우에만 합성 볼드(다중 오프셋) 사용
         if new_values.get('bold', False) and new_values.get('synth_bold', False):
-            # 사용자 지정 굵기 반영 - 강도 대폭 상향 및 루프 기반 대칭 드로잉
-            synth_weight = float(new_values.get('synth_bold_weight', 150))
+            synth_weight = float(new_values.get('synth_bold_weight', 120))
             offset_factor = (synth_weight - 100.0) / 100.0 * 0.15
             total_bold_dx = font_size * offset_factor
             
             if total_bold_dx > 0.001:
                 half_dx = total_bold_dx / 2.0
-                step = 0.2
+                step = 0.05 # 정밀 0.05pt 스텝 (프리뷰와 동기화)
                 curr_dx = -half_dx
-                while curr_dx <= half_dx:
+                max_iter = 300
+                while curr_dx <= half_dx and max_iter > 0:
                     offset_point = fitz.Point(insert_point.x + curr_dx, insert_point.y)
-                    if fontfile_path and os.path.exists(fontfile_path):
-                        page.insert_text(offset_point, text_to_insert, fontfile=fontfile_path, fontsize=font_size,
-                                         color=(text_color.redF(), text_color.greenF(), text_color.blueF()))
-                    else:
-                        page.insert_text(offset_point, text_to_insert, **font_args)
-                    curr_dx += step
-                
-                # 최종 위치 보정
-                offset_point = fitz.Point(insert_point.x + half_dx, insert_point.y)
-                if fontfile_path and os.path.exists(fontfile_path):
-                    page.insert_text(offset_point, text_to_insert, fontfile=fontfile_path, fontsize=font_size,
-                                     color=(text_color.redF(), text_color.greenF(), text_color.blueF()))
-                else:
                     page.insert_text(offset_point, text_to_insert, **font_args)
+                    curr_dx += step
+                    max_iter -= 1
+                page.insert_text(fitz.Point(insert_point.x + half_dx, insert_point.y), text_to_insert, **font_args)
 
         # 밑줄 처리
         if new_values.get('underline', False):
-            underline_y = insert_point.y + 1
-            text_width = len(text_to_insert) * font_size * 0.6  # 대략적인 텍스트 너비
-            u_weight = int(new_values.get('underline_weight', 1))
+            # 프리뷰와 일치시키기 위해 설정된 offset 적용
+            u_offset = float(new_values.get('underline_offset', 1.5))
+            underline_y = insert_point.y + u_offset 
+            
+            # 정확한 텍스트 너비 계산
+            try:
+                if fontfile_path and os.path.exists(fontfile_path):
+                    f = fitz.Font(fontfile=fontfile_path)
+                    text_width = f.text_length(text_to_insert, font_size)
+                else:
+                    text_width = len(text_to_insert) * font_size * 0.55 # 근사치 보정
+            except Exception:
+                text_width = len(text_to_insert) * font_size * 0.6
+                
+            u_weight = float(new_values.get('underline_weight', 0.6))
             page.draw_line(
                 fitz.Point(insert_point.x, underline_y),
                 fitz.Point(insert_point.x + text_width, underline_y),
@@ -8061,116 +6889,109 @@ class MainWindow(QMainWindow):
             )
 
     def on_text_selected(self, span):
-        # 편집 전 상태 저장
+        """텍스트 선택 시 편집창 실행 및 실시간 미리보기 지원"""
+        # 1. 편집 전 상태 저장 (취소 시 복구용 - 반드시 선행 생성 전에 수행)
         if self.pdf_viewer.doc:
             self.undo_manager.save_state(self.pdf_viewer.doc, self.pdf_viewer)
+            print("[Edit] Pre-edit state saved for Undo/Redo")
 
-        try:
-            if span.get('is_overlay') and span.get('overlay_id') is not None:
-                self.pdf_viewer.active_overlay = (self.pdf_viewer.current_page_num, span.get('overlay_id'))
-            else:
-                self.pdf_viewer.active_overlay = None
-        except Exception:
-            pass
+        page_num = self.pdf_viewer.current_page_num
+        span.setdefault('page_num', page_num)
+        
+        # [실시간 미리보기 핵심: 다이얼로그 열기 전 미리 오버레이 생성]
+        if not span.get('is_overlay'):
+            try:
+                page = self.pdf_viewer.doc.load_page(page_num)
+                # 기본 편집값 생성
+                color_val = span.get('color', 0)
+                if isinstance(color_val, int):
+                    qcolor = QColor((color_val >> 16) & 0xFF, (color_val >> 8) & 0xFF, color_val & 0xFF)
+                else:
+                    qcolor = QColor(0, 0, 0)
+                
+                initial_values = {
+                    'text': span.get('text', ''),
+                    'font': span.get('font', 'Arial'),
+                    'size': float(span.get('size', 12.0)),
+                    'color': qcolor,
+                    'bold': bool(span.get('flags', 0) & 16),
+                    'italic': bool(span.get('flags', 0) & 2),
+                    'underline': False, # 밑줄 기본값 비활성화
+                    'underline_weight': 0.6, # 밑줄 굵기 기본값 0.6 설정
+                    'stretch': 1.0,
+                    'tracking': 0.0,
+                    'synth_bold_weight': 120,
+                    'hwp_space_mode': getattr(self, 'is_hwp_doc', False),
+                    'patch_margin_l': 0.0, 'patch_margin_r': 0.0, 'patch_margin_t': 0.0, 'patch_margin_b': 0.0
+                }
+                
+                # 미리 오버레이 생성
+                overlay = self.insert_overlay_text(page, span, initial_values)
+                if overlay:
+                    self.apply_background_patch(page, span['original_bbox'], initial_values, overlay=overlay, preview=True)
+                    
+                    # [중요] 생성된 오버레이의 실제 정보를 span에 완벽히 동기화
+                    overlay_data = overlay.to_dict()
+                    span.update(overlay_data)
+                    span['is_overlay'] = True
+                    span['overlay_id'] = overlay.z_index
+                    span['page_num'] = page_num
+                    
+                    self.pdf_viewer.active_overlay = (page_num, overlay.z_index)
+                    
+                    # [중요] 모달 다이얼로그 진입 전 UI 강제 갱신
+                    self.pdf_viewer.repaint()
+                    from PySide6.QtWidgets import QApplication
+                    QApplication.processEvents()
+                    
+                    print(f"[Edit] Proactive overlay created and linked: ID {overlay.z_index}")
+            except Exception as e_pre:
+                print(f"미리보기용 오버레이 선행 생성 실패: {e_pre}")
+                import traceback
+                traceback.print_exc()
 
-        span.setdefault('page_num', self.pdf_viewer.current_page_num)
-
+        # 다이얼로그 실행
         dialog = TextEditorDialog(span, self.pdf_fonts, self)
+        
         if dialog.exec() == QDialog.DialogCode.Accepted:
             new_values = dialog.get_values()
-            print(f"Dialog result: {new_values}")  # 디버깅 로그
+            print(f"Dialog result: {new_values}")
             self.register_recent_font(new_values.get('font'))
             
-            # 패치 마진 설정이 변경된 경우 적용
-            if 'patch_margin_h' in new_values or 'patch_margin_v' in new_values:
-                current_h, current_v = self.patch_margin if isinstance(self.patch_margin, (tuple, list)) else (0.0, 0.0)
-                new_h = new_values.get('patch_margin_h', current_h)
-                new_v = new_values.get('patch_margin_v', current_v)
-                try:
-                    self.patch_margin = (float(new_h), float(new_v))
-                except Exception:
-                    self.patch_margin = (current_h, current_v)
-                print(f"패치 마진 설정 업데이트: {self.patch_margin}")
-                self._store_patch_margin()
-            elif new_values.get('patch_margin') is not None:
-                legacy_margin = new_values['patch_margin']
-                if isinstance(legacy_margin, (tuple, list)) and len(legacy_margin) >= 2:
-                    self.patch_margin = (float(legacy_margin[0]), float(legacy_margin[1]))
-                else:
-                    try:
-                        scalar = float(legacy_margin)
-                    except Exception:
-                        scalar = 0.0
-                    self.patch_margin = (scalar, scalar)
-                print(f"패치 마진 설정 업데이트: {self.patch_margin}")
+            # 패치 마진 설정 저장
+            if 'patch_margin_l' in new_values:
+                self.patch_margin = (new_values['patch_margin_l'], new_values['patch_margin_r'], 
+                                    new_values['patch_margin_t'], new_values['patch_margin_b'])
                 self._store_patch_margin()
             
-            # 위치 조정 모드가 요청된 경우
+            # 위치 조정 모드 요청 처리
             if new_values.get('position_adjustment_requested', False):
-                print("위치 조정 모드 진입")  # 디버깅 로그
-                # 편집 다이얼로그에서 받은 값을 반영한 span 정보로 업데이트
                 updated_span = span.copy()
-                updated_span.update({
-                    'text': new_values['text'],
-                    'font': new_values['font'],
-                    'size': new_values['size'],
-                    'color': new_values['color'],
-                    'synth_bold_weight': new_values.get('synth_bold_weight', 150),
-                    'underline_weight': new_values.get('underline_weight', 1),
-                    'overlay_id': span.get('overlay_id')
-                })
-                updated_span.setdefault('page_num', self.pdf_viewer.current_page_num)
+                updated_span.update(new_values)
                 self.pdf_viewer.enter_text_adjustment_mode(updated_span)
                 return
             
             try:
-                page = self.pdf_viewer.doc.load_page(self.pdf_viewer.current_page_num)
-                original_bbox = span['original_bbox']
-                
-                print(f"텍스트 편집 시작: '{new_values['text']}'")
-                print(f"   폰트: {new_values['font']}, 크기: {new_values['size']}")
-                
-                # 1단계: 원본 텍스트 배경 패치 적용 (PDF에 직접 패치) 및 UI 등록
-                try:
-                    patch_rect, patch_color = self.apply_background_patch(page, original_bbox, new_values)
-                except Exception:
-                    patch_rect, patch_color = (original_bbox, None)
-                print(f"OK 원본 텍스트 배경 패치 완료")
-                
-                # 1-1단계: 배경 패치 영역 등록 (레이어 시스템에 등록) 및 즉시 갱신
-                self.pdf_viewer.add_background_patch(self.pdf_viewer.current_page_num, patch_rect, patch_color)
-                self.pdf_viewer.update()
-                
-                # 2단계: 레이어 방식 텍스트 오버레이 생성
+                page = self.pdf_viewer.doc.load_page(page_num)
+                # 최종 확정: 오버레이와 패치 최종 갱신
                 overlay = self.insert_overlay_text(page, span, new_values)
-                if overlay:
-                    print(f"OK 레이어 오버레이 생성: ID {overlay.z_index}")
-                    # 레이어 방식이므로 즉시 화면 갱신만 필요
-                    self.pdf_viewer.update()
-                else:
-                    print(f"경고 fallback 방식으로 오버레이 생성됨")
-                    # Fallback 방식의 경우 페이지 재렌더링 필요
-                    self.render_page(page_to_render=page)
+                self.apply_background_patch(page, span['original_bbox'], new_values, overlay=overlay, preview=True)
                 
-                # 편집 완료 후 새로운 상태 저장
-                if self.pdf_viewer.doc:
-                    self.undo_manager.save_state(self.pdf_viewer.doc, self.pdf_viewer)
-                
-                # 변경사항 표시 및 버튼 상태 업데이트
+                # 변경 완료 후 새로운 상태 저장
+                self.undo_manager.save_state(self.pdf_viewer.doc, self.pdf_viewer)
                 self.mark_as_changed()
                 self.update_undo_redo_buttons()
-                print("OK Undo/Redo: 편집 완료 후 새로운 상태 저장됨")
+                self.pdf_viewer.update()
                 
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to edit text: {e}")
-                print(f"X 텍스트 편집 실패: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to finalize edit: {e}")
                 import traceback
                 traceback.print_exc()
         else:
-            # 편집 취소된 경우 저장된 상태 제거
-            if self.undo_manager.undo_stack:
-                self.undo_manager.undo_stack.pop()
-                print("Undo/Redo: 편집 취소로 인해 저장된 상태 제거됨")
+            # [취소 시: Undo를 통해 선행 생성된 오버레이와 패치 원복]
+            print("편집 취소 - 이전 상태로 복구")
+            self.undo() # save_state 해둔 시점으로 복구
+            self.update_undo_redo_buttons()
     
     def closeEvent(self, event):
         """창 닫기 이벤트 처리"""
@@ -8302,38 +7123,46 @@ class MainWindow(QMainWindow):
             self.font_log_action.setText(self._font_log_action_text())
         print(f"글꼴 로그 상세도 변경: {self._font_log_action_text()}")
 
-    def _ensure_font_ref(self, page, font_name):
-        """문서에 폰트를 한 번만 임베딩하고 참조명을 반환합니다."""
+    def _ensure_font_ref(self, page, font_name, force_reload=False):
+        """문서에 폰트를 한 번만 임베딩하고 참조명을 반환합니다. 
+        force_reload=True일 경우 캐시를 무시하고 다시 시도합니다."""
         try:
             if not font_name:
                 return "helv"
             fmgr = self.font_manager if hasattr(self, 'font_manager') else SystemFontManager()
             fpath = fmgr.get_font_path(font_name)
+            
             if fpath and os.path.exists(fpath):
                 import hashlib
                 # 경로 기반 참조명
                 ref = f"font_{hashlib.md5(fpath.encode('utf-8')).hexdigest()[:10]}"
                 # 페이지별 폰트 리소스 보장 키
                 cache_key = (getattr(page, 'number', 0), fpath)
-                if cache_key in self._font_ref_cache:
+                
+                if not force_reload and cache_key in self._font_ref_cache:
                     return self._font_ref_cache[cache_key]
+                
                 try:
                     # 페이지 리소스에 우선 등록
                     page.insert_font(fontfile=fpath, fontname=ref)
-                    print(f"    -> page.insert_font OK: {font_name} -> {ref}")
+                    if force_reload:
+                        print(f"    -> [Retry] page.insert_font 강제 재등록 완료: {font_name} -> {ref}")
+                    else:
+                        print(f"    -> page.insert_font OK: {font_name} -> {ref}")
                     self._font_ref_cache[cache_key] = ref
                     return ref
                 except Exception as e:
-                    # 페이지 등록 실패 시 문서 전역 등록을 시도한 뒤 재사용
-                    try:
-                        # 일부 버전은 문서 레벨 등록 미지원 → 이 경로는 로깅만 남김
-                        print(f"    -> page.insert_font 실패({font_name}): {e}")
-                        # 폰트 파일은 사전 로드되어 있으므로 helv로 폴백
-                    except Exception as e2:
-                        print(f"  경고 폰트 임베딩 실패(page/doc) → helv 사용: {e} / {e2}")
+                    print(f"    -> page.insert_font 실패({font_name}): {e}")
+                    # 캐시에서 제거하여 다음 시도 시 재시도 가능하게 함
+                    if cache_key in self._font_ref_cache:
+                        del self._font_ref_cache[cache_key]
                     return "helv"
-            return "helv"
-        except Exception:
+            else:
+                if fpath:
+                    print(f"    -> [Error] 폰트 파일이 경로에 존재하지 않음: {fpath}")
+                return "helv"
+        except Exception as ex:
+            print(f"    -> [_ensure_font_ref] 예외 발생: {ex}")
             return "helv"
 
     def apply_theme(self, mode: str):
@@ -8341,6 +7170,8 @@ class MainWindow(QMainWindow):
         try:
             from PySide6.QtGui import QPalette
             app = QApplication.instance()
+            if not app:
+                return
             pal = QPalette()
             if mode == 'light':
                 pal.setColor(QPalette.Window, QColor(255, 255, 255))
@@ -8370,10 +7201,16 @@ class MainWindow(QMainWindow):
                 QCheckBox { color:#111; }
                 QCheckBox::indicator { width:16px; height:16px; border:1px solid #999; background:#fff; }
                 QCheckBox::indicator:checked { background:#3399ff; }
-                QCheckBox::indicator:unchecked:hover { border:2px solid #3399ff; border:2px solid #3399ff; }
+                QCheckBox::indicator:unchecked:hover { border:2px solid #3399ff; }
+                QScrollArea, QAbstractScrollArea { background-color: #f0f0f0; border: none; }
+                QScrollBar:vertical { background: #f0f0f0; width: 12px; }
+                QScrollBar::handle:vertical { background: #ccc; border-radius: 6px; }
                 """
-                self.setStyleSheet(light_qss)
-                self.pdf_viewer.setStyleSheet("border:1px solid #ccc; background-color: #ffffff;")
+                app.setStyleSheet(light_qss)
+                if hasattr(self, 'pdf_viewer'):
+                    self.pdf_viewer.setStyleSheet("background-color: #ffffff; border: none;")
+                if hasattr(self, 'scroll_area'):
+                    self.scroll_area.setStyleSheet("background-color: #f0f0f0; border: none;")
                 self.theme_button.setText("🌙")
             else:
                 pal.setColor(QPalette.Window, QColor(30, 31, 34))
@@ -8399,11 +7236,16 @@ class MainWindow(QMainWindow):
                 QPushButton { background: #2d2e31; color: #ddd; border: 1px solid #555555; border-radius: 6px; }
                 QPushButton:hover { border: 1px solid #4c9eff; }
                 QLabel { color: #ddd; }
-                QCheckBox::indicator:unchecked:hover { border:1px solid #3399ff; border:1px solid #3399ff; }
-                
+                QCheckBox::indicator:unchecked:hover { border:1px solid #3399ff; }
+                QScrollArea, QAbstractScrollArea { background-color: #0f0f0f; border: none; }
+                QScrollBar:vertical { background: #1e1f22; width: 12px; }
+                QScrollBar::handle:vertical { background: #444; border-radius: 6px; }
                 """
-                self.setStyleSheet(dark_qss)
-                self.pdf_viewer.setStyleSheet("border:1px solid #555; background-color: #111;")
+                app.setStyleSheet(dark_qss)
+                if hasattr(self, 'pdf_viewer'):
+                    self.pdf_viewer.setStyleSheet("background-color: #111111; border: none;")
+                if hasattr(self, 'scroll_area'):
+                    self.scroll_area.setStyleSheet("background-color: #0f0f0f; border: none;")
                 self.theme_button.setText("☀️")
         except Exception:
             pass
@@ -8503,14 +7345,14 @@ class MainWindow(QMainWindow):
                 viewport_width = max(1, self.scroll_area.viewport().width())
                 page = self.pdf_viewer.doc.load_page(self.pdf_viewer.current_page_num)
                 page_rect = page.rect
-                width_ratio = viewport_width / max(1.0, page_rect.width)
-                base_scale = min(
-                    1.0,
-                    800.0 / max(1.0, page_rect.width),
-                    600.0 / max(1.0, page_rect.height)
-                )
-                effective_zoom = width_ratio / max(0.01, base_scale)
-                self.zoom_factor = max(0.1, min(8.0, effective_zoom * 0.98))
+                
+                # 여백 고려 (약 98%)
+                target_zoom = (viewport_width / max(1.0, page_rect.width)) * 0.98
+                
+                # 가장 가까운 고정 배율로 스냅
+                levels = getattr(self, 'zoom_levels', [1.0])
+                self.zoom_factor = min(levels, key=lambda x: abs(x - target_zoom))
+                
                 self.render_page()
                 self.update_zoom_label()
                 self._store_zoom_factor()
@@ -8524,14 +7366,14 @@ class MainWindow(QMainWindow):
                 viewport_height = max(1, self.scroll_area.viewport().height())
                 page = self.pdf_viewer.doc.load_page(self.pdf_viewer.current_page_num)
                 page_rect = page.rect
-                height_ratio = viewport_height / max(1.0, page_rect.height)
-                base_scale = min(
-                    1.0,
-                    800.0 / max(1.0, page_rect.width),
-                    600.0 / max(1.0, page_rect.height)
-                )
-                effective_zoom = height_ratio / max(0.01, base_scale)
-                self.zoom_factor = max(0.1, min(8.0, effective_zoom * 0.98))
+                
+                # 여백 고려 (약 98%)
+                target_zoom = (viewport_height / max(1.0, page_rect.height)) * 0.98
+                
+                # 가장 가까운 고정 배율로 스냅
+                levels = getattr(self, 'zoom_levels', [1.0])
+                self.zoom_factor = min(levels, key=lambda x: abs(x - target_zoom))
+                
                 self.render_page()
                 self.update_zoom_label()
                 self._store_zoom_factor()
@@ -8543,20 +7385,21 @@ class MainWindow(QMainWindow):
         if self.pdf_viewer and self.pdf_viewer.doc:
             try:
                 # 스크롤 영역 크기 가져오기
-                scroll_area_size = self.scroll_area.viewport().size()
+                viewport_size = self.scroll_area.viewport().size()
                 
                 # 현재 페이지 크기 가져오기
                 page = self.pdf_viewer.doc.load_page(self.pdf_viewer.current_page_num)
                 page_rect = page.rect
                 
-                # 적합한 배율 계산
-                width_ratio = scroll_area_size.width() / page_rect.width
-                height_ratio = scroll_area_size.height() / page_rect.height
+                # 가로/세로 비율 중 작은 쪽 선택 (완전히 보이도록)
+                width_ratio = viewport_size.width() / max(1.0, page_rect.width)
+                height_ratio = viewport_size.height() / max(1.0, page_rect.height)
+                target_zoom = min(width_ratio, height_ratio) * 0.95
                 
-                # 작은 쪽 비율 사용하여 페이지가 완전히 보이도록 함
-                zoom_ratio = min(width_ratio, height_ratio) * 0.9  # 여백을 위해 0.9 곱함
+                # 가장 가까운 고정 배율로 스냅
+                levels = getattr(self, 'zoom_levels', [1.0])
+                self.zoom_factor = min(levels, key=lambda x: abs(x - target_zoom))
                 
-                self.zoom_factor = max(0.1, min(8.0, zoom_ratio))
                 self.render_page()
                 self.update_zoom_label()
                 self._store_zoom_factor()
@@ -8667,7 +7510,7 @@ class MainWindow(QMainWindow):
     
     def show_shortcuts(self):
         """단축키 도움말 표시"""
-        QMessageBox.information(self, self.t('title_info'), self.t('shortcuts_text'))
+        QMessageBox.information(self, self.t('shortcuts_title'), self.t('shortcuts_text'))
 
     def show_kakao_donation_dialog(self):
         """카카오페이 후원 안내"""
@@ -8731,11 +7574,11 @@ class MainWindow(QMainWindow):
     def show_about(self):
         """프로그램 정보 표시"""
         box = QMessageBox(self)
-        box.setWindowTitle(self.t('title_info'))
+        box.setWindowTitle(self.t('app_info_title'))
         box.setTextFormat(Qt.TextFormat.RichText)
         box.setStandardButtons(QMessageBox.StandardButton.Ok)
         text_html = '<br>'.join(self.t('about_text').splitlines())
-        text_html += "<br/><br/><span style='font-size:11px;color:#8a94a3'>© 2025 YongPDF · Hwang Jinsu. All rights reserved.</span>"
+        text_html += "<br/><br/><span style='font-size:11px;color:#8a94a3'>© 2026 YongPDF · Hwang Jinsu. All rights reserved.</span>"
         box.setText(f"<div style='min-width:320px'>{text_html}</div>")
         pix = _load_static_pixmap('YongPDF_text_img.png')
         if pix:
@@ -8746,7 +7589,7 @@ class MainWindow(QMainWindow):
     def show_license_info(self):
         """오픈소스 라이선스 정보 팝업"""
         dialog = QDialog(self)
-        dialog.setWindowTitle(self.t('license_popup_title'))
+        dialog.setWindowTitle(self.t('licenses_title'))
         dialog.setMinimumSize(600, 500)
         
         layout = QVBoxLayout(dialog)
@@ -8762,11 +7605,22 @@ class MainWindow(QMainWindow):
         license_text.setReadOnly(True)
         
         license_content = """
-<b>PyMuPDF (MuPDF)</b> — AGPL-3.0<br>
+<div style='font-family: sans-serif;'>
+<b>YongPDF</b> — GNU GPL v3.0<br>
+Source Code: <a href="https://github.com/HwangJinsu/YongPDF">https://github.com/HwangJinsu/YongPDF</a><br><br>
+
+<hr>
+<b>PyMuPDF (MuPDF)</b> — GNU GPL v3.0 / AGPL-3.0<br>
 <a href="https://pymupdf.readthedocs.io/">https://pymupdf.readthedocs.io/</a> / <a href="https://mupdf.com/">https://mupdf.com/</a><br><br>
 
-<b>PySide6 (Qt for Python)</b> — LGPL-3.0 / Commercial<br>
+<b>Ghostscript</b> — GNU AGPL v3.0<br>
+<a href="https://ghostscript.com/">https://ghostscript.com/</a><br><br>
+
+<b>PySide6 (Qt for Python)</b> — GNU LGPL v3.0<br>
 <a href="https://www.qt.io/qt-for-python">https://www.qt.io/qt-for-python</a><br><br>
+
+<b>Pillow (PIL)</b> — HPND License<br>
+<a href="https://python-pillow.org/">https://python-pillow.org/</a><br><br>
 
 <b>fontTools</b> — MIT License<br>
 <a href="https://github.com/fonttools/fonttools">https://github.com/fonttools/fonttools</a><br><br>
@@ -8775,6 +7629,7 @@ class MainWindow(QMainWindow):
 <a href="https://matplotlib.org/">https://matplotlib.org/</a><br><br>
 
 <b>Icons/Emojis</b> — as provided by system fonts.<br>
+</div>
 """
         license_text.setHtml(license_content)
         layout.addWidget(license_text)

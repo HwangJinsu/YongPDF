@@ -22,7 +22,7 @@ import subprocess
 import shutil
 
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QSplitter, QListWidget, QListWidgetItem, QMenu, QMenuBar,
     QStatusBar, QToolBar, QFileDialog, QDialog, QLabel,
     QPushButton, QScrollArea, QSizePolicy, QMessageBox, QFrame, QLineEdit,
@@ -204,7 +204,7 @@ def _build_splash_pixmap() -> Optional[QPixmap]:
     painter.drawText(
         QRect(0, height - 28, width, 18),
         Qt.AlignmentFlag.AlignHCenter,
-        '© 2025 YongPDF · Hwang Jinsu. All rights reserved.'
+        '© 2026 YongPDF · Hwang Jinsu. All rights reserved.'
     )
 
     painter.end()
@@ -452,7 +452,7 @@ class ThumbnailWidget(QListWidget):
         item = QListWidgetItem()
         item.setData(Qt.ItemDataRole.UserRole, page_num)
         item.setIcon(QIcon(pixmap))
-        item.setText(f"Page {page_num + 1}")
+        item.setText(f"{page_num + 1}")
         item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter)
         item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsDragEnabled)
         # Ensure predictable footprint to avoid partial paints
@@ -597,10 +597,9 @@ class ThumbnailWidget(QListWidget):
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             delta = event.angleDelta().y()
             current_value = self.editor.thumbnail_zoom_slider.value()
-            if delta > 0:
-                self.editor.thumbnail_zoom_slider.setValue(current_value + 10)
-            else:
-                self.editor.thumbnail_zoom_slider.setValue(current_value - 10)
+            # 썸네일 확대/축소는 비교적 가벼우므로 즉시 반영하되 단계를 조절
+            step = 15 if delta > 0 else -15
+            self.editor.thumbnail_zoom_slider.setValue(current_value + step)
             event.accept()
         else:
             super().wheelEvent(event)
@@ -618,9 +617,17 @@ class PDFScrollArea(QScrollArea):
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             delta = event.angleDelta().y()
             if delta > 0:
-                self.editor.zoom_in()
+                # 다음 배율 단계로
+                target = next((s for s in self.editor.zoom_steps if s > self.editor._target_zoom + 0.005), self.editor.zoom_steps[-1])
             else:
-                self.editor.zoom_out()
+                # 이전 배율 단계로
+                target = next((s for s in reversed(self.editor.zoom_steps) if s < self.editor._target_zoom - 0.005), self.editor.zoom_steps[0])
+            
+            if target != self.editor._target_zoom:
+                self.editor._target_zoom = target
+                self.editor._zoom_anchor_page = self.editor.current_page
+                # 휠 이벤트가 연속될 때 타이머를 재시작하여 렌더링 부하 감소 (100ms 지연)
+                self.editor._zoom_timer.start(100)
             event.accept()
         else:
             super().wheelEvent(event)
@@ -846,6 +853,21 @@ class PDFEditor(QMainWindow):
         self._suppress_scroll_sync = False
         self.setAcceptDrops(True)
 
+        # Zoom debounce timer
+        self.zoom_debounce_timer = QTimer(self)
+        self.zoom_debounce_timer.setSingleShot(True)
+        self.zoom_debounce_timer.setInterval(150) # 150ms delay
+        self.zoom_debounce_timer.timeout.connect(self._perform_debounced_zoom)
+        self._pending_zoom_factor = 1.0
+        self.zoom_steps = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.10, 1.25, 1.50, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0]
+        
+        # 확대/축소 휠 렌더링 성능 개선을 위한 타이머
+        self._zoom_timer = QTimer(self)
+        self._zoom_timer.setSingleShot(True)
+        self._zoom_timer.timeout.connect(self._do_deferred_zoom)
+        self._target_zoom = 1.0
+        self._zoom_anchor_page = None
+
         self.setup_ui()
         self.update_page_info()
         QTimer.singleShot(0, self._show_startup_loading)
@@ -900,9 +922,11 @@ class PDFEditor(QMainWindow):
         
         self.document_container = QWidget()
         self.document_container.setObjectName("documentContainer")
-        self.document_layout = QVBoxLayout(self.document_container)
+        # 1열/2열 전환이 용이하도록 QGridLayout 사용
+        self.document_layout = QGridLayout(self.document_container)
         self.document_layout.setContentsMargins(10, 10, 10, 10)
-        self.document_layout.setSpacing(15)
+        self.document_layout.setVerticalSpacing(25)
+        self.document_layout.setHorizontalSpacing(0)
         self.document_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
 
         self.scroll_area = PDFScrollArea(self)
@@ -1066,17 +1090,28 @@ class PDFEditor(QMainWindow):
         # Language menu (fixed labels per language)
         lang_menu = menubar.addMenu(self.t('language_menu'))
         lang_group = QActionGroup(self)
-        def add_lang(code, label):
+        
+        # Display labels for all supported language codes
+        lang_labels = {
+            'ko': '한국어', 'en': 'English', 'ja': '日本語', 'zh-CN': '简体中文', 'zh-TW': '繁體中文',
+            'de': 'Deutsch', 'fr': 'Français', 'it': 'Italiano', 'es': 'Español', 'pt': 'Português',
+            'sv': 'Svenska', 'fi': 'Suomi', 'no': 'Norsk', 'da': 'Dansk', 'ru': 'Русский',
+            'pl': 'Polski', 'cs': 'Čeština', 'ro': 'Română', 'uk': 'Українська', 'hu': 'Magyar',
+            'bg': 'Български', 'vi': 'Tiếng Việt', 'th': 'ไทย', 'hi': 'हिन्दी', 'ar': 'العربية',
+            'fa': 'فارسی', 'mn': 'Монгол', 'id': 'Bahasa Indonesia', 'ms': 'Bahasa Melayu',
+            'fil': 'Filipino', 'kk': 'Қазақ тілі', 'uz': 'Oʻzbek tili', 'bn': 'বাংলা',
+            'ur': 'اردو', 'tr': 'Türkçe'
+        }
+        
+        # Add all loaded translations to the menu
+        for code in sorted(self.translations.keys()):
+            label = lang_labels.get(code, code)
             act = QAction(label, self, checkable=True)
             lang_group.addAction(act)
             act.setChecked(self.language == code)
+            # Use default argument in lambda to capture the current value of 'code'
             act.triggered.connect(lambda checked=False, c=code: self.set_language(c))
             lang_menu.addAction(act)
-        add_lang('ko', '한국어')
-        add_lang('en', 'English')
-        add_lang('ja', '日本語')
-        add_lang('zh-CN', '简体中文')
-        add_lang('zh-TW', '繁體中文')
 
         #후원 메뉴(카카오페이, 페이팔)
         support_menu = menubar.addMenu(self.t('support_menu'))
@@ -1101,36 +1136,108 @@ class PDFEditor(QMainWindow):
         help_menu.addAction(licenses_action)
 
     def setup_toolbar(self):
-        self.toolbar = self.addToolBar("도구")
-        toolbar = self.toolbar
-        toolbar.setMovable(False)
-        toolbar.setIconSize(QSize(18, 18))
-        
-        undo_action = self.undo_action_act
-        redo_action = self.redo_action_act
+        # 기존 툴바 제거 (재설정 시 중복 방지)
+        for tb in self.findChildren(QToolBar):
+            self.removeToolBar(tb)
 
-        open_btn = self.open_action
-        save_btn = self.save_action
-        zoom_in_btn = QAction(self.t('zoom_in'), self)
-        zoom_in_btn.triggered.connect(self.zoom_in)
-        zoom_out_btn = QAction(self.t('zoom_out'), self)
-        zoom_out_btn.triggered.connect(self.zoom_out)
+        # 1. 파일 툴바
+        self.file_toolbar = self.addToolBar("File")
+        self.file_toolbar.setMovable(False)
+        self.file_toolbar.setIconSize(QSize(20, 20))
+        self.file_toolbar.setStyleSheet("QToolBar { border-bottom: 1px solid #3d3d3d; padding: 2px; }")
+        
+        self.file_toolbar.addAction(self.open_action)
+        self.file_toolbar.addAction(self.save_action)
+        self.file_toolbar.addSeparator()
+        self.file_toolbar.addAction(self.print_action)
+
+        # 2. 편집 툴바
+        self.edit_toolbar = self.addToolBar("Edit")
+        self.edit_toolbar.setMovable(False)
+        self.edit_toolbar.setIconSize(QSize(20, 20))
+        self.edit_toolbar.setStyleSheet("QToolBar { border-bottom: 1px solid #3d3d3d; padding: 2px; }")
+        
+        self.edit_toolbar.addAction(self.undo_action_act)
+        self.edit_toolbar.addAction(self.redo_action_act)
+
+        # 3. 페이지 이동 툴바
+        self.nav_toolbar = self.addToolBar("Navigation")
+        self.nav_toolbar.setMovable(False)
+        self.nav_toolbar.setIconSize(QSize(20, 20))
+        self.nav_toolbar.setStyleSheet("QToolBar { border-bottom: 1px solid #3d3d3d; padding: 2px; }")
+        
         prev_btn = QAction(self.t('prev'), self)
         prev_btn.triggered.connect(self.prev_page)
         next_btn = QAction(self.t('next'), self)
         next_btn.triggered.connect(self.next_page)
-        add_page_btn = self.add_page_action
-        delete_page_btn = self.delete_page_action
-        move_page_up_btn = self.move_up_action
-        move_page_down_btn = self.move_down_action
-        rotate_left_btn = self.rotate_left_action
-        rotate_right_btn = self.rotate_right_action
+        
+        self.nav_toolbar.addAction(prev_btn)
+        self.page_input = QLineEdit()
+        self.page_input.setFixedWidth(50)
+        self.page_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.page_input.returnPressed.connect(self.goto_page)
+        self.nav_toolbar.addWidget(self.page_input)
+        self.total_pages_label = QLabel("/0")
+        self.total_pages_label.setStyleSheet("padding-right: 5px;")
+        self.nav_toolbar.addWidget(self.total_pages_label)
+        self.nav_toolbar.addAction(next_btn)
+
+        # 4. 보기 툴바
+        self.view_toolbar = self.addToolBar("View")
+        self.view_toolbar.setMovable(False)
+        self.view_toolbar.setIconSize(QSize(20, 20))
+        self.view_toolbar.setStyleSheet("QToolBar { border-bottom: 1px solid #3d3d3d; padding: 2px; }")
+        
+        zoom_in_btn = QAction(self.t('zoom_in'), self)
+        zoom_in_btn.triggered.connect(self.zoom_in)
+        zoom_out_btn = QAction(self.t('zoom_out'), self)
+        zoom_out_btn.triggered.connect(self.zoom_out)
+        
+        self.view_toolbar.addAction(zoom_in_btn)
+        self.view_toolbar.addAction(zoom_out_btn)
+        self.view_toolbar.addAction(self.fit_width_action)
+        self.view_toolbar.addAction(self.fit_height_action)
+        self.view_toolbar.addSeparator()
+        self.view_toolbar.addAction(self.single_page_action)
+        self.view_toolbar.addAction(self.dual_page_action)
+
+        # 툴바 확장/축소 버튼
+        self.expand_toolbar_action = QAction("▼", self) # 초기 상태: 확장 가능
+        self.expand_toolbar_action.setToolTip("Show More Tools")
+        self.expand_toolbar_action.triggered.connect(self.toggle_secondary_toolbars)
+        self.view_toolbar.addSeparator()
+        self.view_toolbar.addAction(self.expand_toolbar_action)
+
+        # 줄바꿈 (화면 너비가 좁을 때를 대비해 툴바를 다음 줄로 내림)
+        self.addToolBarBreak()
+
+        # 5. 페이지 조작 툴바 (2번째 줄)
+        self.page_ops_toolbar = self.addToolBar("Page Ops")
+        self.page_ops_toolbar.setMovable(False)
+        self.page_ops_toolbar.setIconSize(QSize(20, 20))
+        self.page_ops_toolbar.setStyleSheet("QToolBar { border: none; padding: 2px; }")
+        
+        self.page_ops_toolbar.addAction(self.add_page_action)
+        self.page_ops_toolbar.addAction(self.delete_page_action)
+        self.page_ops_toolbar.addSeparator()
+        self.page_ops_toolbar.addAction(self.move_up_action)
+        self.page_ops_toolbar.addAction(self.move_down_action)
+        self.page_ops_toolbar.addSeparator()
+        self.page_ops_toolbar.addAction(self.rotate_left_action)
+        self.page_ops_toolbar.addAction(self.rotate_right_action)
+
+        # 6. 도구 및 테마 툴바 (2번째 줄)
+        self.tools_toolbar = self.addToolBar("Tools")
+        self.tools_toolbar.setMovable(False)
+        self.tools_toolbar.setIconSize(QSize(20, 20))
+        self.tools_toolbar.setStyleSheet("QToolBar { border: none; padding: 2px; }")
+        
         compress_action = QAction(self.t('compress_pdf'), self)
         compress_action.triggered.connect(self.show_compression_settings)
         edit_btn = QAction(self.t('edit_short'), self)
         edit_btn.triggered.connect(self.launch_external_editor)
-
-        # Theme toggle buttons (toolbar)
+        
+        # Theme toggle buttons
         theme_group_tb = QActionGroup(self)
         theme_group_tb.setExclusive(True)
         self.theme_light_btn = QAction(self.t('theme_light'), self)
@@ -1141,40 +1248,26 @@ class PDFEditor(QMainWindow):
         self.theme_dark_btn.triggered.connect(lambda: self.set_theme('dark'))
         theme_group_tb.addAction(self.theme_light_btn)
         theme_group_tb.addAction(self.theme_dark_btn)
-
-        # Order: Open/Save -> Undo/Redo -> Prev/Input/Next -> Zoom -> Others -> Theme
-        toolbar.addActions([open_btn, save_btn])
-        toolbar.addSeparator()
-        toolbar.addActions([undo_action, redo_action])
-        toolbar.addSeparator()
-        # Move zoom after prev/next as requested
-        toolbar.addActions([prev_btn])
-        self.page_input = QLineEdit()
-        self.page_input.setFixedWidth(50)
-        self.page_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.page_input.returnPressed.connect(self.goto_page)
-        toolbar.addWidget(self.page_input)
-        self.total_pages_label = QLabel("/0")
-        toolbar.addWidget(self.total_pages_label)
-        toolbar.addActions([next_btn])
-        toolbar.addSeparator()
-        toolbar.addActions([zoom_in_btn, zoom_out_btn])
-        toolbar.addActions([self.fit_width_action, self.fit_height_action])
-        toolbar.addSeparator()
-        toolbar.addActions([self.single_page_action, self.dual_page_action])
-        toolbar.addSeparator()
-        toolbar.addActions([add_page_btn, delete_page_btn])
-        toolbar.addSeparator()
-        toolbar.addActions([move_page_up_btn, move_page_down_btn])
-        toolbar.addSeparator()
-        toolbar.addActions([rotate_left_btn, rotate_right_btn])
-        toolbar.addSeparator()
-        toolbar.addActions([compress_action, edit_btn])
-        toolbar.addSeparator()
-        toolbar.addActions([self.theme_light_btn, self.theme_dark_btn])
         
+        self.tools_toolbar.addAction(compress_action)
+        self.tools_toolbar.addAction(edit_btn)
+        self.tools_toolbar.addSeparator()
+        self.tools_toolbar.addAction(self.theme_light_btn)
+        self.tools_toolbar.addAction(self.theme_dark_btn)
+
+        # 초기 상태: 2번째 줄 숨김
+        self.page_ops_toolbar.setVisible(False)
+        self.tools_toolbar.setVisible(False)
+        
+    def toggle_secondary_toolbars(self):
+        visible = not self.page_ops_toolbar.isVisible()
+        self.page_ops_toolbar.setVisible(visible)
+        self.tools_toolbar.setVisible(visible)
+        self.expand_toolbar_action.setText("▲" if visible else "▼")
+
     def setup_statusbar(self):
         statusbar = self.statusBar()
+        # 기존 위젯 제거
         if hasattr(self, '_statusbar_widgets'):
             for widget in self._statusbar_widgets:
                 try:
@@ -1182,38 +1275,110 @@ class PDFEditor(QMainWindow):
                 except Exception:
                     pass
         self._statusbar_widgets: list[QWidget] = []
+        
+        # 1. 페이지 표시 (왼쪽 고정, addWidget 사용)
+        self.status_page_label.setMinimumWidth(120)
+        self.status_page_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.status_page_label.setStyleSheet("padding-left: 5px; padding-right: 10px; font-weight: bold; border: none;")
         statusbar.addWidget(self.status_page_label)
-        statusbar.addPermanentWidget(self.status_zoom_label)
-        self._statusbar_widgets.extend([self.status_page_label, self.status_zoom_label])
+        
+        # 2. 상태 메시지 전용 라벨 (왼쪽, 페이지 라벨 다음, Stretch 1)
+        self.status_message_label = QLabel()
+        self.status_message_label.setStyleSheet("padding-left: 10px; color: #888; border: none;")
+        statusbar.addWidget(self.status_message_label, 1)
+        
+        # 3. 프로그레스 바 (오른쪽 영구 위젯)
         if not hasattr(self, 'status_progress'):
             self.status_progress = QProgressBar()
-            self.status_progress.setMaximumWidth(120)
+            self.status_progress.setMaximumWidth(150)
             self.status_progress.setTextVisible(False)
             self.status_progress.setVisible(False)
         statusbar.addPermanentWidget(self.status_progress)
-        self._statusbar_widgets.append(self.status_progress)
+
+        # 4. 줌 표시 (오른쪽 영구 위젯) - 여백 확장
+        self.status_zoom_label.setMinimumWidth(80)
+        self.status_zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_zoom_label.setStyleSheet("padding: 0 15px; border: none;")
+        statusbar.addPermanentWidget(self.status_zoom_label)
+
+        # 5. 줌 컨트롤 버튼 (이모지) - StatusBarButton 클래스 및 이모지 폰트 강제
+        emoji_font = QFont("Apple Color Emoji", 12)
+        if sys.platform == "win32":
+            emoji_font = QFont("Segoe UI Emoji", 11)
+            
+        def create_flat_btn(text, tooltip, slot):
+            btn = QPushButton(text)
+            btn.setObjectName("StatusBarButton")
+            btn.setFont(emoji_font) # 폰트 직접 설정
+            btn.setFlat(True)
+            btn.setFixedWidth(28) # 너비를 더 조밀하게 조정
+            btn.setToolTip(tooltip)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(slot)
+            return btn
+
+        self.btn_fit_width = create_flat_btn("↔️", self.t('fit_width'), self.fit_to_width)
+        self.btn_fit_height = create_flat_btn("↕️", self.t('fit_height'), self.fit_to_height)
+        self.btn_zoom_reset = create_flat_btn("💯", "100%", lambda: self._apply_zoom(1.0))
+        self.btn_zoom_out = create_flat_btn("➖", self.t('zoom_out'), self.zoom_out)
+        self.btn_zoom_in = create_flat_btn("➕", self.t('zoom_in'), self.zoom_in)
+
+        statusbar.addPermanentWidget(self.btn_fit_width)
+        statusbar.addPermanentWidget(self.btn_fit_height)
+        statusbar.addPermanentWidget(self.btn_zoom_reset)
+        statusbar.addPermanentWidget(self.btn_zoom_out)
+        statusbar.addPermanentWidget(self.btn_zoom_in)
+                
+        # 6. 줌 슬라이더 (50% ~ 200%)
+        self.status_zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.status_zoom_slider.setFixedWidth(100)
+        self.status_zoom_slider.setRange(50, 200) 
+        self.status_zoom_slider.setValue(100)
+        self.status_zoom_slider.valueChanged.connect(self.on_status_zoom_slider_changed)
+        statusbar.addPermanentWidget(self.status_zoom_slider)
+         
+        
+        self._statusbar_widgets.extend([
+            self.status_page_label, self.status_message_label, self.status_zoom_label, self.status_progress,
+            self.btn_fit_width, self.btn_fit_height, self.btn_zoom_reset, self.btn_zoom_out, self.status_zoom_slider, self.btn_zoom_in
+        ])
         self.show_status(self.t('status_ready'))
 
+    def on_status_zoom_slider_changed(self, value):
+        zoom_factor = value / 100.0
+        if abs(self.zoom_level - zoom_factor) > 0.01:
+            self._pending_zoom_factor = zoom_factor
+            self.zoom_debounce_timer.start()
+
+    def _perform_debounced_zoom(self):
+        self._apply_zoom(self._pending_zoom_factor)
+
     def show_status(self, message: str, busy: bool = False, duration: int = 3000):
+        # 전용 라벨 사용으로 겹침 원천 차단
+        # duration은 타이머로 구현 가능하나, 여기서는 단순화를 위해 생략하거나 필요시 QTimer 추가
+        if hasattr(self, 'status_message_label'):
+            self.status_message_label.setText(message)
+            
+            if duration > 0 and not busy:
+                QTimer.singleShot(duration, self.clear_status)
+
         if busy:
-            self.statusBar().showMessage(message)
             if hasattr(self, 'status_progress'):
                 self.status_progress.setRange(0, 0)
                 self.status_progress.setVisible(True)
         else:
-            self.statusBar().showMessage(message, duration)
             if hasattr(self, 'status_progress'):
                 self.status_progress.setRange(0, 1)
                 self.status_progress.setVisible(False)
 
     def clear_status(self):
-        self.statusBar().clearMessage()
+        if hasattr(self, 'status_message_label'):
+            # self.status_message_label.clear() 
+            # 완전히 지우기보다 '준비됨' 상태로 복귀가 더 자연스러움
+            self.status_message_label.setText(self.t('status_ready'))
+            
         if hasattr(self, 'status_progress'):
             self.status_progress.setVisible(False)
-        try:
-            self.statusBar().showMessage(self.t('status_ready'), 2000)
-        except Exception:
-            pass
 
     def _create_loading_dialog(self, message: str, modal: bool = True) -> QProgressDialog:
         dlg = QProgressDialog(message, None, 0, 0, self)
@@ -1271,28 +1436,45 @@ class PDFEditor(QMainWindow):
     def _get_dark_theme_stylesheet(self):
         return """
             QMainWindow, QDialog { background-color: #2b2b2b; color: #ffffff; }
-            QMenuBar { font-size: 13px; padding: 3px 5px; background-color: #2b2b2b; color: #ffffff; }
+            QMainWindow::separator { width: 0px; height: 0px; margin: 0px; padding: 0px; border: none; }
+            QSplitter::handle { background-color: transparent; width: 0px; height: 0px; }
+            QMenuBar { font-size: 13px; padding: 3px 5px; background-color: #2b2b2b; color: #ffffff; border: none; }
             QMenuBar::item:selected { background-color: #3d3d3d; }
             QMenu { background-color: #2b2b2b; color: #ffffff; border: 1px solid #3d3d3d; }
             QMenu::item { padding: 8px 22px; }
             QMenu::item:selected { background-color: #3d3d3d; }
             QMenu::separator { height: 1px; background-color: #3d3d3d; margin: 5px 0px; }
-            QToolBar { spacing: 4px; padding: 4px; background-color: #2b2b2b; border-bottom: 1px solid #3d3d3d; }
+            QToolBar { spacing: 4px; padding: 4px; background-color: #2b2b2b; border: none; margin: 0px; }
             QToolButton { color: #ffffff; padding: 5px 7px; border: 1px solid transparent; border-radius: 4px; font-size: 12px; }
             QToolButton:hover { background-color: #3d3d3d; }
             QToolButton:pressed, QToolButton:checked { background-color: #404040; }
-            QStatusBar { padding-left: 8px; background: #2b2b2b; color: #ffffff; }
-            QSplitter::handle {
-                background-color: #3d3d3d;
-                width: 3px;
-            }
+            QStatusBar { padding-left: 8px; background: #2b2b2b; color: #ffffff; border-top: 1px solid #3d3d3d; }
+            QStatusBar::item { border: none; }
             #documentContainer {
                 background-color: #1e1e1e;
             }
             QLabel { background-color: transparent; color: #ffffff; }
             QLineEdit { background-color: #1e1e1e; color: #ffffff; border: 1px solid #3d3d3d; }
-            QPushButton, QDialogButtonBox QPushButton { background-color: #3d3d3d; color: #ffffff; border: none; padding: 5px 15px; border-radius: 3px; }
+            QPushButton, QDialogButtonBox QPushButton { 
+                background-color: #3d3d3d; 
+                color: #ffffff; 
+                border: none; 
+                padding: 5px 15px; 
+                border-radius: 3px; 
+            }
             QPushButton:hover, QDialogButtonBox QPushButton:hover { background-color: #4d4d4d; }
+            /* 상태바 전용 버튼 스타일 */
+            QPushButton#StatusBarButton {
+                background: transparent;
+                border: none;
+                min-width: 28px;
+                padding: 0px;
+                color: #ffffff;
+            }
+            QPushButton#StatusBarButton:hover {
+                background-color: rgba(255, 255, 255, 0.1);
+                border-radius: 4px;
+            }
             QListWidget { background-color: #1e1e1e; border: none; outline: none; padding: 0px; }
             QListWidget::item { background-color: #2d2d2d; border: 1px solid #3d3d3d; margin: 2px; border-radius: 3px; color: #ffffff; }
             QListWidget::item:hover { background-color: rgba(0, 120, 215, 0.3); border: 1px solid #0078d7; }
@@ -1306,11 +1488,14 @@ class PDFEditor(QMainWindow):
                 background-color: #f0f0f0;
                 color: #000000;
             }
+            QMainWindow::separator { width: 0px; height: 0px; margin: 0px; padding: 0px; border: none; }
+            QSplitter::handle { background-color: transparent; width: 0px; height: 0px; }
             QMenuBar {
                 font-size: 13px;
                 padding: 3px 5px;
                 background-color: #f0f0f0;
                 color: #000000;
+                border: none;
             }
             QMenuBar::item:selected {
                 background-color: #dcdcdc;
@@ -1336,7 +1521,8 @@ class PDFEditor(QMainWindow):
                 spacing: 4px;
                 padding: 4px;
                 background-color: #f0f0f0;
-                border-bottom: 1px solid #cccccc;
+                border: none;
+                margin: 0px;
             }
             QToolButton {
                 color: #000000;
@@ -1357,13 +1543,11 @@ class PDFEditor(QMainWindow):
                 padding-left: 8px;
                 background: #f0f0f0;
                 color: #000000;
+                border-top: 1px solid #cccccc;
             }
-            QSplitter::handle {
-                background-color: #cccccc;
-                width: 3px;
-            }
+            QStatusBar::item { border: none; }
             #documentContainer {
-                background-color: #ffffff;
+                background-color: #c8c8c8;
             }
             QLabel {
                 background-color: transparent;
@@ -1384,15 +1568,26 @@ class PDFEditor(QMainWindow):
             QPushButton:hover, QDialogButtonBox QPushButton:hover {
                 background-color: #f0f0f0;
             }
+            QPushButton#StatusBarButton {
+                background: transparent;
+                border: none;
+                min-width: 28px;
+                padding: 0px;
+                color: #000000;
+            }
+            QPushButton#StatusBarButton:hover {
+                background-color: rgba(0, 0, 0, 0.05);
+                border-radius: 4px;
+            }
             QListWidget {
-                background-color: #f0f0f0;
+                background-color: #dbdbdb;
                 border: none;
                 outline: none;
                 padding: 0px;
             }
             QListWidget::item {
                 background-color: #ffffff;
-                border: 1px solid #e0e0e0;
+                border: 1px solid #dcdcdc;
                 margin: 2px;
                 border-radius: 3px;
                 color: #000000;
@@ -1436,453 +1631,58 @@ class PDFEditor(QMainWindow):
                 self.theme_dark_btn.setChecked(False)
 
     def _init_language(self):
-        self.language = 'ko'
-        self.translations = {
-            'ko': {
-                'zoom_in': '➕ 확대',
-                'zoom_out': '➖ 축소',
-                'theme_light': '☀️ 라이트',
-                'theme_dark': '🌙 다크',
-                'theme_light_mode': '☀️ 라이트 모드',
-                'theme_dark_mode': '🌙 다크 모드',
-                'status_page': '페이지',
-                'status_zoom': '배율',
-                'status_ready': '준비됨',
-                'status_saving': '저장 중...',
-                'status_saved': '저장 완료',
-                'status_reordering': '페이지 순서를 변경하는 중...',
-                'status_reordered': '페이지 순서를 변경했습니다.',
-                'status_rotating': '페이지를 회전하는 중...',
-                'status_rotated': '페이지를 회전했습니다.',
-                'status_printing': '인쇄 준비 중...',
-                'status_print_done': '인쇄 명령을 보냈습니다.',
-                'status_compressing': '압축 중...',
-                'status_compress_done': '압축이 완료되었습니다.',
-                'error_title': '오류',
-                'status_patch_mode_on': '🩹 패치 모드가 활성화되었습니다.',
-                'status_patch_mode_off': '🩹 패치 모드가 해제되었습니다.',
-                'status_patch_eraser_on': '🧽 지우개 모드가 활성화되었습니다.',
-                'status_patch_eraser_off': '🧽 지우개 모드가 해제되었습니다.',
-                'progress_compress': 'PDF 압축 중...',
-                'progress_compress_adv': '고급 PDF 압축 중...',
-                'progress_preparing_fonts': '고급 압축을 위한 글꼴을 준비하는 중입니다...',
-                'progress_ensuring_fonts': '페이지 {page} 글꼴을 적용하는 중입니다...',
-                'progress_applying_overlay': "페이지 {page} 오버레이 반영 중… '{text}'",
-                'file_menu': '파일',
-                'open': '📂 열기',
-                'save': '💾 저장',
-                'save_as': '📑 다른 이름으로 저장',
-                'print': '🖨️ 인쇄',
-                'exit': '🚪 종료',
-                'alert_no_pdf': 'PDF 파일이 열려 있지 않습니다.',
-                'alert_no_edit_pdf': '편집할 PDF 파일이 열려 있지 않습니다.',
-                'page_menu': '페이지',
-                'add_page': '🙏 페이지 추가',
-                'delete_page': '🗑️ 페이지 삭제',
-                'cm_delete_selected': '🗑️ 선택한 페이지 삭제',
-                'cm_save_selected': '💾 선택한 페이지 별도 저장',
-                'move_up': '👆 위로 이동',
-                'move_down': '👇 아래로 이동',
-                'rotate_left': '⤴️ 왼쪽으로 회전',
-                'rotate_right': '⤵️ 오른쪽으로 회전',
-                'view_menu': '보기',
-                'single_view': '📄 한쪽 보기',
-                'dual_view': '📖 두쪽 보기',
-                'fit_width': '↔️ 가로 맞춤',
-                'fit_height': '↕️ 세로 맞춤',
-                'support_menu': '❣️개발자 후원하기❣️',
-                'donate_kakao': '카카오페이로 후원하기',
-                'donate_paypal': 'PayPal로 후원하기',
-                'donate_paypal_message': '<a href="https://www.paypal.com/paypalme/1hwangjinsu">https://www.paypal.com/paypalme/1hwangjinsu</a> 에서 후원해주세요🙏 진심으로 감사합니다❣️',
-                'donate_image_missing': '후원 이미지를 찾을 수 없습니다.',
-                'tools_menu': '도구',
-                'compress_pdf': '📦 PDF 압축',
-                'edit_menu': '편집',
-                'undo': '↩️ 실행 취소',
-                'redo': '↪️ 다시 실행',
-                'language_menu': '언어',
-                'korean': '한글',
-                'english': 'English',
-                'help_menu': '도움말', 'licenses_menu': '📜 오픈소스 라이선스', 'licenses_title': '오픈소스 라이선스',
-                'usage_guide': '❓ 사용방법 안내',
-                'about': 'ℹ️ 정보',
-                'prev': '👈 이전',
-                'next': '👉 다음',
-                'add_short': '🙏 추가',
-                'delete_short': '🗑️ 삭제',
-                'move_up_short': '👆 위로',
-                'move_down_short': '👇 아래로',
-                'rotate_left_short': '⤴️ 왼쪽 회전',
-                'rotate_right_short': '⤵️ 오른쪽 회전',
-                'edit_short': '✏️ 편집',
-                'about_text': '용PDF\n개발: Hwang Jinsu\n메일: iiish@hanmail.net\n라이선스: 프리웨어\n채널: <a href="https://www.youtube.com/playlist?list=PLs36bSFfggCCUX31PYEH_SNgAmVc3dk_B">용툴즈 스튜디오</a>\n본 소프트웨어는 개인/업무용 무료 사용 가능합니다.',
-                'info_compress': '압축 방식을 선택하세요.\n- 일반 압축: 구조 최적화 (무손실)\n- 고급 압축: 이미지 DPI 다운샘플',
-                'ghostscript_config': '🛠️ Ghostscript 경로 설정',
-                'ghostscript_prompt': 'Ghostscript가 설치되어 있지 않습니다. 지금 설치하시겠습니까?',
-                'ghostscript_select': 'Ghostscript 실행 파일 선택',
-                'ghostscript_set': 'Ghostscript 경로가 저장되었습니다.',
-                'ghostscript_not_found': 'Ghostscript 실행 파일을 찾을 수 없습니다.',
-                'ghostscript_install': '지금 설치',
-                'ghostscript_install_proceed': '설치 진행',
-                'ghostscript_install_cancel': '취소',
-                'ghostscript_install_hint': 'Ghostscript 다운로드 페이지를 열었습니다. 설치 후 다시 시도해 주세요.',
-                'ghostscript_install_notice_mac': "macOS에서 고급 PDF 압축을 사용하려면 Ghostscript가 필요합니다.\n'설치 진행'을 누르면 Homebrew로 'brew install ghostscript' 명령을 실행하여 설치를 시도합니다.\nHomebrew가 설치되어 있지 않다면 https://brew.sh 에서 먼저 설치해주세요.",
-                'ghostscript_installing': '터미널에서 Ghostscript 설치 중입니다... ({manager})',
-                'ghostscript_install_success': 'Ghostscript 설치가 완료되었습니다.',
-                'ghostscript_install_failed': 'Ghostscript 설치에 실패했습니다.',
-                'ghostscript_install_missing_pm': '자동 설치를 위한 패키지 관리자를 찾을 수 없습니다. 직접 설치해주세요.',
-                'ghostscript_install_missing_mac': "Homebrew를 찾을 수 없습니다. https://brew.sh 에서 Homebrew를 설치한 뒤 터미널에서 'brew install ghostscript'를 실행해주세요.",
-                'ghostscript_install_manual': '자동 설치를 사용할 수 없어 Ghostscript 다운로드 페이지를 열었습니다. 설치 후 다시 시도해주세요.',
-                'ghostscript_install_check_path': '설치가 완료된 것 같지만 실행 파일을 찾지 못했습니다. 경로를 직접 지정해주세요.',
-                'ghostscript_bundle_ready': '번들에 포함된 Ghostscript 실행 파일을 사용할 준비가 되었습니다.',
-                'ghostscript_program_files_missing': 'Windows Program Files 경로를 찾지 못했습니다. 관리자 권한으로 다시 실행한 뒤 시도해 주세요.',
-                'ghostscript_local_installing': '번들 Ghostscript를 준비하는 중입니다...',
-                'ghostscript_local_install_done': '번들 Ghostscript 경로가 설정되었습니다.',
-                'ghostscript_local_install_failed': '번들 Ghostscript 설치에 실패했습니다.',
-                'ghostscript_resume_title': 'Ghostscript 설치 완료',
-                'ghostscript_resume_prompt': "Ghostscript 설치가 완료되었습니다.\n이전 설정으로 고급 PDF 압축을 다시 진행할까요?\n\n출력 파일: {output}\n컬러 DPI: {dpi_color} / 그레이 DPI: {dpi_gray} / 모노 DPI: {dpi_mono}\n텍스트/벡터 보존: {preserve_vector}",
-                'ghostscript_resume_failed': "Ghostscript 설치에 실패했습니다.\n관리자 권한으로 앱을 다시 실행한 후 시도해주세요.\n\n오류: {error}",
-                'ghostscript_program_files_missing': 'Windows Program Files 경로를 찾지 못했습니다. 관리자 권한으로 다시 실행한 뒤 시도해 주세요.',
-                'loading_app': '용PDF를 준비하는 중입니다...',
-                'loading_external_editor': '외부 편집기를 실행하는 중입니다...',
-                'external_editor_ready': '외부 편집기를 열었습니다.',
-                'external_editor_running': '외부 편집기가 이미 실행 중입니다.',
-                'external_editor_refresh_notice': '외부 편집 저장을 감지하여 문서를 새로고침했습니다.',
-                'print_error': '인쇄 중 오류가 발생했습니다.',
-                'compress_adv_done': '고급 PDF 압축 완료',
-                'compress_adv_error': '고급 PDF 압축 중 오류가 발생했습니다.',
-                'compress_adv_permission_error': "Ghostscript 설치에는 관리자 권한 승인이 필요합니다.\n'설치 진행'을 눌러 설치를 완료하면 압축이 자동으로 이어집니다.",
-                'ghostscript_install_notice': "고급 PDF 압축을 계속하려면 Ghostscript 설치가 필요합니다.\n'설치 진행'을 누르면 앱이 관리자 권한으로 다시 실행되며 Ghostscript를 자동으로 설치한 뒤, 열려 있던 문서와 압축 작업을 이어갑니다.\n지금 설치를 진행할까요?",
-                'ghostscript_install_proceed': '설치 진행',
-                'ghostscript_install_cancel': '취소',
-                'ghostscript_install_already': 'Ghostscript가 이미 사용 가능한 상태입니다.',
-                'progress_compress': 'PDF 압축 중...',
-                'progress_compress_adv': '고급 PDF 압축 중...',
-                'progress_preparing_fonts': '고급 압축에 필요한 글꼴을 준비하는 중입니다...',
-                'progress_ensuring_fonts': '페이지 {page} 글꼴을 적용하는 중입니다...',
-                'progress_applying_overlay': "페이지 {page} 오버레이 반영 중… '{text}'",
-                'save_permission_error': '현재 위치에 저장할 수 없습니다. 다른 위치에 저장해 주세요.',
-                'save_failed': '파일을 저장하지 못했습니다.',
-                'err_editor_missing': 'YongPDF_text (앱/실행파일)를 찾을 수 없습니다.',
-                'err_editor_launch': '외부 편집기를 실행하지 못했습니다.',
-                'general_compress': '일반 압축 (무손실, 파일 구조 최적화)',
-                'advanced_compress': '고급 압축 (이미지 DPI 조절)',
-                'color_dpi_label': '컬러 이미지 DPI (10단계)',
-                'gray_dpi_label': '그레이스케일 이미지 DPI',
-                'mono_dpi_label': '모노(흑백) 이미지 DPI',
-                'preserve_vector': '텍스트/벡터 보존 (이미지만 처리)',
-                'estimate_prefix': '예상 파일 크기',
-                'selected_dpi': '선택 DPI',
-                'estimate_unavailable': '예상 크기 계산 불가',
-                'current': '현재',
-                'color': '컬러', 'gray': '그레이', 'mono': '모노',
-                'saved': '저장됨', 'saved_as': '다른 이름으로 저장됨',
-                'unsaved_changes': '수정사항이 있습니다. 저장하시겠습니까?',
-                'btn_yes': '예', 'btn_save_as': '다른 이름으로 저장', 'btn_no': '아니오', 'btn_cancel': '취소'
-            },
-            'en': {
-                'zoom_in': '➕ Zoom In',
-                'zoom_out': '➖ Zoom Out',
-                'theme_light': '☀️ Light',
-                'theme_dark': '🌙 Dark',
-                'theme_light_mode': '☀️ Light Mode',
-                'theme_dark_mode': '🌙 Dark Mode',
-                'status_page': 'Page',
-                'status_zoom': 'Zoom',
-                'status_ready': 'Ready',
-                'status_saving': 'Saving...',
-                'status_saved': 'Save completed',
-                'status_reordering': 'Reordering pages...',
-                'status_reordered': 'Pages reordered.',
-                'status_rotating': 'Rotating pages...',
-                'status_rotated': 'Pages rotated.',
-                'status_printing': 'Preparing print job...',
-                'status_print_done': 'Print job sent.',
-                'status_compressing': 'Compressing...',
-                'status_compress_done': 'Compression finished.',
-                'error_title': 'Error',
-                'status_patch_mode_on': '🩹 Patch mode enabled.',
-                'status_patch_mode_off': '🩹 Patch mode disabled.',
-                'status_patch_eraser_on': '🧽 Eraser mode enabled.',
-                'status_patch_eraser_off': '🧽 Eraser mode disabled.',
-                'unsaved_changes': 'There are unsaved changes. Save?',
-                'file_menu': 'File',
-                'open': '📂 Open',
-                'save': '💾 Save',
-                'save_as': '📑 Save As',
-                'print': '🖨️ Print',
-                'exit': '🚪 Exit',
-                'page_menu': 'Pages',
-                'add_page': '🙏 Add Page',
-                'delete_page': '🗑️ Delete Page',
-                'cm_delete_selected': '🗑️ Delete Selected Pages',
-                'cm_save_selected': '💾 Save Selected Pages',
-                'move_up': '👆 Move Up',
-                'move_down': '👇 Move Down',
-                'rotate_left': '⤴️ Rotate Left',
-                'rotate_right': '⤵️ Rotate Right',
-                'view_menu': 'View',
-                'single_view': '📄 Single Page View',
-                'dual_view': '📖 Two-Page View',
-                'fit_width': '↔️ Fit Width',
-                'fit_height': '↕️ Fit Height',
-                'support_menu': '❣️Support the Developer❣️',
-                'donate_kakao': 'Support via KakaoPay',
-                'donate_paypal': 'Support via PayPal',
-                'donate_paypal_message': 'Please support via <a href="https://www.paypal.com/paypalme/1hwangjinsu">https://www.paypal.com/paypalme/1hwangjinsu</a> 🙏 Thank you so much ❣️',
-                'donate_image_missing': 'Unable to locate the donation image.',
-                'tools_menu': 'Tools',
-                'compress_pdf': '📦 Compress PDF',
-                'edit_menu': 'Edit',
-                'undo': '↩️ Undo',
-                'redo': '↪️ Redo',
-                'language_menu': 'Language',
-                'korean': 'Korean',
-                'english': 'English',
-                'help_menu': 'Help', 'licenses_menu': '📜 Open-Source Licenses', 'licenses_title': 'Open-Source Licenses',
-                'usage_guide': '❓ User Guide',
-                'about': 'ℹ️ About',
-                'prev': '👈 Prev',
-                'next': '👉 Next',
-                'add_short': '🙏 Add',
-                'delete_short': '🗑️ Delete',
-                'move_up_short': '👆 Up',
-                'move_down_short': '👇 Down',
-                'rotate_left_short': '⤴️ Rotate Left',
-                'rotate_right_short': '⤵️ Rotate Right',
-                'edit_short': '✏️ Edit',
-                'about_text': 'YongPDF\nDeveloper: Hwang Jinsu\nEmail: iiish@hanmail.net\nLicense: Freeware\nChannel: <a href="https://www.youtube.com/playlist?list=PLs36bSFfggCCUX31PYEH_SNgAmVc3dk_B">YongTools Studio</a>\nThis software is free for personal and work use.',
-                'info_compress': 'Choose compression mode.\n- General: structure optimization (lossless)\n- Advanced: downsample images (DPI)',
-                'alert_no_pdf': 'No PDF is open.',
-                'ghostscript_config': '🛠️ Configure Ghostscript Path',
-                'ghostscript_prompt': 'Ghostscript is missing. Install it now?',
-                'ghostscript_select': 'Select Ghostscript Executable',
-                'ghostscript_set': 'Ghostscript path saved.',
-                'ghostscript_not_found': 'Ghostscript executable could not be found.',
-                'ghostscript_install': 'Install Now',
-                'ghostscript_install_proceed': 'Proceed with installation',
-                'ghostscript_install_cancel': 'Cancel',
-                'ghostscript_install_hint': 'Opened the Ghostscript download page. After installing, try again.',
-                'ghostscript_install_notice_mac': "Ghostscript is required for advanced compression on macOS.\nSelecting 'Proceed' runs 'brew install ghostscript' via Homebrew.\nIf Homebrew is not installed, please install it first from https://brew.sh.",
-                'ghostscript_installing': 'Installing Ghostscript via {manager}...',
-                'ghostscript_install_success': 'Ghostscript installation completed.',
-                'ghostscript_install_failed': 'Failed to install Ghostscript.',
-                'ghostscript_install_missing_pm': 'No supported package manager found for automatic install. Please install Ghostscript manually.',
-                'ghostscript_install_missing_mac': "Homebrew was not detected. Install it from https://brew.sh and then run 'brew install ghostscript' to add Ghostscript.",
-                'ghostscript_install_manual': 'Automatic install is unavailable; opened the Ghostscript download page. Install it and try again.',
-                'ghostscript_install_check_path': 'Installation seems complete, but the executable was not found. Please set the path manually.',
-                'ghostscript_bundle_ready': 'Using the bundled Ghostscript executable.',
-                'ghostscript_program_files_missing': 'Unable to locate the Windows Program Files directory. Please rerun YongPDF as administrator and try again.',
-                'ghostscript_local_installing': 'Preparing bundled Ghostscript...',
-                'ghostscript_local_install_done': 'Bundled Ghostscript is ready to use.',
-                'ghostscript_local_install_failed': 'Failed to prepare bundled Ghostscript.',
-                'ghostscript_resume_title': 'Ghostscript Ready',
-                'ghostscript_resume_prompt': "Ghostscript installation is complete.\nResume the advanced PDF compression with your previous settings?\n\nOutput file: {output}\nColor DPI: {dpi_color} / Gray DPI: {dpi_gray} / Mono DPI: {dpi_mono}\nPreserve text/vector: {preserve_vector}",
-                'ghostscript_resume_failed': "Ghostscript installation failed.\nPlease restart YongPDF with administrator rights and try again.\n\nError: {error}",
-                'loading_app': 'Loading YongPDF...',
-                'loading_external_editor': 'Launching the external editor...',
-                'external_editor_ready': 'External editor started.',
-                'external_editor_running': 'External editor is already running.',
-                'external_editor_refresh_notice': 'Detected external edits and reloaded the document.',
-                'print_error': 'An error occurred while printing.',
-                'save_permission_error': 'Cannot write to the current location. Please save to another location.',
-                'save_failed': 'Failed to save the file.',
-                'general_compress': 'General (lossless, structure optimization)',
-                'advanced_compress': 'Advanced (image DPI control)',
-                'color_dpi_label': 'Color Image DPI (10 steps)',
-                'gray_dpi_label': 'Grayscale Image DPI',
-                'mono_dpi_label': 'Monochrome Image DPI',
-                'preserve_vector': 'Preserve text/vector (images only)',
-                'estimate_prefix': 'Estimated size',
-                'selected_dpi': 'Selected DPI',
-                'estimate_unavailable': 'estimation unavailable',
-                'current': 'current',
-                'color': 'Color', 'gray': 'Gray', 'mono': 'Mono',
-                'saved': 'Saved', 'saved_as': 'Saved As',
-                'btn_yes': 'Save', 'btn_save_as': 'Save As', 'btn_no': "Don't Save", 'btn_cancel': 'Cancel',
-                'err_open_pdf': 'Failed to open PDF.',
-                'err_restore': 'Error occurred while restoring.',
-                'err_undo': 'Error occurred while undoing.',
-                'err_redo': 'Error occurred while redoing.',
-                'alert_no_edit_pdf': 'No PDF is open to edit.',
-                'err_editor_missing': 'YongPDF_text (app/executable) not found.',
-                'err_editor_launch': 'Failed to launch external editor',
-                'progress_compress': 'Compressing PDF...',
-                'progress_compress_adv': 'Advanced PDF compression...',
-                'progress_preparing_fonts': 'Preparing fonts for advanced compression…',
-                'progress_ensuring_fonts': 'Ensuring fonts on page {page}…',
-                'progress_applying_overlay': "Applying overlay on page {page}… '{text}'",
-                'compress_done': 'PDF compression completed',
-                'compress_error': 'Error occurred during PDF compression',
-                'compress_adv_done': 'Advanced PDF compression completed',
-                'gs_missing': 'Ghostscript executable not found.\nInstall Ghostscript and add it to PATH.',
-                'compress_adv_error': 'Error occurred during advanced PDF compression',
-                'compress_adv_permission_error': "Ghostscript installation needs administrator approval.\nChoose 'Install now' to relaunch YongPDF with elevated rights so the install can finish and compression can resume.",
-                'ghostscript_install_notice': "Advanced compression requires Ghostscript.\nSelecting 'Install now' will relaunch YongPDF with administrator rights, install Ghostscript automatically, then reopen your document and resume compression.\nContinue?",
-                'ghostscript_install_already': 'Ghostscript is already available; no installation is required.',
-            },
-            'ja': {
-                'alert_no_pdf': 'PDFが開かれていません。',
-                'alert_no_edit_pdf': '編集するPDFが開かれていません。',
-                'unsaved_changes': '未保存の変更があります。保存しますか？',
-                'btn_yes': 'はい', 'btn_save_as': '名前を付けて保存', 'btn_no': 'いいえ', 'btn_cancel': 'キャンセル',
-                'zoom_in': '➕ 拡大', 'zoom_out': '➖ 縮小',
-                'theme_light': '☀️ ライト', 'theme_dark': '🌙 ダーク',
-                'theme_light_mode': '☀️ ライトモード', 'theme_dark_mode': '🌙 ダークモード',
-                'status_page': 'ページ', 'status_zoom': '倍率',
-                'status_ready': '準備完了',
-                'status_saving': '保存中...',
-                'status_saved': '保存しました。',
-                'status_reordering': 'ページの順序を変更しています...',
-                'status_reordered': 'ページの順序を変更しました。',
-                'status_rotating': 'ページを回転しています...',
-                'status_rotated': 'ページを回転しました。',
-                'status_printing': '印刷を準備しています...',
-                'status_print_done': '印刷ジョブを送信しました。',
-                'status_compressing': '圧縮中...',
-                'status_compress_done': '圧縮が完了しました。',
-                'error_title': 'エラー',
-                'status_patch_mode_on': '🩹 パッチモードを有効にしました。',
-                'status_patch_mode_off': '🩹 パッチモードを無効にしました。',
-                'status_patch_eraser_on': '🧽 消しゴムモードを有効にしました。',
-                'status_patch_eraser_off': '🧽 消しゴムモードを無効にしました。',
-                'progress_compress': 'PDF を圧縮しています...',
-                'progress_compress_adv': '高度な PDF 圧縮を実行中...',
-                'progress_preparing_fonts': '高度な圧縮用にフォントを準備しています...',
-                'progress_ensuring_fonts': 'ページ {page} のフォントを適用中...',
-                'progress_applying_overlay': "ページ {page} のオーバーレイを反映中…『{text}』",
-                'file_menu': 'ファイル', 'open': '📂 開く', 'save': '💾 保存', 'save_as': '📑 名前を付けて保存', 'print': '🖨️ 印刷', 'exit': '🚪 終了',
-                'page_menu': 'ページ', 'add_page': '🙏 ページ追加', 'delete_page': '🗑️ ページ削除', 'cm_delete_selected': '🗑️ 選択ページを削除', 'cm_save_selected': '💾 選択ページを保存',
-                'move_up': '👆 上へ移動', 'move_down': '👇 下へ移動', 'rotate_left': '⤴️ 左回転', 'rotate_right': '⤵️ 右回転',
-                'view_menu': '表示', 'single_view': '📄 1ページ表示', 'dual_view': '📖 2ページ表示', 'fit_width': '↔️ 幅を合わせる', 'fit_height': '↕️ 高さを合わせる', 
-                'support_menu': '❣️開発者を支援する❣️', 'donate_kakao': 'KakaoPayで支援する', 'donate_paypal': 'PayPalで支援する', 'donate_paypal_message': '<a href="https://www.paypal.com/paypalme/1hwangjinsu">https://www.paypal.com/paypalme/1hwangjinsu</a> でご支援ください🙏 心より感謝いたします❣️', 'donate_image_missing': '支援用の画像が見つかりません。',
-                'tools_menu': 'ツール', 'compress_pdf': '📦 PDF圧縮',
-                'edit_menu': '編集', 'undo': '↩️ 元に戻す', 'redo': '↪️ やり直し', 'language_menu': '言語', 'korean': '韓国語', 'english': '英語', 'help_menu': 'ヘルプ', 'licenses_menu': '📜 オープンソース ライセンス', 'licenses_title': 'オープンソース ライセンス', 'usage_guide': '❓ 使い方ガイド', 'about': 'ℹ️ 情報',
-                'prev': '👈 前へ', 'next': '👉 次へ', 'add_short': '🙏 追加', 'delete_short': '🗑️ 削除', 'move_up_short': '👆 上へ', 'move_down_short': '👇 下へ', 'rotate_left_short': '⤴️ 左回転', 'rotate_right_short': '⤵️ 右回転', 'edit_short': '✏️ 編集',
-                'about_text': 'YongPDF\n開発者: Hwang Jinsu\nメール: iiish@hanmail.net\nライセンス: フリーウェア\nチャンネル: <a href="https://www.youtube.com/playlist?list=PLs36bSFfggCCUX31PYEH_SNgAmVc3dk_B">YongTools Studio</a>\n本ソフトは個人/業務利用とも無料です。',
-                'info_compress': '圧縮モードを選択してください。\n- 一般: 構造最適化(ロスレス)\n- 高度: 画像をDPIでダウンサンプル', 'general_compress': '一般(ロスレス、構造最適化)', 'advanced_compress': '高度(画像DPI調整)',
-                'color_dpi_label': 'カラー画像 DPI (10段階)', 'gray_dpi_label': 'グレースケール画像 DPI', 'mono_dpi_label': 'モノクロ画像 DPI', 'preserve_vector': 'テキスト/ベクターを保持(画像のみ処理)',
-                'ghostscript_config': '🛠️ Ghostscript パス設定', 'ghostscript_prompt': 'Ghostscript がインストールされていません。今すぐインストールしますか？', 'ghostscript_select': 'Ghostscript 実行ファイルを選択', 'ghostscript_set': 'Ghostscript パスを保存しました。', 'ghostscript_not_found': 'Ghostscript 実行ファイルを見つけられませんでした。', 'ghostscript_install': '今すぐインストール', 'ghostscript_install_proceed': 'インストールを実行', 'ghostscript_install_cancel': 'キャンセル', 'ghostscript_install_hint': 'Ghostscript のダウンロードページを開きました。インストール後に再試行してください。', 'ghostscript_install_notice_mac': "macOS で高度な圧縮を行うには Ghostscript が必要です。\n『インストールを実行』を押すと Homebrew から『brew install ghostscript』コマンドを実行します。\nHomebrew が未導入の場合は https://brew.sh から先に導入してください。", 'print_error': '印刷中にエラーが発生しました。', 'compress_adv_done': '高度なPDF圧縮が完了しました。', 'compress_adv_error': '高度なPDF圧縮中にエラーが発生しました。', 'compress_adv_permission_error': "Ghostscript のインストールには管理者権限が必要です。\n『インストールを実行』を選択して再起動後の案内に従ってください。", 'save_permission_error': '現在の場所に保存できません。他の場所に保存してください。', 'save_failed': 'ファイルを保存できませんでした。', 'saved': '保存済み', 'saved_as': '別名で保存済み',
-                'ghostscript_installing': 'ターミナルで Ghostscript をインストールしています... ({manager})',
-                'ghostscript_install_success': 'Ghostscript のインストールが完了しました。',
-                'ghostscript_install_failed': 'Ghostscript のインストールに失敗しました。',
-                'ghostscript_install_missing_pm': '自動インストールに対応するパッケージマネージャーが見つかりません。手動でインストールしてください。', 'ghostscript_install_missing_mac': "Homebrew が見つかりません。https://brew.sh で Homebrew をインストールし、ターミナルで『brew install ghostscript』を実行してください。",
-                'ghostscript_install_manual': '自動インストールが利用できないため、Ghostscript のダウンロードページを開きました。インストール後に再試行してください。',
-                'ghostscript_install_check_path': 'インストールは完了したようですが、実行ファイルを検出できませんでした。パスを手動で設定してください。',
-                'ghostscript_bundle_ready': '同梱の Ghostscript 実行ファイルを使用します。',
-                'ghostscript_program_files_missing': 'Windows の Program Files ディレクトリを確認できません。管理者権限で再起動してからもう一度お試しください。',
-                'ghostscript_local_installing': '同梱の Ghostscript を準備しています...',
-                'ghostscript_local_install_done': '同梱の Ghostscript を利用できるようにしました。',
-                'ghostscript_local_install_failed': '同梱の Ghostscript を準備できませんでした。',
-                'ghostscript_resume_title': 'Ghostscript の準備完了',
-                'ghostscript_resume_prompt': "Ghostscript のインストールが完了しました。\n前回の設定で高度な PDF 圧縮を続行しますか？\n\n出力ファイル: {output}\nカラー DPI: {dpi_color} / グレー DPI: {dpi_gray} / モノクロ DPI: {dpi_mono}\nテキスト/ベクター保持: {preserve_vector}",
-                'ghostscript_resume_failed': "Ghostscript のインストールに失敗しました。\n管理者権限で YongPDF を再起動してから再試行してください。\n\nエラー: {error}",
-                'ghostscript_install_notice': '高度な圧縮には Ghostscript が必要です。\n『インストールを実行』を選ぶと、アプリが管理者権限で再起動し、自動で Ghostscript を導入した後、ドキュメントと圧縮処理を再開します。\n続行しますか？',
-                'ghostscript_install_already': 'Ghostscript は既に利用可能です。',
-                'loading_app': 'YongPDF を準備しています...',
-                'loading_external_editor': '外部エディタを起動しています...',
-                'external_editor_ready': '外部エディタを起動しました。',
-                'external_editor_running': '外部エディタは既に実行中です。',
-                'external_editor_refresh_notice': '外部エディタでの保存を検知し、文書を再読み込みしました。',
-                'estimate_prefix': '推定サイズ', 'selected_dpi': '選択DPI', 'estimate_unavailable': '推定不可', 'current': '現在', 'color': 'カラー', 'gray': 'グレー', 'mono': 'モノ'
-            },
-            'zh-CN': {
-                'alert_no_pdf': '没有打开任何 PDF。', 'alert_no_edit_pdf': '没有可编辑的 PDF 被打开。', 'unsaved_changes': '存在未保存的更改，是否保存？', 'btn_yes': '是', 'btn_save_as': '另存为', 'btn_no': '否', 'btn_cancel': '取消',
-                'zoom_in': '➕ 放大', 'zoom_out': '➖ 缩小', 'theme_light': '☀️ 亮色', 'theme_dark': '🌙 暗色', 'theme_light_mode': '☀️ 亮色模式', 'theme_dark_mode': '🌙 暗色模式',
-                'status_page': '页面', 'status_zoom': '缩放', 'status_ready': '就绪', 'status_saving': '正在保存…', 'status_saved': '已保存。',
-                'status_reordering': '正在重新排序页面…', 'status_reordered': '页面已重新排序。', 'status_rotating': '正在旋转页面…', 'status_rotated': '页面已旋转。',
-                'status_printing': '正在准备打印…', 'status_print_done': '打印任务已发送。',
-                'status_compressing': '正在压缩…', 'status_compress_done': '压缩已完成。',
-                'error_title': '错误',
-                'status_patch_mode_on': '🩹 补丁模式已启用。', 'status_patch_mode_off': '🩹 补丁模式已关闭。',
-                'status_patch_eraser_on': '🧽 橡皮模式已启用。', 'status_patch_eraser_off': '🧽 橡皮模式已关闭。',
-                'progress_compress': '正在压缩 PDF...', 'progress_compress_adv': '正在执行高级 PDF 压缩...',
-                'progress_preparing_fonts': '正在为高级压缩准备字体...', 'progress_ensuring_fonts': '正在为第 {page} 页应用字体...',
-                'progress_applying_overlay': "正在为第 {page} 页应用覆盖层…“{text}”",
-                'file_menu': '文件', 'open': '📂 打开', 'save': '💾 保存', 'save_as': '📑 另存为', 'print': '🖨️ 打印', 'exit': '🚪 退出',
-                'page_menu': '页面', 'add_page': '🙏 添加页面', 'delete_page': '🗑️ 删除页面', 'cm_delete_selected': '🗑️ 删除所选页面', 'cm_save_selected': '💾 保存所选页面',
-                'move_up': '👆 上移', 'move_down': '👇 下移', 'rotate_left': '⤴️ 向左旋转', 'rotate_right': '⤵️ 向右旋转', 'view_menu': '视图', 'single_view': '📄 单页显示', 'dual_view': '📖 双页显示', 'fit_width': '↔️ 适应宽度', 'fit_height': '↕️ 适应高度', 
-                'support_menu': '❣️支持开发者❣️', 'donate_kakao': '通过 KakaoPay 支持', 'donate_paypal': '通过 PayPal 支持', 'donate_paypal_message': '请通过 <a href="https://www.paypal.com/paypalme/1hwangjinsu">https://www.paypal.com/paypalme/1hwangjinsu</a> 支持我们🙏 非常感谢❣️', 'donate_image_missing': '未能找到捐赠图片。', 'tools_menu': '工具', 'compress_pdf': '📦 压缩PDF',
-                'edit_menu': '编辑', 'undo': '↩️ 撤销', 'redo': '↪️ 重做', 'language_menu': '语言', 'korean': '韩文', 'english': '英文', 'help_menu': '帮助', 'licenses_menu': '📜 开源许可', 'licenses_title': '开源许可', 'usage_guide': '❓ 使用指南', 'about': 'ℹ️ 关于',
-                'prev': '👈 上一页', 'next': '👉 下一页', 'add_short': '🙏 添加', 'delete_short': '🗑️ 删除', 'move_up_short': '👆 上移', 'move_down_short': '👇 下移', 'rotate_left_short': '⤴️ 左旋转', 'rotate_right_short': '⤵️ 右旋转', 'edit_short': '✏️ 编辑',
-                'about_text': 'YongPDF\n开发者: Hwang Jinsu\n邮箱: iiish@hanmail.net\n许可: 免费软件\n频道: <a href="https://www.youtube.com/playlist?list=PLs36bSFfggCCUX31PYEH_SNgAmVc3dk_B">YongTools Studio</a>\n本软件可免费用于个人/工作用途。',
-                'info_compress': '请选择压缩模式。\n- 一般: 结构优化(无损)\n- 高级: 按DPI降采样图像', 'general_compress': '一般(无损, 结构优化)', 'advanced_compress': '高级(图像DPI调节)',
-                'color_dpi_label': '彩色图像 DPI (10级)', 'gray_dpi_label': '灰度图像 DPI', 'mono_dpi_label': '黑白图像 DPI', 'preserve_vector': '保留文本/矢量(仅处理图像)',
-                'ghostscript_config': '🛠️ 设置 Ghostscript 路径', 'ghostscript_prompt': '未安装 Ghostscript。现在安装吗？', 'ghostscript_select': '选择 Ghostscript 可执行文件', 'ghostscript_set': '已保存 Ghostscript 路径。', 'ghostscript_not_found': '找不到 Ghostscript 可执行文件。', 'ghostscript_install': '立即安装', 'ghostscript_install_proceed': '安装并继续', 'ghostscript_install_cancel': '取消', 'ghostscript_install_hint': '已打开 Ghostscript 下载页面。安装后请重试。', 'ghostscript_install_notice_mac': "在 macOS 上进行高级压缩需要 Ghostscript。\n点击“安装并继续”会通过 Homebrew 执行“brew install ghostscript”。\n如果尚未安装 Homebrew，请先访问 https://brew.sh。", 'print_error': '打印时发生错误。', 'compress_adv_done': '高级 PDF 压缩已完成。', 'compress_adv_error': '高级 PDF 压缩时发生错误。', 'compress_adv_permission_error': "Ghostscript 安装需要管理员授权。请选择'安装并继续'，按提示完成安装后压缩会自动继续。", 'save_permission_error': '无法写入当前位置。请另存到其他位置。', 'save_failed': '无法保存文件。', 'saved': '已保存', 'saved_as': '已另存为', 'err_editor_missing': '未找到 YongPDF_text（應用/可執行檔）。', 'err_editor_launch': '无法启动外部编辑器。',
-                'ghostscript_installing': '正在通过终端安装 Ghostscript...（{manager}）',
-                'ghostscript_install_success': 'Ghostscript 安装完成。',
-                'ghostscript_install_failed': 'Ghostscript 安装失败。',
-                'ghostscript_install_missing_pm': '未找到支持自动安装的包管理器，请手动安装 Ghostscript。', 'ghostscript_install_missing_mac': "未找到 Homebrew。请先在 https://brew.sh 安装 Homebrew，然后在终端执行“brew install ghostscript”。",
-                'ghostscript_install_manual': '无法自动安装，已打开 Ghostscript 下载页面。安装后请重试。',
-                'ghostscript_install_check_path': '安装似乎已完成，但未找到可执行文件。请手动指定路径。',
-                'ghostscript_bundle_ready': '已使用随附的 Ghostscript 可执行文件。',
-                'ghostscript_program_files_missing': '无法定位 Windows 的 Program Files 目录。请以管理员权限重新运行 YongPDF 后重试。',
-                'ghostscript_local_installing': '正在准备随附的 Ghostscript...',
-                'ghostscript_local_install_done': '已准备好使用随附的 Ghostscript。',
-                'ghostscript_local_install_failed': '随附的 Ghostscript 准备失败。',
-                'ghostscript_resume_title': 'Ghostscript 已就绪',
-                'ghostscript_resume_prompt': "Ghostscript 安装已完成。\n要使用之前的设置继续执行高级 PDF 压缩吗？\n\n输出文件: {output}\n彩色 DPI: {dpi_color} / 灰度 DPI: {dpi_gray} / 黑白 DPI: {dpi_mono}\n保留文本/矢量: {preserve_vector}",
-                'ghostscript_resume_failed': "Ghostscript 安装失败。\n请以管理员权限重新启动 YongPDF 后重试。\n\n错误: {error}",
-                'ghostscript_install_notice': "高级压缩需要 Ghostscript。\n点击'安装并继续'后，应用会以管理员权限重新启动，自动安装 Ghostscript，并重新打开文档继续压缩。\n现在执行吗？",
-                'ghostscript_install_already': 'Ghostscript 已可用，无需再次安装。',
-                'loading_app': '正在启动 YongPDF...',
-                'loading_external_editor': '正在启动外部编辑器...',
-                'external_editor_ready': '外部编辑器已启动。',
-                'external_editor_running': '外部编辑器已在运行。',
-                'external_editor_refresh_notice': '检测到外部编辑保存，已重新加载文档。',
-                'estimate_prefix': '预计大小', 'selected_dpi': '选择的DPI', 'estimate_unavailable': '无法估计', 'current': '当前', 'color': '彩色', 'gray': '灰度', 'mono': '黑白'
-            },
-            'zh-TW': {
-                'alert_no_pdf': '沒有開啟任何 PDF。', 'alert_no_edit_pdf': '尚未開啟可編輯的 PDF。', 'unsaved_changes': '有未儲存的變更，是否儲存？', 'btn_yes': '是', 'btn_save_as': '另存新檔', 'btn_no': '否', 'btn_cancel': '取消',
-                'zoom_in': '➕ 放大', 'zoom_out': '➖ 縮小', 'theme_light': '☀️ 亮色', 'theme_dark': '🌙 暗色', 'theme_light_mode': '☀️ 亮色模式', 'theme_dark_mode': '🌙 暗色模式',
-                'status_page': '頁面', 'status_zoom': '縮放', 'status_ready': '就緒', 'status_saving': '正在儲存…', 'status_saved': '已儲存。', 'status_reordering': '正在重新排序頁面…', 'status_reordered': '已重新排序頁面。', 'status_rotating': '正在旋轉頁面…', 'status_rotated': '頁面已旋轉。', 'status_printing': '正在準備列印…', 'status_print_done': '列印工作已送出。', 'status_compressing': '正在壓縮…', 'status_compress_done': '壓縮完成。', 'error_title': '錯誤',
-                'status_patch_mode_on': '🩹 補丁模式已啟用。', 'status_patch_mode_off': '🩹 補丁模式已停用。',
-                'status_patch_eraser_on': '🧽 橡皮模式已啟用。', 'status_patch_eraser_off': '🧽 橡皮模式已停用。',
-                'progress_compress': '正在壓縮 PDF...', 'progress_compress_adv': '正在執行進階 PDF 壓縮...',
-                'progress_preparing_fonts': '正在為進階壓縮準備字體...', 'progress_ensuring_fonts': '正在為第 {page} 頁套用字體...',
-                'progress_applying_overlay': "正在於第 {page} 頁套用覆蓋層…「{text}」",
-                'file_menu': '檔案', 'open': '📂 開啟', 'save': '💾 儲存', 'save_as': '📑 另存新檔', 'print': '🖨️ 列印', 'exit': '🚪 結束',
-                'page_menu': '頁面', 'add_page': '🙏 新增頁面', 'delete_page': '🗑️ 刪除頁面', 'cm_delete_selected': '🗑️ 刪除所選頁面', 'cm_save_selected': '💾 儲存所選頁面',
-                'move_up': '👆 上移', 'move_down': '👇 下移', 'rotate_left': '⤴️ 向左旋轉', 'rotate_right': '⤵️ 向右旋轉', 'view_menu': '檢視', 'single_view': '📄 單頁檢視', 'dual_view': '📖 雙頁檢視', 'fit_width': '↔️ 配合寬度', 'fit_height': '↕️ 配合高度', 
-                'support_menu': '❣️支持開發者❣️', 'donate_kakao': '以 KakaoPay 支援', 'donate_paypal': '以 PayPal 支援', 'donate_paypal_message': '請前往 <a href="https://www.paypal.com/paypalme/1hwangjinsu">https://www.paypal.com/paypalme/1hwangjinsu</a> 支援我們🙏 真心感謝❣️', 'donate_image_missing': '找不到支援用的圖片。', 'tools_menu': '工具', 'compress_pdf': '📦 壓縮PDF',
-                'edit_menu': '編輯', 'undo': '↩️ 復原', 'redo': '↪️ 取消復原', 'language_menu': '語言', 'korean': '韓文', 'english': '英文', 'help_menu': '說明', 'licenses_menu': '📜 開源授權', 'licenses_title': '開源授權', 'usage_guide': '❓ 使用指南', 'about': 'ℹ️ 關於',
-                'prev': '👈 上一頁', 'next': '👉 下一頁', 'add_short': '🙏 新增', 'delete_short': '🗑️ 刪除', 'move_up_short': '👆 上移', 'move_down_short': '👇 下移', 'rotate_left_short': '⤴️ 左旋轉', 'rotate_right_short': '⤵️ 右旋轉', 'edit_short': '✏️ 編輯',
-                'about_text': 'YongPDF\n開發者: Hwang Jinsu\n信箱: iiish@hanmail.net\n授權: 免費軟體\n頻道: <a href="https://www.youtube.com/playlist?list=PLs36bSFfggCCUX31PYEH_SNgAmVc3dk_B">YongTools Studio</a>\n本軟體可免費用於個人/商務。',
-                'info_compress': '請選擇壓縮模式。\n- 一般: 結構最佳化(無損)\n- 進階: 依DPI降採樣影像', 'general_compress': '一般(無損, 結構最佳化)', 'advanced_compress': '進階(影像DPI調整)',
-                'color_dpi_label': '彩色影像 DPI (10級)', 'gray_dpi_label': '灰階影像 DPI', 'mono_dpi_label': '黑白影像 DPI', 'preserve_vector': '保留文字/向量(僅處理影像)',
-                'ghostscript_config': '🛠️ 設定 Ghostscript 路徑', 'ghostscript_prompt': '尚未安裝 Ghostscript，要立即安裝嗎？', 'ghostscript_select': '選擇 Ghostscript 執行檔', 'ghostscript_set': '已儲存 Ghostscript 路徑。', 'ghostscript_not_found': '找不到 Ghostscript 執行檔。', 'ghostscript_install': '立即安裝', 'ghostscript_install_proceed': '安裝並繼續', 'ghostscript_install_cancel': '取消', 'ghostscript_install_hint': '已開啟 Ghostscript 下載頁面。安裝後請再試一次。', 'ghostscript_install_notice_mac': "在 macOS 上進行進階壓縮需要 Ghostscript。\n按下「安裝並繼續」會透過 Homebrew 執行「brew install ghostscript」。\n若尚未安裝 Homebrew，請先前往 https://brew.sh。", 'print_error': '列印時發生錯誤。', 'compress_adv_done': '進階 PDF 壓縮完成。', 'compress_adv_error': '進階 PDF 壓縮時發生錯誤。', 'compress_adv_permission_error': "Ghostscript 安裝需要管理員授權。請點選'安裝並繼續'，依照指示完成後會自動續行壓縮。", 'save_permission_error': '無法寫入目前位置。請另存到其他位置。', 'save_failed': '無法儲存檔案。', 'saved': '已儲存', 'saved_as': '已另存新檔', 'err_editor_missing': '找不到 YongPDF_text（應用/可執行檔）。', 'err_editor_launch': '無法啟動外部編輯器。',
-                'ghostscript_installing': '正在透過終端機安裝 Ghostscript...（{manager}）',
-                'ghostscript_install_success': 'Ghostscript 安裝完成。',
-                'ghostscript_install_failed': 'Ghostscript 安裝失敗。',
-                'ghostscript_install_missing_pm': '找不到支援自動安裝的套件管理器，請手動安裝 Ghostscript。', 'ghostscript_install_missing_mac': "找不到 Homebrew。請先在 https://brew.sh 安裝 Homebrew，然後在終端執行「brew install ghostscript」。",
-                'ghostscript_install_manual': '無法自動安裝，已開啟 Ghostscript 下載頁面。安裝後請再試一次。',
-                'ghostscript_install_check_path': '安裝似乎完成，但未找到執行檔。請手動指定路徑。',
-                'ghostscript_bundle_ready': '已使用隨附的 Ghostscript 可執行檔。',
-                'ghostscript_program_files_missing': '找不到 Windows 的 Program Files 目錄。請以系統管理員身分重新啟動 YongPDF 後再試一次。',
-                'ghostscript_local_installing': '正在準備內建的 Ghostscript...',
-                'ghostscript_local_install_done': '已可使用內建 Ghostscript。',
-                'ghostscript_local_install_failed': '無法準備內建 Ghostscript。',
-                'ghostscript_resume_title': 'Ghostscript 已就緒',
-                'ghostscript_resume_prompt': "Ghostscript 安裝完成。\n要以先前的設定繼續進行進階 PDF 壓縮嗎？\n\n輸出檔案: {output}\n彩色 DPI: {dpi_color} / 灰階 DPI: {dpi_gray} / 黑白 DPI: {dpi_mono}\n保留文字/向量: {preserve_vector}",
-                'ghostscript_resume_failed': "Ghostscript 安裝失敗。\n請以系統管理員身分重新啟動 YongPDF 後再試一次。\n\n錯誤: {error}",
-                'ghostscript_install_notice': "進階壓縮需要 Ghostscript。\n按下'安裝並繼續'後，應用會以管理員權限重新啟動，自動安裝 Ghostscript，並重新開啟文件繼續壓縮。\n要立即執行嗎？",
-                'ghostscript_install_already': 'Ghostscript 已可使用，無需再次安裝。',
-                'loading_app': '正在準備 YongPDF...',
-                'loading_external_editor': '正在啟動外部編輯器...',
-                'external_editor_ready': '外部編輯器已啟動。',
-                'external_editor_running': '外部編輯器已在執行。',
-                'external_editor_refresh_notice': '偵測到外部編輯儲存，已重新載入文件。',
-                'estimate_prefix': '預估大小', 'selected_dpi': '選擇的DPI', 'estimate_unavailable': '無法預估', 'current': '目前', 'color': '彩色', 'gray': '灰階', 'mono': '黑白'
-            }
-        }
+        # 최초 설치 시 또는 설정이 없을 때 기본 언어를 '한국어'로 고정
+        saved_lang = self.settings.value('language')
+        if not saved_lang:
+            self.language = 'ko'
+            self.settings.setValue('language', 'ko')
+        else:
+            self.language = str(saved_lang)
+            
+        self.translations = {}
+        
+        # Load all translations from JSON files in the i18n directory
+        try:
+            i18n_dir = _resolve_static_path('i18n')
+            if not os.path.isdir(i18n_dir):
+                i18n_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'i18n')
+                
+            if os.path.isdir(i18n_dir):
+                for filename in os.listdir(i18n_dir):
+                    if filename.endswith('.json'):
+                        lang_code = filename[:-5]
+                        try:
+                            file_path = os.path.join(i18n_dir, filename)
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                self.translations[lang_code] = json.load(f)
+                        except Exception as e:
+                            print(f"[i18n] Failed to load {filename}: {e}")
+            
+            if self.translations:
+                print(f"[i18n] Successfully loaded {len(self.translations)} languages: {', '.join(sorted(self.translations.keys()))}")
+            else:
+                print("[i18n] Warning: No translation files found in i18n directory.")
+            
+            # 현재 설정된 언어가 로드되지 않은 경우 한국어로 폴백
+            if self.language not in self.translations and 'ko' in self.translations:
+                self.language = 'ko'
+        except Exception as e:
+            print(f"[i18n] Error initializing languages: {e}")
 
     def t(self, key: str) -> str:
         return self.translations.get(self.language, {}).get(key, key)
 
     def set_language(self, lang: str):
-        if lang not in ('ko', 'en', 'ja', 'zh-CN', 'zh-TW'):
+        if lang not in self.translations:
             return
         self.language = lang
+        
+        # Apply layout direction for RTL languages
+        if lang in ('ar', 'fa', 'ur'):
+            QApplication.instance().setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        else:
+            QApplication.instance().setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+            
         try:
             self.settings.setValue('language', lang)
         except Exception:
@@ -1900,6 +1700,7 @@ class PDFEditor(QMainWindow):
         self.setWindowTitle(f"{self.app_name} - {title}" if title else self.app_name)
         # refresh statusbar text
         self.update_page_info()
+
 
     def reorder_pages(self, source_rows: list[int], dest_row: int):
         """페이지 순서를 재정렬하는 새로운 핵심 메서드."""
@@ -1943,7 +1744,7 @@ class PDFEditor(QMainWindow):
 
             if len(new_order) != len(initial_page_order):
                 print("[ERROR] Page count mismatch! Aborting to prevent data loss.")
-                QMessageBox.critical(self, "오류", "페이지 순서 변경 중 심각한 오류가 발생했습니다. 데이터 손상을 방지하기 위해 작업을 중단합니다.")
+                QMessageBox.critical(self, self.t('title_error'), self.t('err_page_reorder'))
                 self.show_status(self.t('status_ready'))
                 return
 
@@ -2018,13 +1819,24 @@ class PDFEditor(QMainWindow):
             total = self.pdf_document.page_count
             self.page_input.setText(str(current))
             self.total_pages_label.setText(f"/{total}")
-            self.status_page_label.setText(f"{self.t('status_page')}: {current} / {total}")
-            self.status_zoom_label.setText(f"{self.t('status_zoom')}: {int(self.zoom_level * 100)}%")
+            self.status_page_label.setText(f"{current} / {total}")
+            zoom_pct = int(self.zoom_level * 100)
+            self.status_zoom_label.setText(f"{self.t('status_zoom')}: {zoom_pct}%")
+            if hasattr(self, 'status_zoom_slider'):
+                self.status_zoom_slider.blockSignals(True)
+                self.status_zoom_slider.setValue(zoom_pct)
+                self.status_zoom_slider.setEnabled(True)
+                self.status_zoom_slider.blockSignals(False)
         else:
             self.page_input.setText("0")
             self.total_pages_label.setText("/0")
-            self.status_page_label.setText(f"{self.t('status_page')}: 0 / 0")
+            self.status_page_label.setText("0 / 0")
             self.status_zoom_label.setText(f"{self.t('status_zoom')}: -")
+            if hasattr(self, 'status_zoom_slider'):
+                self.status_zoom_slider.blockSignals(True)
+                self.status_zoom_slider.setValue(100)
+                self.status_zoom_slider.setEnabled(False)
+                self.status_zoom_slider.blockSignals(False)
 
     def _is_supported_source(self, path: str) -> bool:
         ext = os.path.splitext(path)[1].lower()
@@ -2382,7 +2194,7 @@ class PDFEditor(QMainWindow):
             self.update_page_info()
             self.mark_as_unsaved()
         except Exception as e:
-            QMessageBox.critical(self, "오류", f"복원 중 오류가 발생했습니다.\n{e}")
+            QMessageBox.critical(self, self.t('title_error'), f"{self.t('err_restore_failed')}\n{e}")
 
     def undo_action(self):
         if not self._undo_stack:
@@ -2394,7 +2206,7 @@ class PDFEditor(QMainWindow):
             data = self._undo_stack.pop()
             self._restore_from_bytes(data)
         except Exception as e:
-            QMessageBox.critical(self, "오류", f"실행 취소 중 오류가 발생했습니다.\n{e}")
+            QMessageBox.critical(self, self.t('title_error'), f"{self.t('err_undo_failed')}\n{e}")
 
     def redo_action(self):
         if not self._redo_stack:
@@ -2405,7 +2217,7 @@ class PDFEditor(QMainWindow):
             data = self._redo_stack.pop()
             self._restore_from_bytes(data)
         except Exception as e:
-            QMessageBox.critical(self, "오류", f"다시 실행 중 오류가 발생했습니다.\n{e}")
+            QMessageBox.critical(self, self.t('title_error'), f"{self.t('err_redo_failed')}\n{e}")
 
     def save_as_file(self):
         if not self.pdf_document: return
@@ -2583,66 +2395,161 @@ class PDFEditor(QMainWindow):
                 continue
         return os.getcwd()
 
-    def load_document_view(self):
-        # try to reuse cached pixmaps per (page, zoom)
+    def load_document_view(self, trigger_render=True):
+        """페이지 뷰어 영역을 초기화하고 자리표시자 라벨을 생성합니다. (지연 렌더링)"""
         self._suppress_scroll_sync = True
-        while self.document_layout.count():
-            child = self.document_layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
+        
+        # 1. 기존 위젯 및 레이아웃 아이템들을 철저히 제거
+        if hasattr(self, 'document_layout') and self.document_layout:
+            self.document_layout.setEnabled(False)
+            # 모든 자식 위젯을 안전하게 제거
+            for child in self.document_container.findChildren(QWidget):
+                if child is not self.document_container:
+                    child.hide()
+                    child.setParent(None)
+                    child.deleteLater()
+            
+            # 레이아웃 내부 모든 아이템 제거
+            while self.document_layout.count():
+                item = self.document_layout.takeAt(0)
+                if item.layout():
+                    # 중첩된 레이아웃이 있다면 내부까지 정리
+                    while item.layout().count():
+                        sub_item = item.layout().takeAt(0)
+                        if sub_item.widget():
+                            sub_item.widget().deleteLater()
+            self.document_layout.setEnabled(True)
+        
         self.page_labels.clear()
-        if not self.pdf_document: return
-        zoom_key = int(self.zoom_level * 1000)
-        current_row_widget: Optional[QWidget] = None
-        current_row_layout: Optional[QHBoxLayout] = None
+        if not self.pdf_document:
+            self._suppress_scroll_sync = False
+            return
+
+        is_dual = getattr(self, 'dual_page_view', False)
+        border_color = "#333" if self.settings.value('theme', 'dark') == 'dark' else "#999"
+
+        # 2. 모든 페이지에 대해 라벨 생성 및 배치 (그리드 방식)
         for page_num in range(self.pdf_document.page_count):
-            cache_key = (page_num, zoom_key)
-            pixmap = self._page_cache.get(cache_key)
-            if pixmap is None:
+            try:
                 page = self.pdf_document[page_num]
-                matrix = fitz.Matrix(self.zoom_level, self.zoom_level)
-                pix = page.get_pixmap(matrix=matrix, alpha=False, colorspace=fitz.csRGB)
-                fmt = QImage.Format.Format_RGBA8888 if pix.alpha else QImage.Format.Format_RGB888
-                img = QImage(pix.samples, pix.width, pix.height, pix.stride, fmt).copy()
-                pixmap = QPixmap.fromImage(img)
-                self._page_cache[cache_key] = pixmap
-            page_label = PDFPageLabel(self)
-            page_label.setPixmap(pixmap)
-            page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            page_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            self.page_labels.append(page_label)
-            if getattr(self, 'dual_page_view', False):
-                if page_num % 2 == 0:
-                    current_row_widget = QWidget()
-                    current_row_widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Preferred)
-                    current_row_layout = QHBoxLayout(current_row_widget)
-                    current_row_layout.setContentsMargins(10, 0, 10, 0)
-                    current_row_layout.setSpacing(30)
-                    current_row_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                if current_row_layout is not None:
-                    current_row_layout.addWidget(page_label, 0, Qt.AlignmentFlag.AlignCenter)
-                if (page_num % 2 == 1) or (page_num == self.pdf_document.page_count - 1):
-                    if current_row_widget is not None:
-                        self.document_layout.addWidget(current_row_widget, alignment=Qt.AlignmentFlag.AlignCenter)
-                    current_row_widget = None
-                    current_row_layout = None
-            else:
-                self.document_layout.addWidget(page_label, 0, Qt.AlignmentFlag.AlignHCenter)
+                w = int(page.rect.width * self.zoom_level)
+                h = int(page.rect.height * self.zoom_level)
+                
+                page_label = PDFPageLabel(self)
+                page_label.setFixedSize(w, h)
+                page_label.setStyleSheet(f"background-color: white; border: 1px solid {border_color};")
+                page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.page_labels.append(page_label)
+                
+                if is_dual:
+                    # 두쪽 보기: row, col 계산하여 그리드에 추가
+                    row = page_num // 2
+                    col = page_num % 2
+                    # 좌우 페이지가 서로 밀착되도록 정렬 (왼쪽 페이지는 우측 정렬, 오른쪽 페이지는 좌측 정렬)
+                    alignment = Qt.AlignmentFlag.AlignRight if col == 0 else Qt.AlignmentFlag.AlignLeft
+                    # 수직 방향으로는 중앙 정렬 유지
+                    alignment |= Qt.AlignmentFlag.AlignVCenter
+                    self.document_layout.addWidget(page_label, row, col, alignment)
+                else:
+                    # 한쪽 보기: row만 사용하여 수직 배치
+                    self.document_layout.addWidget(page_label, page_num, 0, Qt.AlignmentFlag.AlignCenter)
+                
+                page_label.show()
+            except Exception as e:
+                print(f"Error loading page {page_num}: {e}")
+
+        # 3. 상태 업데이트 및 렌더링 예약
         self.update_page_info()
-        if not getattr(self, '_suppress_scroll_sync', False):
-            self.thumbnail_widget.setCurrentRow(self.current_page)
-        self._suppress_scroll_sync = False
+        
+        if trigger_render:
+            self._suppress_scroll_sync = False
+            # 레이아웃 정착을 위해 충분한 시간 확보
+            QTimer.singleShot(250, self.render_visible_pages)
+
+    def render_visible_pages(self):
+        """현재 화면(viewport)에 보이는 페이지들만 고해상도로 렌더링합니다."""
+        if not self.pdf_document or not self.page_labels:
+            return
+            
+        # 재진입 방지 가드
+        if getattr(self, '_rendering_in_progress', False):
+            return
+        self._rendering_in_progress = True
+
+        try:
+            viewport = self.scroll_area.viewport()
+            v_width = viewport.width()
+            v_height = viewport.height()
+            
+            if v_width <= 1 or v_height <= 1:
+                self._rendering_in_progress = False
+                return
+                
+            # 가시 영역 결정
+            scroll_v = self.scroll_area.verticalScrollBar().value()
+            scroll_h = self.scroll_area.horizontalScrollBar().value()
+            view_rect = QRect(scroll_h, scroll_v, v_width, v_height)
+            
+            try:
+                origin = self.document_container.mapFrom(viewport, QPoint(0, 0))
+                if abs(origin.x()) < 10000 and abs(origin.y()) < 10000000:
+                    view_rect = QRect(origin, viewport.size())
+            except Exception:
+                pass
+                
+            zoom_key = int(self.zoom_level * 1000)
+            margin = int(v_height * 2.0)
+            extended_view_rect = view_rect.adjusted(0, -margin, 0, margin)
+
+            for i, label in enumerate(self.page_labels):
+                try:
+                    # 위젯이 유효하고 부모가 있는지 확인 (C++ 객체 삭제 체크)
+                    if not label or label.parent() is None:
+                        continue
+                        
+                    pos = label.mapTo(self.document_container, QPoint(0, 0))
+                    label_rect = QRect(pos, label.size())
+                    
+                    if label_rect.intersects(extended_view_rect):
+                        cache_key = (i, zoom_key)
+                        pixmap = self._page_cache.get(cache_key)
+                        
+                        if pixmap is None:
+                            page = self.pdf_document[i]
+                            matrix = fitz.Matrix(self.zoom_level, self.zoom_level)
+                            pix = page.get_pixmap(matrix=matrix, alpha=False, colorspace=fitz.csRGB)
+                            fmt = QImage.Format.Format_RGB888
+                            img = QImage(pix.samples, pix.width, pix.height, pix.stride, fmt).copy()
+                            pixmap = QPixmap.fromImage(img)
+                            self._page_cache[cache_key] = pixmap
+                        
+                        if not label.pixmap() or label.pixmap().cacheKey() != pixmap.cacheKey():
+                            label.setPixmap(pixmap)
+                except (RuntimeError, Exception):
+                    continue
+        finally:
+            self._rendering_in_progress = False
 
     def scroll_to_page(self, page_num):
         if 0 <= page_num < len(self.page_labels):
             self.current_page = page_num
-            self.scroll_area.ensureWidgetVisible(self.page_labels[page_num], 0, 0)
+            # 스크롤 이벤트에 의한 상호 피드백 루프 방지
+            old_suppress = self._suppress_scroll_sync
+            self._suppress_scroll_sync = True
+            try:
+                # 위젯이 유효한지 확인
+                target = self.page_labels[page_num]
+                if target and target.parent():
+                    self.scroll_area.ensureWidgetVisible(target, 0, 0)
+            finally:
+                self._suppress_scroll_sync = old_suppress
             self.update_page_info()
             try:
                 sel_model = self.thumbnail_widget.selectionModel()
                 index = self.thumbnail_widget.model().index(page_num, 0)
                 sel_model.setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
             except Exception:
+                pass
                 pass
 
     def load_thumbnails(self):
@@ -2986,15 +2893,33 @@ class PDFEditor(QMainWindow):
 
     def zoom_in(self):
         if self.pdf_document:
-            self._apply_zoom(min(5.0, self.zoom_level * 1.25))
+            # 현재 배율보다 큰 단계 중 가장 작은 값 선택
+            next_step = next((s for s in self.zoom_steps if s > self.zoom_level + 0.005), self.zoom_steps[-1])
+            self._apply_zoom(next_step)
 
     def zoom_out(self):
         if self.pdf_document:
-            self._apply_zoom(max(0.25, self.zoom_level / 1.25))
+            # 현재 배율보다 작은 단계 중 가장 큰 값 선택
+            prev_step = next((s for s in reversed(self.zoom_steps) if s < self.zoom_level - 0.005), self.zoom_steps[0])
+            self._apply_zoom(prev_step)
+
+    def _do_deferred_zoom(self):
+        """휠 이벤트 지연 처리를 통한 성능 개선"""
+        if self._target_zoom != self.zoom_level:
+            self._apply_zoom(self._target_zoom, self._zoom_anchor_page)
 
     def _apply_zoom(self, zoom: float, target_page: Optional[int] = None):
         target_page = self.current_page if target_page is None else max(0, min(target_page, self.pdf_document.page_count - 1))
-        self.zoom_level = max(0.1, min(5.0, zoom))
+        # 배율 범위를 zoom_steps의 최소/최대값으로 제한
+        self.zoom_level = max(self.zoom_steps[0], min(self.zoom_steps[-1], zoom))
+        self._target_zoom = self.zoom_level  # 동기화
+        
+        if hasattr(self, 'status_zoom_slider'):
+            self.status_zoom_slider.blockSignals(True)
+            self.status_zoom_slider.setValue(int(self.zoom_level * 100))
+            self.status_zoom_slider.blockSignals(False)
+        
+        # 렌더링 부하가 크므로 실제 변경이 있을 때만 로드
         self._page_cache.clear()
         self.load_document_view()
         QTimer.singleShot(0, lambda: self.scroll_to_page(target_page))
@@ -3040,9 +2965,33 @@ class PDFEditor(QMainWindow):
             self.single_page_action.setChecked(not dual)
         if hasattr(self, 'dual_page_action'):
             self.dual_page_action.setChecked(dual)
+            
         self._page_cache.clear()
-        self.load_document_view()
-        QTimer.singleShot(0, lambda: self.scroll_to_page(self.current_page))
+        self._suppress_scroll_sync = True
+        
+        # 뷰 재구성 (렌더링은 finalize_transition에서 처리)
+        self.load_document_view(trigger_render=False)
+        
+        def finalize_transition():
+            try:
+                # 1. 레이아웃 정착 및 스크롤 영역 갱신
+                QApplication.processEvents()
+                self.document_container.adjustSize()
+                self.scroll_area.updateGeometry()
+                
+                # 2. 동기화 가드 해제 및 현재 페이지 이동
+                self._suppress_scroll_sync = False
+                self.scroll_to_page(self.current_page)
+                
+                # 3. 가시 영역 렌더링 강제 실행
+                QApplication.processEvents()
+                self.render_visible_pages()
+            except Exception as e:
+                print(f"Error during view transition: {e}")
+                self._suppress_scroll_sync = False
+            
+        # 충분한 지연 시간을 두어 레이아웃 시스템이 안정화된 후 한 번에 처리
+        QTimer.singleShot(250, finalize_transition)
 
     def print_document(self):
         if not self.pdf_document:
@@ -4095,7 +4044,10 @@ class PDFEditor(QMainWindow):
             last_dir = str(self.settings.value('last_dir', os.getcwd())) if hasattr(self, 'settings') else os.getcwd()
             default_name = os.path.join(last_dir, "Untitled.pdf")
         
-        file_path, _ = QFileDialog.getSaveFileName(self, "💾 선택한 페이지 별도 저장", default_name, "PDF 파일 (*.pdf)")
+        pdf_filter = self.t('file_type_pdf')
+        if '(*.pdf)' not in pdf_filter:
+            pdf_filter = "PDF Files (*.pdf)"
+        file_path, _ = QFileDialog.getSaveFileName(self, self.t('dialog_save_selected'), default_name, pdf_filter)
         if file_path:
             new_doc = fitz.open()
             for page_index in sorted(page_indexes):
@@ -4127,7 +4079,13 @@ class PDFEditor(QMainWindow):
         try:
             resolved = self._resolve_external_editor_command(target_path)
             if not resolved:
-                QMessageBox.critical(self, self.app_name, self.t('err_editor_missing'))
+                msg_box = QMessageBox(self)
+                msg_box.setIcon(QMessageBox.Icon.Critical)
+                msg_box.setWindowTitle(self.app_name)
+                msg_box.setTextFormat(Qt.TextFormat.RichText)
+                msg_box.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+                msg_box.setText(self.t('err_editor_missing'))
+                msg_box.exec()
                 return
             program, arguments = resolved
 
@@ -4249,7 +4207,7 @@ class PDFEditor(QMainWindow):
             else:
                 self.statusBar().showMessage("외부 편집기 오류로 PDF를 다시 불러왔습니다.", 6000)
         else:
-            QMessageBox.warning(self, "경고", "외부 편집 후 PDF 파일을 찾을 수 없습니다.")
+            QMessageBox.warning(self, self.t('title_warning'), self.t('err_external_pdf_lost'))
             self._unload_document(preserve_current_file=False)
             self._disable_external_watch()
             self.setWindowTitle(previous_title)
@@ -4272,7 +4230,10 @@ class PDFEditor(QMainWindow):
                 suffix = f"C{settings.get('dpi_color','')}_G{settings.get('dpi_gray','')}_M{settings.get('dpi_mono','')}압축"
             default_output = f"{base}_{suffix}{ext}"
             
-            output_pdf, _ = QFileDialog.getSaveFileName(self, self.t('compress_pdf'), default_output, "PDF 파일 (*.pdf)")
+            pdf_filter = self.t('file_type_pdf')
+            if '(*.pdf)' not in pdf_filter:
+                pdf_filter = "PDF Files (*.pdf)"
+            output_pdf, _ = QFileDialog.getSaveFileName(self, self.t('compress_pdf'), default_output, pdf_filter)
             if not output_pdf: return
             
             if settings['level'] == 'general':
@@ -4361,11 +4322,11 @@ class PDFEditor(QMainWindow):
 
     def show_about_dialog(self):
         box = QMessageBox(self)
-        box.setWindowTitle(self.app_name)
+        box.setWindowTitle(self.t('app_info_title'))
         box.setTextFormat(Qt.TextFormat.RichText)
         box.setStandardButtons(QMessageBox.StandardButton.Ok)
         text_html = '<br>'.join(self.t('about_text').splitlines())
-        text_html += "<br/><br/><span style='font-size:11px;color:#606060'>© 2025 YongPDF · Hwang Jinsu. All rights reserved.</span>"
+        text_html += "<br/><br/><span style='font-size:11px;color:#606060'>© 2026 YongPDF · Hwang Jinsu. All rights reserved.</span>"
         box.setText(f"<div style='min-width:320px'>{text_html}</div>")
         pix = _load_static_pixmap('YongPDF_page_img.png')
         if pix:
@@ -4375,7 +4336,7 @@ class PDFEditor(QMainWindow):
 
     def show_licenses_dialog(self):
         dlg = QDialog(self)
-        dlg.setWindowTitle(self.t('licenses_title') if self.language!='en' else 'Open-Source Licenses')
+        dlg.setWindowTitle(self.t('licenses_title'))
         lay = QVBoxLayout(dlg)
         info = QTextEdit()
         info.setReadOnly(True)
@@ -4403,17 +4364,18 @@ class PDFEditor(QMainWindow):
                 "Distributed in compliance with their licenses.\n\n"
             )
         body = (
-            "PyMuPDF (MuPDF) — AGPL-3.0\n"
+            "YongPDF — GNU GPL v3.0\n"
+            "  https://github.com/HwangJinsu/YongPDF\n\n"
+            "--------------------------------------------------\n\n"
+            "PyMuPDF (MuPDF) — GNU GPL v3.0 / AGPL-3.0\n"
             "  https://pymupdf.readthedocs.io/ / https://mupdf.com/\n\n"
             "Pillow — HPND / PIL License\n"
             "  https://python-pillow.org/\n\n"
-            "PyQt6 — GPLv3 / Commercial\n"
-            "  https://www.riverbankcomputing.com/software/pyqt/\n\n"
-            "Ghostscript (optional) — AGPL-3.0 / Commercial\n"
+            "Ghostscript — GNU AGPL v3.0\n"
             "  https://ghostscript.com/\n\n"
-            "PySide6 (Qt for Python, external editor) — LGPL-3.0 / Commercial\n"
+            "PySide6 (Qt for Python) — GNU LGPL v3.0\n"
             "  https://www.qt.io/qt-for-python\n\n"
-            "fontTools (external editor) — MIT License\n"
+            "fontTools — MIT License\n"
             "  https://github.com/fonttools/fonttools\n\n"
             "Matplotlib (external editor) — PSF License\n"
             "  https://matplotlib.org/\n\n"
@@ -4552,11 +4514,24 @@ class PDFEditor(QMainWindow):
     def update_current_page_on_scroll(self, value):
         if self._suppress_scroll_sync or not self.page_labels:
             return
+        
+        # 스크롤 시 보이는 페이지 지연 렌더링
+        self.render_visible_pages()
+        
         viewport_height = self.scroll_area.viewport().height()
         scroll_center = value + viewport_height / 2
         
+        # 유효한 페이지 라벨(부모가 컨테이너인 것)만 대상으로 계산
+        valid_indices = [
+            i for i, lbl in enumerate(self.page_labels) 
+            if lbl and self.document_container.isAncestorOf(lbl)
+        ]
+        
+        if not valid_indices:
+            return
+            
         closest_page = min(
-            range(len(self.page_labels)),
+            valid_indices,
             key=lambda i: abs(
                 self.page_labels[i].mapTo(self.document_container, QPoint(0, 0)).y()
                 + self.page_labels[i].height() / 2 - scroll_center
@@ -4566,6 +4541,11 @@ class PDFEditor(QMainWindow):
         if self.current_page != closest_page:
             self.current_page = closest_page
             self.update_page_info()
+            
+            # 썸네일 선택 상태 동기화 중에는 스크롤 피드백 억제
+            old_suppress = self._suppress_scroll_sync
+            self._suppress_scroll_sync = True
+            
             sel_model = None
             index = None
             multi_selected = False
@@ -4599,6 +4579,7 @@ class PDFEditor(QMainWindow):
                     self.thumbnail_widget.blockSignals(False)
                 except Exception:
                     pass
+                self._suppress_scroll_sync = old_suppress
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

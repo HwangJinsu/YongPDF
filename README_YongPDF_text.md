@@ -53,10 +53,7 @@ YongPDF_text는 PDF 문서 내의 텍스트를 원본과 거의 이질감 없이
 ## 🌐 다국어 지원
 
 현재 다음 언어를 지원합니다:
-*   한국어 (Default)
-*   English
-*   日本語
-*   简体中文 / 繁體中文
+*   한국어, 영어, 일본어, 중국어(번체/간체), 독일어, 프랑스어, 이탈리아어, 스페인어, 포르투갈어, 스웨덴어, 핀란드어, 노르웨이어, 덴마크어, 러시아어, 폴란드어, 체코어, 루마니아어, 우크라이나어, 헝가리어, 불가리아어, 베트남어, 태국어, 힌디어, 아랍어, 페르시아어, 몽골어, 인도네시아어, 말레이시아어, 필리핀어(타갈로그어), 카자흐어, 우즈베크어, 벵골어, 우르두어, 튀르키예어
 
 ---
 
@@ -82,4 +79,4 @@ YongPDF_text는 PDF 문서 내의 텍스트를 원본과 거의 이질감 없이
 *   **Icons/Emojis** — as provided by system fonts.
 
 ---
-**Copyright © 2026 YongPDF · Hwang Jinsu. All rights reserved.**
+**Copyright © 2025 YongPDF · Hwang Jinsu. All rights reserved.**

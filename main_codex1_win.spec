@@ -17,6 +17,11 @@ static_datas = []
 if os.path.isdir(static_dir):
     static_datas.append((static_dir, 'static'))
 
+# i18n 폴더 추가
+i18n_dir = os.path.join(root_dir, 'i18n')
+if os.path.isdir(i18n_dir):
+    static_datas.append((i18n_dir, 'i18n'))
+
 brand_images = ['YongPDF_page_img.png', 'YongPDF_text_img.png', 'yongpdf_donation.jpg']
 for image_name in brand_images:
     image_path = os.path.join(assets_dir, image_name)

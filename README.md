@@ -1,163 +1,78 @@
-# 📄 YongPDF_page (PDF Page Editor)
+# 📄 YongPDF (Page & Text Editor)
 
-**YongPDF_page** is a professional tool designed for easy and intuitive management of PDF pages. Optimized for document structure editing—including reordering, rotating, adding, deleting, extracting, and compressing pages—it provides a seamless UI/UX through thumbnails, drag-and-drop, and right-click context menus.
-
----
-
-## ✨ Key Features
-
-### 1. Intuitive "Point & Click" Page Management
-*   **Thumbnail View**: View the entire document structure at a glance with flexible resizing (window and page sizes).
-*   **Drag-and-Drop Reordering**: Rearrange pages effortlessly by dragging thumbnails. (Supports adding new pages as well)
-*   **Multi-Selection Support**: Select multiple pages to delete, move, or rotate via the right-click menu.
-
-### 2. Essential Editing Tools
-*   **Delete Page**: Easily remove unnecessary pages.
-*   **Rotate Page**: Rotate pages 90 degrees left or right.
-*   **Add Page**: Insert external PDF files directly by dragging them into the desired position.
-*   **Save/Extract**: Select and save specific pages as a new, separate PDF file.
-
-### 3. Advanced Features
-*   **PDF Compression**: Powerful compression via Ghostscript (General structural optimization / Advanced DPI downsampling).
-*   **YongPDF_text Integration**: Launch **YongPDF_text** directly from the page view to edit text content.
-*   **Print Support**: Print your edited documents immediately from the app.
-
-### 4. User Convenience
-*   **Dark Mode**: Choose between a comfortable Dark theme and a clean Light theme.
-*   **Multi-Language Support**: Full support for Korean, English, Japanese, and Chinese (Simplified/Traditional).
-*   **Shortcut Support**: Optimize your workflow with comprehensive keyboard shortcuts.
+**YongPDF** is a comprehensive PDF utility suite providing professional page management and precision text editing tools. Distributed as a unified project, it includes two specialized applications: **YongPDF Page** and **YongPDF Text**.
 
 ---
 
-## 🚀 Installation & Execution
-
-*   **Single Package**: Run the standalone `YongPDF_page.exe` (or OS-specific binary) without any installation process.
-*   **Portable Execution**: Distributed as a single executable containing all necessary libraries.
-
----
-
-## ⌨️ Key Shortcuts
-
-| Feature | Shortcut |
-| :--- | :--- |
-| **Open PDF** | `Ctrl + O` |
-| **Save PDF** | `Ctrl + S` |
-| **Add Page** | `Insert` |
-| **Delete Page** | `Delete` |
-| **Move Up** | `Ctrl + Shift + ↑` |
-| **Move Down** | `Ctrl + Shift + ↓` |
-| **Rotate Left** | `Ctrl + Shift + ←` |
-| **Rotate Right** | `Ctrl + Shift + →` |
-| **Undo / Redo** | `Ctrl + Z` / `Ctrl + Y` |
-| **Zoom In / Out** | `Ctrl + +` / `Ctrl + -` |
+## 🚀 Download & Source Code
+*   **Official YouTube Channel**: [https://www.youtube.com/playlist?list=PLs36bSFfggCCUX31PYEH_SNgAmVc3dk_B]
+*   **Source Code**: [https://github.com/HwangJinsu/YongPDF](https://github.com/HwangJinsu/YongPDF)
+*   **Download Link**: [https://drive.google.com/drive/folders/1GpFHdEugZOXUEJn2kS6HUfM8oJQ4usIL?usp=sharing]
+*   **Distribution**: Freeware (Donation-based support)
 
 ---
 
-## 🌐 Multi-Language Support
-Currently supporting:
-*   English
-*   Korean (Default)
-*   Japanese
-*   Simplified Chinese / Traditional Chinese
+## 🛠️ Applications in the Suite
+
+### 1. 📄 YongPDF Page (PDF Page Editor)
+Professional tool for intuitive management of PDF page structures. Optimized for document structure editing with a seamless UI/UX through thumbnails and drag-and-drop.
+
+*   **Intuitive Page Management**:
+    *   **Thumbnail View**: View the entire document structure at a glance with flexible resizing.
+    *   **Drag-and-Drop**: Rearrange pages or add new PDF files effortlessly by dragging thumbnails.
+    *   **Multi-Selection**: Select multiple pages to delete, move, or rotate via the right-click context menu.
+*   **Essential Editing Tools**:
+    *   **Rotate & Delete**: Rotate pages 90° left/right or remove unnecessary pages instantly.
+    *   **Save/Extract**: Select specific pages and save them as a new, separate PDF file.
+*   **Advanced Features**:
+    *   **High-Performance Compression**: Powerful compression via Ghostscript (General/Advanced modes).
+    *   **System Integration**: Support for high-resolution printing and direct integration with YongPDF Text.
+    *   **User Experience**: Full Dark Mode support and comprehensive keyboard shortcuts.
+
+### 2. 📝 YongPDF Text (PDF Text Editor)
+Precision text editing tool specialized for "correction-tape" style modifications with zero disparity.
+
+*   **Smart Editing Experience**:
+    *   **Double-Click to Edit**: Instantly open the editor by double-clicking any text block.
+    *   **Property Auto-Detection**: Automatically detects original font, size, and color properties.
+    *   **Patch & Eraser Modes**: Match background colors perfectly to hide original text or add new overlays.
+*   **Professional Typography Control**:
+    *   **Fine-Tuning**: Adjust stretch (width) and tracking (kerning) similar to Hancom Office (HWP).
+    *   **Synthetic Bold**: Apply adjustable bold effects (100% to 500%) even if the font file lacks a bold variant.
+    *   **HWP Optimized**: Specialized correction for unique spacing found in HWP-converted PDFs.
+*   **High-Resolution Output**:
+    *   **600 DPI Flattening**: High-res rendering during PDF merge for crystal-clear print quality.
+    *   **Session Management**: Save work-in-progress layers as `.pdfses` files to resume editing later.
+    *   **Precision Positioning**: Move overlays pixel-by-pixel using keyboard arrow keys.
 
 ---
 
-## ❣️ Support the Developer
-If this program has helped you, please consider supporting the developer through the **[❣️Support the Developer❣️]** menu. Your contributions are vital for maintenance and future feature development.
+## ⚖️ License & Open Source Attribution
 
----
+YongPDF is open-source software distributed under the **GNU General Public License v3.0 (GPLv3)**.
 
-## ⚖️ Open Source Licenses
-This application utilizes the following open source projects:
+### Master License
+*   **Project License**: [GNU GPL v3.0](https://github.com/HwangJinsu/YongPDF/blob/main/LICENSE)
+*   **Copyright**: © 2025 Hwang Jinsu. All rights reserved.
 
-*   **PyMuPDF (MuPDF)**: AGPL-3.0
-    *   https://pymupdf.readthedocs.io/ / https://mupdf.com/
-*   **Pillow**: HPND / PIL License
-    *   https://python-pillow.org/
-*   **PyQt6**: GPLv3 / Commercial
-    *   https://www.riverbankcomputing.com/software/pyqt/
-*   **Ghostscript (optional)**: AGPL-3.0 / Commercial
-    *   https://ghostscript.com/
-*   **PySide6 (Qt for Python, external editor)**: LGPL-3.0 / Commercial
-    *   https://www.qt.io/qt-for-python
-*   **fontTools (external editor)**: MIT License
-    *   https://github.com/fonttools/fonttools
-*   **Matplotlib (external editor)**: PSF License
-    *   https://matplotlib.org/
-*   **Icons/Emojis**: as provided by system fonts.
+### Third-Party Components
+This project is built using the following high-quality open-source libraries:
 
----
-**Copyright © 2026 YongPDF · Hwang Jinsu. All rights reserved.**
-
----
-
-# 📄 YongPDF_text (PDF Text Editor)
-
-**YongPDF_text** is a professional PDF text editing tool that allows you to modify and reposition text with minimal disparity from the original. Specialized for PDFs converted from **Hancom Office (HWP)**, it provides seamless results through auto-detection of fonts/sizes and high-resolution flattening with background color matching.
-
----
-
-## ✨ Key Features
-
-### 1. Intuitive Usability
-*   **Easy "Double-Click" Editing**: Double-click any text block to open the editor immediately.
-*   **Property Auto-Detection**: Automatically detects and applies the original font and size. (Displays a guide if the font is missing).
-*   **Patch & Eraser Modes**: Draw text with a background patch or use "Eraser Mode" to hide original text using a color-matched patch.
-
-### 2. Advanced Editing Tools
-*   **Precise Typography**: Adjust stretch (width) and tracking (kerning) similar to HWP for perfect alignment.
-*   **Seamless Correction**: Like using "correction tape," it auto-detects background colors to create patches that blend perfectly with the original document.
-*   **High Zoom Support**: Zoom up to **800%** for pixel-perfect adjustments.
-*   **Session Management**: Save your work-in-progress layers as `.pdfses` files to resume editing later.
-
-### 3. Precision Editing Experience
-*   **Synthetic Bold Control**: Force-apply bold effects even when the font file lacks a bold variant (adjustable from 100% to 500% thickness).
-*   **HWP Space Correction**: Detects and corrects the unique wide spaces (50% of a character width) found in HWP-converted PDFs.
-*   **Micro-Positioning**: Fine-tune the position of selected text overlays using keyboard arrow keys.
-
-### 4. Full WYSIWYG & High-Res Storage
-*   **600 DPI Flattening**: Merges modifications into the PDF at 600 DPI for crystal-clear print quality.
-*   **Perfect Alignment**: Ensures that text position, thickness, and spacing on the screen exactly match the final PDF output.
-
----
-
-## 🚀 Installation & Execution
-
-*   **Single Package**: Run `YongPDF_text.exe` instantly without installation.
-*   **Portable**: A single executable containing all required dependencies.
-
----
-
-## ⌨️ Key Shortcuts
-
-| Feature | Shortcut |
-| :--- | :--- |
-| **Open PDF** | `Ctrl + O` |
-| **Save PDF** | `Ctrl + S` |
-| **Edit Text** | **Double-click** text block |
-| **Fine Tuning** | **Arrow keys** (on selected overlay) |
-| **Undo / Redo** | `Ctrl + Z` / `Ctrl + Y` |
-| **Zoom In / Out** | `Ctrl + +` / `Ctrl + -` (or `Ctrl + Scroll`) |
-| **Fit Width / Height** | `Ctrl + 0` / `Ctrl + Shift + 0` |
-
----
-
-## 🌐 Multi-Language Support
-Currently supporting English, Korean, Japanese, and Chinese (Simplified/Traditional).
+*   **PyMuPDF (fitz)**: [GNU GPL v3.0 / AGPL v3.0](https://mupdf.com/) - PDF rendering and modification engine.
+*   **Ghostscript**: [GNU AGPL v3.0](https://ghostscript.com/) - Used for high-quality PDF compression.
+*   **PySide6 (Qt for Python)**: [GNU LGPL v3.0](https://www.qt.io/qt-for-python) - GUI framework.
+*   **Pillow (PIL)**: [HPND License](https://python-pillow.org/) - Image processing.
+*   **fontTools**: [MIT License](https://github.com/fonttools/fonttools) - Font metadata extraction.
 
 ---
 
 ## ❣️ Support the Developer
-Contributions help us keep the project alive and improve features. Use the in-app donation menu to help out!
+YongPDF is distributed as **Freeware**. If this tool has saved you time or money, please consider supporting its development and maintenance through the **[Support the Developer]** menu within the apps.
 
 ---
 
-## ⚖️ Open Source Licenses
-*   **PyMuPDF (MuPDF)** — AGPL-3.0
-*   **PySide6 (Qt for Python)** — LGPL-3.0 / Commercial
-*   **fontTools** — MIT License
-*   **Matplotlib (font_manager)** — PSF License
-*   **Icons/Emojis** — provided by system fonts.
+## 🌐 Multi-Language Support
+Supports 35+ languages including Korean (Default), English, Japanese, Chinese, French, German, and more.
 
 ---
-**Copyright © 2026 YongPDF · Hwang Jinsu. All rights reserved.**
+**Copyright © 2025 YongPDF · Hwang Jinsu. [GitHub](https://github.com/HwangJinsu/YongPDF)**
