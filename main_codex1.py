@@ -414,6 +414,9 @@ class SystemFontManager:
         total_fonts_found = 0
         for full_path in all_font_files:
             try:
+                # [개선] 시스템 폰트 데이터베이스에 명시적 등록 (UI 렌더링 누락 방지)
+                QFontDatabase.addApplicationFont(full_path)
+                
                 font_names = self._get_all_names_from_font(full_path)
                 added_any = False
                 for name in font_names:
@@ -887,8 +890,14 @@ class TextEditorDialog(QDialog):
         # 원본 폰트 정보 표시 레이블
         self.create_original_font_info_section()
         
-        # 폰트 선택 (PDF 폰트를 상위에 배치)
-        self.font_combo = QFontComboBox()
+        # 폰트 선택 (PDF 폰트를 상위에 배치) - QFontComboBox 대신 검색 지원을 위해 QComboBox 사용
+        from PySide6.QtWidgets import QCompleter
+        self.font_combo = QComboBox()
+        self.font_combo.setEditable(True)
+        self.font_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.font_combo.completer().setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self.font_combo.completer().setFilterMode(Qt.MatchFlag.MatchContains)
+        
         font_manager = SystemFontManager()
 
         self.all_fonts_label = self._t('font_combo_all_fonts')
@@ -1259,7 +1268,7 @@ class TextEditorDialog(QDialog):
             val = float(value)
         except Exception:
             return 12.0
-        return round(val, 2)
+        return val
 
     def _on_patch_margin_changed(self):
         # _on_values_changed로 통합됨
@@ -1820,10 +1829,17 @@ class TextOverlay:
                     qfont.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 100.0 + float(self.tracking))
             except Exception: pass
             
-            # DPI 보정: 1 PDF 포인트 = 1/72 인치
-            dpi_y = painter.device().logicalDpiY() if painter.device() else 72
-            dpi_factor = 72.0 / dpi_y
-            qfont.setPointSizeF(effective_point_size * dpi_factor)
+            # [수정] 폰트 엔진의 정수 단위 반올림 강제 방지를 위한 10배 정밀 렌더링 전략
+            # Qt 폰트 엔진은 내부적으로 픽셀 단위로 크기를 맞추려는 경향이 있으므로,
+            # 폰트 크기를 10배로 키우고(setPixelSize) 페인터를 0.1배로 줄여 렌더링함으로써 소수점 정밀도를 강제 확보합니다.
+            
+            # [중요] 소수점 단위 폰트 크기 정밀 표현을 위한 전략 설정 (크기 설정 전에 적용)
+            qfont.setStyleStrategy(QFont.StyleStrategy.ForceOutline | QFont.StyleStrategy.PreferAntialias)
+            qfont.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+            
+            # 10배 확대된 픽셀 사이즈 설정 (1포인트 = 1픽셀인 scaled painter 환경 기준)
+            precision_multiplier = 10.0
+            qfont.setPixelSize(int(effective_point_size * precision_multiplier))
             
             # 3. 색상 설정
             if isinstance(self.color, int):
@@ -1843,6 +1859,7 @@ class TextOverlay:
             measure_font.setStretch(100)
             measure_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0)
             measure_font.setKerning(False)
+            measure_font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
             # 현재 painter 장치 컨텍스트를 반영하여 측정 (DPI 등 동기화)
             font_metrics_f = QFontMetricsF(measure_font, painter.device())
             
@@ -1874,13 +1891,18 @@ class TextOverlay:
                 painter.save()
                 # 글자 시작점을 원점으로 이동 후 가로 스케일 적용
                 painter.translate(x_pos, y_pos)
+                
+                # 10배 정밀 렌더링을 위해 페인터를 0.1배로 축소 (폰트의 10배 확대를 상쇄)
+                painter.scale(1.0 / precision_multiplier, 1.0 / precision_multiplier)
+                
                 if abs(stretch - 1.0) > 0.001:
                     painter.scale(stretch, 1.0)
                 
                 if total_bold_offset > 0.005:
-                    # 스케일된 공간에서의 오프셋 보정
-                    local_step = step_pt / stretch
-                    half_offset = (total_bold_offset / stretch) / 2.0
+                    # 스케일된 공간에서의 오프셋 보정 (10배 확대된 좌표계 기준)
+                    local_bold_offset = total_bold_offset * precision_multiplier
+                    local_step = step_pt * precision_multiplier / stretch
+                    half_offset = (local_bold_offset / stretch) / 2.0
                     curr_dx = -half_offset
                     max_iter = 200
                     while curr_dx <= half_offset and max_iter > 0:
@@ -1910,19 +1932,20 @@ class TextOverlay:
                     if is_hwp and abs(stretch - 1.0) < 0.001:
                         parts = re.split(r'( +)', line)
                         base_space_w = font_metrics_f.horizontalAdvance(' ')
-                        hwp_space_advance = base_space_w * 1.5 * t_ratio
+                        hwp_space_advance = (base_space_w * 1.5 * t_ratio) / precision_multiplier
                         for part in parts:
                             if not part: continue
                             if part.isspace():
                                 curr_x += hwp_space_advance * len(part)
                             else:
                                 _draw_text_item(curr_x, curr_y, part)
-                                curr_x += font_metrics_f.horizontalAdvance(part) * t_ratio
+                                curr_x += (font_metrics_f.horizontalAdvance(part) * t_ratio) / precision_multiplier
                     else:
                         for ch in line:
                             # 순수 글자 너비 측정 (측정용 폰트 사용)
                             ch_w = font_metrics_f.horizontalAdvance(ch)
-                            current_advance = ch_w * 1.5 if (ch == ' ' and is_hwp) else ch_w
+                            # 10배 정밀도 측정이므로 결과를 상쇄
+                            current_advance = (ch_w * 1.5 if (ch == ' ' and is_hwp) else ch_w) / precision_multiplier
                             
                             if ch.strip():
                                 _draw_text_item(curr_x, curr_y, ch)
@@ -1933,7 +1956,7 @@ class TextOverlay:
                     actual_width = (curr_x - text_x)
                 else:
                     _draw_text_item(text_x, curr_y, line)
-                    actual_width = font_metrics_f.horizontalAdvance(line)
+                    actual_width = font_metrics_f.horizontalAdvance(line) / precision_multiplier
                 
                 # 밑줄 처리
                 if self.flags & 4:
@@ -3026,7 +3049,7 @@ class PdfViewerWidget(QLabel):
                                 if span.get('size'): sizes.append(float(span['size']))
                                 if 'color' in span: colors.append(span['color'])
                 chosen_font = fonts and Counter(fonts).most_common(1)[0][0] or 'Arial'
-                chosen_size = sizes and round(sum(sizes)/len(sizes), 1) or 12.0
+                chosen_size = sizes and (sum(sizes)/len(sizes)) or 12.0
                 chosen_color = colors and Counter(colors).most_common(1)[0][0] or 0
             except Exception:
                 chosen_font, chosen_size, chosen_color = 'Arial', 12.0, 0
@@ -4147,20 +4170,23 @@ class MainWindow(QMainWindow):
                 except Exception:
                     family = None
             qfont = QFont(family or font_name or '')
-            try:
-                qfont.setPixelSize(1000)
-            except Exception:
-                qfont.setPointSizeF(1000.0)
+            # [수정] 픽셀 사이즈 기반 10000배 정밀도 측정 (DPI 독립적)
+            qfont.setPixelSize(10000)
+            qfont.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
             if flags & 16:
                 qfont.setBold(True)
             if flags & 2:
                 qfont.setItalic(True)
+            
+            # [추가] 정밀도 향상을 위한 전략 설정
+            qfont.setStyleStrategy(QFont.StyleStrategy.ForceOutline | QFont.StyleStrategy.PreferAntialias)
+            
             try:
                 qfont.setStretch(int(max(1, min(400, float(stretch) * 100))))
             except Exception:
                 pass
             metrics = QFontMetricsF(qfont)
-            denom = qfont.pixelSize() if qfont.pixelSize() > 0 else 1000.0
+            denom = 10000.0
             try:
                 height_ratio = metrics.height() / float(denom)
             except Exception:
@@ -4324,7 +4350,7 @@ class MainWindow(QMainWindow):
 
     def preview_edit_changes(self, overlay_key, new_values):
         """텍스트 편집창의 변경사항을 실시간으로 화면에 반영"""
-        print(f"[Preview] Key={overlay_key}, Values received (text='{new_values.get('text')}')")
+        print(f"[Preview] Key={overlay_key}, size={new_values.get('size')} (type: {type(new_values.get('size'))})")
         
         if not overlay_key or not self.pdf_viewer or not self.pdf_viewer.doc:
             print(f"[Preview] Early return: key={overlay_key}, viewer={bool(self.pdf_viewer)}")
@@ -4372,10 +4398,8 @@ class MainWindow(QMainWindow):
             self.apply_background_patch(page, overlay.original_bbox, new_values, overlay=overlay, preview=True)
             
             # 3. 화면 즉시 갱신 강제
-            from PySide6.QtWidgets import QApplication
-            self.pdf_viewer.repaint() # 즉각적인 repaint 사용
-            QApplication.processEvents()
-            print(f"[Preview] UI Update triggered successfully (repaint used)")
+            self.pdf_viewer.update() # 안전한 update 사용
+            print(f"[Preview] UI Update triggered successfully (update used)")
             
         except Exception as e:
             print(f"실시간 미리보기 업데이트 실패: {e}")
@@ -5803,9 +5827,11 @@ class MainWindow(QMainWindow):
             curr_y = baseline_y + li * line_height_pt
             curr_x = text_x
             t_ratio = 1.0 + (tracking_percent / 100.0)
+            # 10배 정밀도 측정이므로 결과 보정
+            precision_multiplier = 10.0
             
             for ch in line:
-                ch_w_raw = fm_measure.horizontalAdvance(ch)
+                ch_w_raw = fm_measure.horizontalAdvance(ch) / precision_multiplier
                 ch_w_stretched = ch_w_raw * stretch
                 advance = ch_w_stretched * 1.5 if (ch == ' ' and is_hwp) else ch_w_stretched
                 
@@ -5904,7 +5930,7 @@ class MainWindow(QMainWindow):
             stretch = float(getattr(ov, 'stretch', 1.0))
             
             # [정합성 극대화] UI와 동일한 너비 측정을 위해 QFontMetricsF 사용
-            # 72 DPI 환경 강제 (PDF 포인트 단위 일치)
+            # [수정] UI와 동일한 10배 정밀도 측정 전략 적용
             from PySide6.QtGui import QImage, QFont, QFontMetricsF
             dummy_device = QImage(1, 1, QImage.Format.Format_Mono)
             dpm_72 = int(72 / 0.0254)
@@ -5912,14 +5938,19 @@ class MainWindow(QMainWindow):
             dummy_device.setDotsPerMeterY(dpm_72)
             
             qfont_measure = QFont(selected_font_name)
-            qfont_measure.setPointSizeF(font_size)
+            precision_multiplier = 10.0
+            qfont_measure.setPixelSize(int(font_size * precision_multiplier))
+            qfont_measure.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
             qfont_measure.setKerning(False)
             qfont_measure.setStretch(100)
             qfont_measure.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0)
+            # [추가] 정밀도 향상을 위한 전략 설정
+            qfont_measure.setStyleStrategy(QFont.StyleStrategy.ForceOutline | QFont.StyleStrategy.PreferAntialias)
+            
             if ov.flags & 16: qfont_measure.setBold(True)
             if ov.flags & 2: qfont_measure.setItalic(True)
             
-            # 72 DPI 장치 컨텍스트에서 측정 (PDF 포인트와 1:1 매칭)
+            # 72 DPI 장치 컨텍스트에서 측정 (PDF 포인트와 1:1 매칭을 위해 precision_multiplier 고려 필요)
             fm_measure = QFontMetricsF(qfont_measure, dummy_device)
 
             # [스타일 판단: UI와 동일하게]
@@ -6570,7 +6601,11 @@ class MainWindow(QMainWindow):
                 dummy.setDotsPerMeterY(dpm_72)
                 
                 qf = QFont(selected_font_name)
-                qf.setPointSizeF(float(font_size))
+                # [수정] 10배 정밀도 측정 전략 적용
+                precision_multiplier = 10.0
+                qf.setPixelSize(int(float(font_size) * precision_multiplier))
+                qf.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+                qf.setStyleStrategy(QFont.StyleStrategy.ForceOutline | QFont.StyleStrategy.PreferAntialias)
                 qf.setKerning(False)
                 qf.setStretch(int(max(1, min(400, new_values.get('stretch', 1.0) * 100))))
                 if edit_flags & 16: qf.setBold(True)
@@ -6592,6 +6627,8 @@ class MainWindow(QMainWindow):
                         lw = fm.horizontalAdvance(line) * t_ratio
                     calc_max_w = max(calc_max_w, lw)
                 
+                # 결과값을 다시 10으로 나누어 원래 스케일로 복원
+                calc_max_w /= precision_multiplier
                 calc_h = len(lines_list) * (font_size * height_ratio)
                 
                 # [개선] 패치 모드(텍스트가 없던 영역에 새로 생성)에서만 Y축 중앙 배치 로직 적용
@@ -6890,6 +6927,7 @@ class MainWindow(QMainWindow):
 
     def on_text_selected(self, span):
         """텍스트 선택 시 편집창 실행 및 실시간 미리보기 지원"""
+        print(f"[Debug] on_text_selected span size: {span.get('size')} (type: {type(span.get('size'))})")
         # 1. 편집 전 상태 저장 (취소 시 복구용 - 반드시 선행 생성 전에 수행)
         if self.pdf_viewer.doc:
             self.undo_manager.save_state(self.pdf_viewer.doc, self.pdf_viewer)
@@ -6940,9 +6978,7 @@ class MainWindow(QMainWindow):
                     self.pdf_viewer.active_overlay = (page_num, overlay.z_index)
                     
                     # [중요] 모달 다이얼로그 진입 전 UI 강제 갱신
-                    self.pdf_viewer.repaint()
-                    from PySide6.QtWidgets import QApplication
-                    QApplication.processEvents()
+                    self.pdf_viewer.update()
                     
                     print(f"[Edit] Proactive overlay created and linked: ID {overlay.z_index}")
             except Exception as e_pre:
