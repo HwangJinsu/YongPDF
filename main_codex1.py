@@ -1748,15 +1748,26 @@ class TextOverlay:
         return max(0.5, min(1.8, ratio))
 
     def move_to(self, new_bbox):
-        """오버레이 위치 이동 (레이어 방식) - 단순 이동으로 원상복구"""
+        """오버레이 위치 이동 (레이어 방식) - 베이스라인(origin) 동시 이동으로 위치 고정"""
         # 이동 델타 계산
         dx = new_bbox.x0 - self.bbox.x0
         dy = new_bbox.y0 - self.bbox.y0
         
-        # bbox 업데이트
+        # 1) bbox 업데이트
         self.bbox = new_bbox
         
-        # content_bbox도 함께 이동
+        # 2) 베이스라인(origin) 동시 이동 (중요: 재진입 시 위치 회귀 방지)
+        if hasattr(self, 'origin') and self.origin:
+            try:
+                self.origin = (self.origin[0] + dx, self.origin[1] + dy)
+            except Exception:
+                pass
+                
+        # 3) 기준 영역(original_bbox)도 현재 위치로 동기화 (델타 계산 기준점 이동)
+        if hasattr(self, 'original_bbox') and self.original_bbox:
+            self.original_bbox = fitz.Rect(new_bbox)
+        
+        # 4) content_bbox도 함께 이동
         if hasattr(self, 'content_bbox') and self.content_bbox:
             c = self.content_bbox
             self.content_bbox = fitz.Rect(c.x0 + dx, c.y0 + dy, c.x1 + dx, c.y1 + dy)
@@ -1803,21 +1814,28 @@ class TextOverlay:
 
             # 스타일 및 정밀 크기 설정 (PDF 포인트 단위)
             is_bold_flag = bool(self.flags & 16)
+            synth_weight_val = float(getattr(self, 'synth_bold_weight', 120))
             loaded_name = (self._loaded_font_family or self.font or '').lower()
             has_bold_variant = any(kw in loaded_name for kw in ('bold', 'black', 'heavy'))
             
-            # 중요: 실제 폰트 자체가 볼드면(has_bold_variant) 추가 합성 볼드 적용 안함
-            # UI 프리뷰(render_to_painter)와 PDF 출력(_flatten_single_overlay) 로직 100% 일치시킴
+            # [고도화] OS 표준 가변 Weight 매핑 + 고밀도 서브픽셀 스메어링
+            # 1. 사용자의 볼드 설정(100~500%)을 시스템 Weight(400~1000)로 변환
+            # 2. 시스템 폰트 엔진의 알고리즘 볼드와 고밀도 수동 보정을 결합하여 '울퉁불퉁함' 완전 해결
             if is_bold_flag:
-                if has_bold_variant:
-                    # 이미 볼드체이므로 추가 합성 볼드 및 Qt Bold 설정 불필요
-                    qfont.setBold(False)
-                    self.synth_bold = False
-                else:
-                    # 일반체만 있으므로 합성 볼드 적용
-                    qfont.setBold(False)
-                    self.synth_bold = True
+                # 100%->400(Normal), 200%->700(Bold), 300%->900(Black)
+                q_weight_v = 400 + (synth_weight_val - 100) * 1.5
+                qfont.setWeight(QFont.Weight(min(1000, max(1, int(q_weight_v)))))
+                
+                # 실제 볼드 폰트 파일이 없는 경우 시스템 합성 볼드 활성화
+                if not has_bold_variant:
+                    qfont.setBold(True)
+                
+                # [핵심] 수동 고밀도 보정 (Jaggedness 제거용)
+                # 100배 정밀도 좌표계에서 극소 단위(0.01pt)로 촘촘하게 겹쳐 그려서
+                # OS 엔진의 알고리즘 볼드에서 발생하는 미세한 외곽선 불규칙성을 평활화합니다.
+                self.synth_bold = True 
             else:
+                qfont.setWeight(QFont.Weight.Normal)
                 qfont.setBold(False)
                 self.synth_bold = False
                 
@@ -1829,17 +1847,13 @@ class TextOverlay:
                     qfont.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 100.0 + float(self.tracking))
             except Exception: pass
             
-            # [수정] 폰트 엔진의 정수 단위 반올림 강제 방지를 위한 10배 정밀 렌더링 전략
-            # Qt 폰트 엔진은 내부적으로 픽셀 단위로 크기를 맞추려는 경향이 있으므로,
-            # 폰트 크기를 10배로 키우고(setPixelSize) 페인터를 0.1배로 줄여 렌더링함으로써 소수점 정밀도를 강제 확보합니다.
-            
-            # [중요] 소수점 단위 폰트 크기 정밀 표현을 위한 전략 설정 (크기 설정 전에 적용)
+            # [수정] 폰트 엔진의 정수 단위 반올림 방지를 위한 200배 정밀 렌더링 전략 (정밀도 상향)
             qfont.setStyleStrategy(QFont.StyleStrategy.ForceOutline | QFont.StyleStrategy.PreferAntialias)
             qfont.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
             
-            # 10배 확대된 픽셀 사이즈 설정 (1포인트 = 1픽셀인 scaled painter 환경 기준)
-            precision_multiplier = 10.0
-            qfont.setPixelSize(int(effective_point_size * precision_multiplier))
+            # 200배 확대된 픽셀 사이즈 설정 (1포인트 = 1픽셀인 scaled painter 환경 기준)
+            precision_multiplier = 200.0
+            qfont.setPixelSize(int(round(effective_point_size * precision_multiplier)))
             
             # 3. 색상 설정
             if isinstance(self.color, int):
@@ -1854,14 +1868,13 @@ class TextOverlay:
             qfont.setKerning(False)
             
             # 4. 정교한 렌더링 파라미터 (PDF 좌표계)
-            # 측정용 폰트 준비 (장평/자간이 적용되지 않은 순수 너비 측정용)
-            measure_font = QFont(qfont)
-            measure_font.setStretch(100)
-            measure_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0)
-            measure_font.setKerning(False)
-            measure_font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
-            # 현재 painter 장치 컨텍스트를 반영하여 측정 (DPI 등 동기화)
-            font_metrics_f = QFontMetricsF(measure_font, painter.device())
+            # [수정] UI와 플래튼 간 정합성을 위해 MainWindow의 표준 메트릭 도구 사용
+            mw = MainWindow._instance if hasattr(MainWindow, '_instance') else None
+            if mw:
+                font_metrics_f = mw._get_standard_metrics(qfont, precision_multiplier)
+            else:
+                # Fallback (단위 테스트 등 대비)
+                font_metrics_f = QFontMetricsF(qfont, painter.device())
             
             ascent_ratio = float(getattr(self, 'ascent_ratio', 0.85))
             height_ratio = float(getattr(self, 'height_ratio', 1.15))
@@ -1880,36 +1893,41 @@ class TextOverlay:
                 text_x = self.bbox.x0
                 
             line_height_pt = effective_point_size * height_ratio
-            synth_weight = float(getattr(self, 'synth_bold_weight', 120))
-            offset_factor = (synth_weight - 100.0) / 100.0 * 0.15
-            total_bold_offset = effective_point_size * offset_factor if self.synth_bold else 0.0
-            step_pt = 0.05
             
             stretch = float(getattr(self, 'stretch', 1.0))
 
             def _draw_text_item(x_pos, y_pos, txt):
                 painter.save()
-                # 글자 시작점을 원점으로 이동 후 가로 스케일 적용
-                painter.translate(x_pos, y_pos)
+                # [수정] 정수 반올림 오차 방지를 위해 QPointF와 floating-point translate 사용 (Y축 드리프트 해결)
+                painter.translate(QPointF(x_pos, y_pos))
                 
-                # 10배 정밀 렌더링을 위해 페인터를 0.1배로 축소 (폰트의 10배 확대를 상쇄)
+                # 200배 정밀 렌더링을 위해 페인터를 0.005배로 축소 (폰트의 200배 확대를 상쇄)
                 painter.scale(1.0 / precision_multiplier, 1.0 / precision_multiplier)
                 
                 if abs(stretch - 1.0) > 0.001:
                     painter.scale(stretch, 1.0)
                 
-                if total_bold_offset > 0.005:
-                    # 스케일된 공간에서의 오프셋 보정 (10배 확대된 좌표계 기준)
-                    local_bold_offset = total_bold_offset * precision_multiplier
-                    local_step = step_pt * precision_multiplier / stretch
-                    half_offset = (local_bold_offset / stretch) / 2.0
-                    curr_dx = -half_offset
-                    max_iter = 200
-                    while curr_dx <= half_offset and max_iter > 0:
-                        painter.drawText(QPointF(curr_dx, 0), txt)
-                        curr_dx += local_step
-                        max_iter -= 1
-                    painter.drawText(QPointF(half_offset, 0), txt)
+                if getattr(self, 'synth_bold', False):
+                    # [최종 고도화] 벡터 경로 기반 초고정밀 스무스 렌더링
+                    # 다중 렌더링의 안티앨리어싱 간섭을 제거하기 위해 텍스트를 벡터 경로로 변환하여 처리
+                    from PySide6.QtGui import QPainterPath
+                    path = QPainterPath()
+                    path.addText(0, 0, painter.font(), txt)
+                    
+                    # 1. 원본 채우기
+                    painter.fillPath(path, painter.pen().color())
+                    
+                    # 2. 벡터 외곽선 보정 (Smooth Stroke)
+                    # 사용자의 굵기 설정을 200배 정밀 공간에서의 스트로크 두께로 환산
+                    # 가변 Weight를 시스템 엔진이 1차 처리하고, 나머지를 벡터 스트로크가 평활화
+                    stroke_w = (synth_weight_val - 100.0) / 100.0 * effective_point_size * 0.033 * precision_multiplier
+                    
+                    if stroke_w > 0.1:
+                        bold_pen = QPen(painter.pen().color())
+                        bold_pen.setWidthF(stroke_w)
+                        bold_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin) # 획의 연결부를 둥글고 매끄럽게
+                        bold_pen.setCapStyle(Qt.PenCapStyle.RoundCap)   # 획의 끝부분 돌출 방지
+                        painter.strokePath(path, bold_pen)
                 else:
                     painter.drawText(QPointF(0, 0), txt)
                 painter.restore()
@@ -2211,6 +2229,14 @@ class PdfViewerWidget(QLabel):
         
         # 호버 상태 업데이트를 위해 마우스 위치 저장
         self.mouse_pos = current_pos
+
+    def leaveEvent(self, event):
+        """마우스가 위젯을 벗어날 때 호버 하이라이트 제거"""
+        if self.hover_rect:
+            self.hover_rect = None
+            self.hover_span_info = None
+            self.update()
+        super().leaveEvent(event)
     
     def mouseReleaseEvent(self, event):
         # 사각형 선택 모드 완료
@@ -2225,16 +2251,18 @@ class PdfViewerWidget(QLabel):
             # 드래그 관련 코드 제거됨
     
     def wheelEvent(self, event):
-        """휠 이벤트 처리 (Ctrl+휠로 줌) - 문제 4 해결"""
+        """휠 이벤트 처리 (Ctrl+휠로 줌) - 마우스 포인터 중심 확대 개선"""
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            # 줌 기능
             parent_window = self.window()
             if hasattr(parent_window, 'zoom_factor'):
                 delta = event.angleDelta().y()
+                # 마우스 포인터의 뷰포트 내 상대 좌표 계산
+                mouse_pos = event.position().toPoint()
+                
                 if delta > 0:
-                    parent_window.zoom_in()
+                    parent_window.zoom_in(mouse_pos)
                 else:
-                    parent_window.zoom_out()
+                    parent_window.zoom_out(mouse_pos)
             event.accept()
         else:
             if self.parent():
@@ -2309,11 +2337,11 @@ class PdfViewerWidget(QLabel):
             new_hover_rect = overlay_hover_rect if overlay_hover_rect else original_hover_rect
             new_hover_span_info = overlay_hover_span_info if overlay_hover_span_info else original_hover_span_info
             
-            # 호버 상태가 변경되었을 때만 업데이트
+            # 호버 상태가 변경되었을 때 또는 호버 중일 때 주기적 갱신
             if new_hover_rect != self.hover_rect:
                 self.hover_rect = new_hover_rect
                 self.hover_span_info = new_hover_span_info
-                self.update()  # 다시 그리기
+                self.update() # 상태 변화(해제 포함) 시 즉시 화면 갱신
                 
                 # 커서 변경 (Ctrl 키 상태에 따라)
                 if new_hover_rect:
@@ -2326,6 +2354,10 @@ class PdfViewerWidget(QLabel):
                         self.setCursor(Qt.CursorShape.CrossCursor)
                     else:
                         self.setCursor(Qt.CursorShape.ArrowCursor)
+            
+            # 호버 유지 중에도 주기적 update (애니메이션 등 반영)
+            elif self.hover_rect:
+                self.update()
                     
         except Exception:
             pass
@@ -2372,6 +2404,7 @@ class PdfViewerWidget(QLabel):
                             'color': ov.color,
                             'original_bbox': ov.original_bbox,
                             'current_bbox': ov.bbox,
+                            'origin': getattr(ov, 'origin', None),
                             'is_overlay': True,
                             'overlay_id': ov.z_index,
                             'page_num': self.current_page_num,
@@ -2911,8 +2944,16 @@ class PdfViewerWidget(QLabel):
                 self.move_overlay_to(overlay, new_bbox)
                 print(f"레이어 이동: '{overlay.text}' dx={dx}, dy={dy}")
                 
-                # 선택된 텍스트 정보 업데이트
+                # 선택된 텍스트 정보 업데이트 (bbox 및 origin 동기화)
                 self.selected_text_info['original_bbox'] = new_bbox
+                if 'origin' in self.selected_text_info and self.selected_text_info['origin']:
+                    try:
+                        old_origin = self.selected_text_info['origin']
+                        self.selected_text_info['origin'] = (old_origin[0] + dx, old_origin[1] + dy)
+                    except Exception:
+                        pass
+                elif hasattr(overlay, 'origin'):
+                    self.selected_text_info['origin'] = overlay.origin
                 
                 # 호버 상태 정보도 새 위치로 업데이트 (연속 방향키 이동을 위해 필수)
                 if self.hover_rect:
@@ -3071,7 +3112,8 @@ class PdfViewerWidget(QLabel):
                 'size': chosen_size,
                 'flags': 0,
                 'color': chosen_color,
-                'original_bbox': pdf_selection_rect
+                'original_bbox': pdf_selection_rect,
+                'page_num': self.current_page_num
             }
 
             patch_only_mode = getattr(main_window, 'patch_only_mode', False)
@@ -3151,10 +3193,59 @@ class PdfViewerWidget(QLabel):
                 self.update()
                 return
 
+            # [실시간 미리보기 핵심: 다이얼로그 열기 전 미리 오버레이 생성]
+            if self.doc and hasattr(main_window, 'undo_manager'):
+                main_window.undo_manager.save_state(self.doc, self)
+                print("[Patch Mode] Pre-edit state saved for Preview")
+
+            try:
+                # 초기 편집값 생성
+                if isinstance(chosen_color, int):
+                    qcolor = QColor((chosen_color >> 16) & 0xFF, (chosen_color >> 8) & 0xFF, chosen_color & 0xFF)
+                else:
+                    qcolor = QColor(0, 0, 0)
+                
+                initial_values = {
+                    'text': region_text,
+                    'font': chosen_font,
+                    'size': float(chosen_size),
+                    'color': qcolor,
+                    'bold': False,
+                    'italic': False,
+                    'underline': False,
+                    'stretch': 1.0,
+                    'tracking': 0.0,
+                    'synth_bold_weight': 120,
+                    'hwp_space_mode': getattr(main_window, 'is_hwp_doc', False),
+                    'patch_margin_l': 0.0, 'patch_margin_r': 0.0, 'patch_margin_t': 0.0, 'patch_margin_b': 0.0
+                }
+                
+                # 미리 오버레이 생성 (UI에 즉시 반영)
+                overlay = main_window.insert_overlay_text(page, span_info, initial_values)
+                if overlay:
+                    main_window.apply_background_patch(page, pdf_selection_rect, initial_values, overlay=overlay, preview=True)
+                    
+                    # [중요] 생성된 오버레이의 실제 정보를 span_info에 완벽히 동기화 (정합성 및 위치 보존 핵심)
+                    overlay_data = overlay.to_dict()
+                    span_info.update(overlay_data)
+                    span_info['origin'] = getattr(overlay, 'origin', None)
+                    span_info['is_overlay'] = True
+                    span_info['overlay_id'] = overlay.z_index
+                    span_info['page_num'] = self.current_page_num
+                    
+                    self.active_overlay = (self.current_page_num, overlay.z_index)
+                    self.update()
+                    print(f"[Patch Mode] Proactive overlay created: ID {overlay.z_index}")
+            except Exception as e_pre:
+                print(f"패치모드 미리보기 오버레이 생성 실패: {e_pre}")
+
             dialog = TextEditorDialog(span_info, getattr(main_window, 'pdf_fonts', None), main_window)
             if dialog.exec() != QDialog.DialogCode.Accepted:
-                # 편집 취소: 아무 것도 적용하지 않고 상태만 초기화
-                print("사각형 선택 편집 취소 - 배경 패치/오버레이 적용 안 함")
+                # 편집 취소: undo()를 통해 선행 생성된 오버레이와 패치 원복
+                print("사각형 선택 편집 취소 - 이전 상태로 복구")
+                if hasattr(main_window, 'undo'):
+                    main_window.undo()
+                
                 self.selection_rect = None
                 self.selection_mode = False
                 keep_enabled = getattr(main_window, 'patch_precise_mode', False)
@@ -3166,50 +3257,59 @@ class PdfViewerWidget(QLabel):
                 self.update()
                 return
 
-            # 편집 확정: 값 수집 및 사전 Undo 스냅샷
+            # 편집 확정: 값 수집 및 최종 반영
             new_values = dialog.get_values()
             print(f"사각형 선택 후 오버레이 값: {new_values}")
-            if hasattr(main_window, 'undo_manager') and self.doc:
-                main_window.undo_manager.save_state(self.doc, self)
-
-            # 1) 오버레이 생성 (레이어 방식)을 먼저 수행하여 최적화된 영역(new_bbox) 확보
-            overlay = None
+            
             try:
-                # insert_overlay_text 내부에서 new_bbox가 계산되고 span['original_bbox']가 업데이트됨
+                # 최종 확정: 오버레이와 패치 최종 갱신
                 overlay = main_window.insert_overlay_text(page, span_info, new_values)
-            except Exception as e:
-                print(f"경고 insert_overlay_text 실패, Fallback 시도: {e}")
-                overlay = main_window._insert_overlay_text_fallback(page, span_info, new_values)
-
-            # 2) 배경 패치 PDF 적용 + UI 등록 (최적화된 영역으로 생성)
-            # overlay.original_bbox는 insert_overlay_text에서 텍스트 크기에 맞춰 조정된 상태임
-            patch_target_rect = overlay.original_bbox if overlay else pdf_selection_rect
-            try:
-                patch_rect, patch_color = main_window.apply_background_patch(page, patch_target_rect, new_values, overlay=overlay, preview=False)
-            except Exception:
-                patch_rect, patch_color = (patch_target_rect, None)
-            print(f"OK 최적화 영역 배경 패치 적용 완료: {patch_rect}")
-
-            if overlay:
-                print(f"OK 새 텍스트 오버레이 생성 완료 (ID: {getattr(overlay, 'z_index', '?')})")
-                overlay_info = {
-                    'text': overlay.text,
-                    'font': overlay.font,
-                    'size': overlay.size,
-                    'flags': overlay.flags,
-                    'color': overlay.color,
-                    'original_bbox': overlay.original_bbox,
-                    'current_bbox': overlay.bbox,
-                    'is_overlay': True,
-                    'overlay_id': overlay.z_index,
-                    'page_num': self.current_page_num,
-                    'synth_bold_weight': getattr(overlay, 'synth_bold_weight', 120),
-                    'underline_weight': getattr(overlay, 'underline_weight', 0.6),
-                    'underline_offset': getattr(overlay, 'underline_offset', 1.5)
-                }
-                self.selected_text_info = overlay_info
-                self.active_overlay = (self.current_page_num, overlay.z_index)
+                main_window.apply_background_patch(page, span_info['original_bbox'], new_values, overlay=overlay, preview=True)
+                
+                # [UX 개선] 작업 완료 시에만 패치모드 자동 해제
+                if hasattr(main_window, 'set_patch_mode'):
+                    main_window.set_patch_mode(False)
+                
+                # 변경 완료 후 새로운 상태 저장
+                if hasattr(main_window, 'undo_manager'):
+                    main_window.undo_manager.save_state(self.doc, self)
+                if hasattr(main_window, 'mark_as_changed'):
+                    main_window.mark_as_changed()
+                if hasattr(main_window, 'update_undo_redo_buttons'):
+                    main_window.update_undo_redo_buttons()
+                
+                if overlay:
+                    overlay_info = {
+                        'text': overlay.text,
+                        'font': overlay.font,
+                        'size': overlay.size,
+                        'flags': overlay.flags,
+                        'color': overlay.color,
+                        'original_bbox': overlay.original_bbox,
+                        'current_bbox': overlay.bbox,
+                        'is_overlay': True,
+                        'overlay_id': overlay.z_index,
+                        'page_num': self.current_page_num,
+                        'synth_bold_weight': getattr(overlay, 'synth_bold_weight', 120),
+                        'underline_weight': getattr(overlay, 'underline_weight', 0.6),
+                        'underline_offset': getattr(overlay, 'underline_offset', 1.5)
+                    }
+                    self.selected_text_info = overlay_info
+                    self.active_overlay = (self.current_page_num, overlay.z_index)
+                
+                # UX 개선: 작업 완료 후 패치 모드 자동 비활성화
+                if hasattr(main_window, 'set_patch_mode'):
+                    main_window.set_patch_mode(False)
+                
                 self.update()
+            except Exception as e:
+                print(f"X 패치모드 최종 반영 실패: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            self.selection_mode = False
+            self.selection_rect = None
+            return
 
             # 변경 완료 후 상태 저장 및 표시
             if hasattr(main_window, 'undo_manager') and self.doc:
@@ -3728,6 +3828,7 @@ class PdfViewerWidget(QLabel):
                                 'color': ov.color,
                                 'original_bbox': ov.original_bbox,
                                 'current_bbox': ov.bbox,
+                                'origin': getattr(ov, 'origin', None),
                                 'is_overlay': True,
                                 'overlay_id': ov.z_index,
                                 'page_num': self.current_page_num,
@@ -3933,10 +4034,25 @@ class UndoRedoManager:
         viewer.update()
 
     def save_state(self, doc, viewer=None):
-        """현재 문서+오버레이 상태를 저장"""
+        """현재 문서+오버레이 상태를 저장 (성능 최적화: doc.tobytes() 호출 최소화)"""
         print(f"\n=== UndoManager.save_state() 호출 ===")
         if doc:
-            doc_bytes = doc.tobytes()
+            # [핵심 최적화] 메인 윈도우의 캐시를 확인하여 불필요한 직렬화(tobytes) 방지
+            mw = MainWindow._instance if hasattr(MainWindow, '_instance') else None
+            
+            doc_bytes = None
+            if mw and hasattr(mw, '_doc_modified_since_last_save'):
+                if not mw._doc_modified_since_last_save and mw._last_doc_bytes:
+                    doc_bytes = mw._last_doc_bytes
+                    print("   - [성능 최적화] 문서 내용 변경 없음, 캐시된 바이트 사용 (프리징 방지)")
+                else:
+                    doc_bytes = doc.tobytes()
+                    mw._last_doc_bytes = doc_bytes
+                    mw._doc_modified_since_last_save = False
+                    print("   - [정규 처리] 문서 변경 감지됨, doc.tobytes() 실행")
+            else:
+                doc_bytes = doc.tobytes()
+
             doc_pages = len(doc)
             overlays, patch_state = self._snapshot_view(viewer) if viewer else ({}, {})
             print(f"   - 저장할 문서 페이지 수: {doc_pages}")
@@ -3965,13 +4081,32 @@ class UndoRedoManager:
         print(f"   - undo_stack size: {len(self.undo_stack)}")
         print(f"   - redo_stack size: {len(self.redo_stack)}")
         if self.can_undo():
-            # 현재 상태를 redo로 백업
-            cur_bytes = current_doc.tobytes()
+            # 현재 상태를 redo로 백업 (성능 최적화: doc.tobytes() 호출 최소화)
+            mw = MainWindow._instance if hasattr(MainWindow, '_instance') else None
+            cur_bytes = None
+            if mw and hasattr(mw, '_doc_modified_since_last_save'):
+                if not mw._doc_modified_since_last_save and mw._last_doc_bytes:
+                    cur_bytes = mw._last_doc_bytes
+                    print("   - [성능 최적화] Undo 백업 시 캐시된 바이트 사용")
+                else:
+                    cur_bytes = current_doc.tobytes()
+                    mw._last_doc_bytes = cur_bytes
+                    mw._doc_modified_since_last_save = False
+            else:
+                cur_bytes = current_doc.tobytes()
+
             cur_overlays, cur_patches = self._snapshot_view(viewer) if viewer else ({}, {})
             self.redo_stack.append((cur_bytes, cur_overlays, cur_patches))
+            
             # undo pop and restore previous
             self.undo_stack.pop()
             prev_bytes, prev_overlays, prev_patches = self.undo_stack[-1]
+            
+            # [최적화] 복원 시 캐시 업데이트 (중요: 복원된 문서는 마지막 캐시와 동일함)
+            if mw:
+                mw._last_doc_bytes = prev_bytes
+                mw._doc_modified_since_last_save = False
+                
             restored_doc = fitz.open(stream=prev_bytes)
             if viewer:
                 self._restore_view(viewer, prev_overlays, prev_patches)
@@ -3986,11 +4121,30 @@ class UndoRedoManager:
         print(f"   - undo_stack size: {len(self.undo_stack)}")
         print(f"   - redo_stack size: {len(self.redo_stack)}")
         if self.can_redo():
-            # 현재 상태를 undo 스택에 푸시
-            cur_bytes = current_doc.tobytes()
+            # 현재 상태를 undo 스택에 푸시 (성능 최적화)
+            mw = MainWindow._instance if hasattr(MainWindow, '_instance') else None
+            cur_bytes = None
+            if mw and hasattr(mw, '_doc_modified_since_last_save'):
+                if not mw._doc_modified_since_last_save and mw._last_doc_bytes:
+                    cur_bytes = mw._last_doc_bytes
+                    print("   - [성능 최적화] Redo 백업 시 캐시된 바이트 사용")
+                else:
+                    cur_bytes = current_doc.tobytes()
+                    mw._last_doc_bytes = cur_bytes
+                    mw._doc_modified_since_last_save = False
+            else:
+                cur_bytes = current_doc.tobytes()
+
             cur_overlays, cur_patches = self._snapshot_view(viewer) if viewer else ({}, {})
             self.undo_stack.append((cur_bytes, cur_overlays, cur_patches))
+            
             next_bytes, next_overlays, next_patches = self.redo_stack.pop()
+            
+            # [최적화] 복원 시 캐시 업데이트
+            if mw:
+                mw._last_doc_bytes = next_bytes
+                mw._doc_modified_since_last_save = False
+                
             restored_doc = fitz.open(stream=next_bytes)
             if viewer:
                 self._restore_view(viewer, next_overlays, next_patches)
@@ -4025,6 +4179,8 @@ class MainWindow(QMainWindow):
         self.font_manager = SystemFontManager()
         self.undo_manager = UndoRedoManager()
         self.has_changes = False
+        self._last_doc_bytes = None  # [최적화] 마지막으로 추출한 PDF 데이터 캐시
+        self._doc_modified_since_last_save = True  # [최적화] 문서 변경 여부 추적
         self.current_file_path = None
         self.pdf_fonts = []
         self.force_text_flatten = False  # 텍스트 유지 정밀 플래튼 옵션
@@ -4403,8 +4559,6 @@ class MainWindow(QMainWindow):
             
         except Exception as e:
             print(f"실시간 미리보기 업데이트 실패: {e}")
-            import traceback
-            traceback.print_exc()
             import traceback
             traceback.print_exc()
 
@@ -5034,6 +5188,29 @@ class MainWindow(QMainWindow):
         self.has_changes = True
         self._refresh_window_title()
 
+    def mark_doc_modified(self):
+        """[성능 최적화] PDF 문서 본체가 수정되었음을 표시 (tobytes() 강제 실행용)"""
+        self._doc_modified_since_last_save = True
+        self.mark_as_changed()
+
+    def _get_standard_metrics(self, font, precision_multiplier=100.0):
+        """[정합성 핵심] UI와 플래튼 간 동일한 좌표를 보장하기 위해 고정 DPI(72)에서 메트릭 측정"""
+        from PySide6.QtGui import QImage, QFontMetricsF
+        dummy = QImage(1, 1, QImage.Format.Format_Mono)
+        # PDF 표준인 72 DPI로 고정하여 측정 장치 간 편차 제거
+        dpm_72 = int(72 / 0.0254)
+        dummy.setDotsPerMeterX(dpm_72)
+        dummy.setDotsPerMeterY(dpm_72)
+        
+        # 폰트 정규화 (힌팅 제거 및 정밀도 설정)
+        m_font = QFont(font)
+        m_font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+        m_font.setStyleStrategy(QFont.StyleStrategy.ForceOutline | QFont.StyleStrategy.PreferAntialias)
+        m_font.setKerning(False)
+        m_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0)
+        
+        return QFontMetricsF(m_font, dummy)
+
     def mark_as_saved(self):
         """저장됨 표시"""
         self.has_changes = False
@@ -5161,6 +5338,12 @@ class MainWindow(QMainWindow):
 
             # Undo/Redo 초기화
             self.undo_manager = UndoRedoManager()
+            
+            # [최적화] 대용량 PDF의 경우 tobytes()가 매우 느리므로 로딩 시점에 미리 캐싱
+            print("   - [성능 최적화] PDF 바이트 데이터 캐싱 중...")
+            self._last_doc_bytes = doc.tobytes()
+            self._doc_modified_since_last_save = False
+            
             self.undo_manager.save_state(doc, self.pdf_viewer)
             self.update_undo_redo_buttons()
 
@@ -5493,33 +5676,59 @@ class MainWindow(QMainWindow):
         self.render_page()
         self.update_page_navigation()
 
-    def zoom_in(self):
+    def zoom_in(self, mouse_pos=None):
         current = getattr(self, 'zoom_factor', 1.0)
         levels = getattr(self, 'zoom_levels', [1.0])
-        # 현재 배율보다 큰 단계 중 가장 작은 것을 선택
+        new_factor = levels[-1]
         for val in levels:
             if val > current + 0.001:
-                self.zoom_factor = val
+                new_factor = val
                 break
-        else:
-            self.zoom_factor = levels[-1]
-            
-        self.render_page()
-        self.update_zoom_label()
-        self._store_zoom_factor()
+        self._apply_zoom(new_factor, mouse_pos)
 
-    def zoom_out(self):
+    def zoom_out(self, mouse_pos=None):
         current = getattr(self, 'zoom_factor', 1.0)
         levels = getattr(self, 'zoom_levels', [1.0])
-        # 현재 배율보다 작은 단계 중 가장 큰 것을 선택
+        new_factor = levels[0]
         for val in reversed(levels):
             if val < current - 0.001:
-                self.zoom_factor = val
+                new_factor = val
                 break
-        else:
-            self.zoom_factor = levels[0]
+        self._apply_zoom(new_factor, mouse_pos)
+
+    def _apply_zoom(self, new_factor, mouse_pos=None):
+        """[UX 개선] 마우스 포인터를 중심으로 배율을 적용하고 스크롤 위치 조정"""
+        if abs(self.zoom_factor - new_factor) < 0.0001:
+            return
+
+        old_factor = self.zoom_factor
+        self.zoom_factor = new_factor
+        
+        # 스크롤 위치 조정 계산
+        if mouse_pos and hasattr(self, 'scroll_area'):
+            h_bar = self.scroll_area.horizontalScrollBar()
+            v_bar = self.scroll_area.verticalScrollBar()
             
-        self.render_page()
+            # 뷰포트 내 마우스 상대 좌표
+            rel_mouse_x = mouse_pos.x()
+            rel_mouse_y = mouse_pos.y()
+            
+            # 현재 전체 문서 상의 마우스 절대 좌표 (픽셀 단위)
+            abs_mouse_x = (h_bar.value() + rel_mouse_x) / old_factor
+            abs_mouse_y = (v_bar.value() + rel_mouse_y) / old_factor
+            
+            # 페이지 렌더링 (크기 변경됨)
+            self.render_page()
+            
+            # 새 배율에서의 마우스 절대 좌표 위치를 다시 뷰포트 중심에 맞춤
+            new_h = (abs_mouse_x * self.zoom_factor) - rel_mouse_x
+            new_v = (abs_mouse_y * self.zoom_factor) - rel_mouse_y
+            
+            h_bar.setValue(int(round(new_h)))
+            v_bar.setValue(int(round(new_v)))
+        else:
+            self.render_page()
+            
         self.update_zoom_label()
         self._store_zoom_factor()
     
@@ -5585,15 +5794,27 @@ class MainWindow(QMainWindow):
             from PySide6.QtGui import QImage, QPainter
             from PySide6.QtCore import QBuffer, QIODevice, Qt
             
-            bbox = ov.bbox if ov.bbox else ov.original_bbox
-            if bbox.width <= 0 or bbox.height <= 0:
+            # [핵심 개선] 클리핑 방지 전략: 현재 bbox(fitted) 기준 상하좌우 여유 공간 확보
+            # 볼드, 자간, 장평 조정으로 bbox를 미세하게 벗어나는 텍스트 영역을 모두 포함하도록 함
+            base_bbox = ov.bbox if (ov.bbox and ov.bbox.width > 0) else (ov.original_bbox if ov.original_bbox else fitz.Rect(0,0,1,1))
+            
+            # 폰트 크기의 50% 정도(최소 10pt) 여유 공간 추가
+            margin = max(10.0, ov.size * 0.5)
+            render_bbox = fitz.Rect(
+                base_bbox.x0 - margin,
+                base_bbox.y0 - margin,
+                base_bbox.x1 + margin,
+                base_bbox.y1 + margin
+            )
+            
+            if render_bbox.width <= 0 or render_bbox.height <= 0:
                 return False
                 
-            # 고해상도 렌더링 (600 DPI 요청 반영)
-            dpi = 600
+            # 초고해상도 렌더링 (1200 DPI 상향)
+            dpi = 1200
             render_scale = dpi / 72.0 
-            img_w = int(math.ceil(bbox.width * render_scale))
-            img_h = int(math.ceil(bbox.height * render_scale))
+            img_w = int(math.ceil(render_bbox.width * render_scale))
+            img_h = int(math.ceil(render_bbox.height * render_scale))
             
             if img_w <= 0 or img_h <= 0:
                 return False
@@ -5611,10 +5832,9 @@ class MainWindow(QMainWindow):
                 painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
                 painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
                 
-                # 고해상도 스케일 적용 후, 오버레이의 bbox 위치만큼 역이동하여
-                # 오버레이의 절대 좌표가 이미지의 (0,0)에 오도록 설정
+                # 확장된 render_bbox 기준으로 원점 이동 (0,0에서 그림 시작)
                 painter.scale(render_scale, render_scale)
-                painter.translate(-bbox.x0, -bbox.y0)
+                painter.translate(-render_bbox.x0, -render_bbox.y0)
                 
                 # 오버레이 렌더링 (절대 좌표 기반)
                 ov.render_to_painter(painter, scale_factor=1.0, offsets=(0, 0))
@@ -5627,8 +5847,9 @@ class MainWindow(QMainWindow):
             image.save(buffer, "PNG")
             img_data = bytes(buffer.data())
             
-            page.insert_image(bbox, stream=img_data)
-            print(f"    -> [Fallback] 오버레이 이미지 렌더링 완료(600 DPI): ID {ov.z_index} ('{ov.text[:10]}...')")
+            # PDF 페이지에도 확장된 영역(render_bbox)에 이미지 삽입하여 위치 정합성 유지
+            page.insert_image(render_bbox, stream=img_data)
+            print(f"    -> [Fallback] 오버레이 이미지 렌더링 완료(1200 DPI, Margin 적용): ID {ov.z_index} ('{ov.text[:10]}...')")
             return True
         except Exception as e:
             print(f"    -> [Critical] 이미지 폴백 실패: {e}")
@@ -5815,6 +6036,8 @@ class MainWindow(QMainWindow):
             except Exception as pe:
                 print(f"  X 페이지 {page_num} 플래튼 중 오류: {pe}")
 
+        # [최적화] 플래튼 작업은 문서를 직접 수정하므로 변경 플래그 세팅
+        self.mark_doc_modified()
         print("OK 모든 오버레이 플래튼 완료")
 
     def _do_insert_text(self, page, ov, font_ref, s_mat, font_args, baseline_y, text_x, line_height_pt, tracking_percent, stretch, fm_measure, is_hwp, need_synth_bold):
@@ -5827,8 +6050,8 @@ class MainWindow(QMainWindow):
             curr_y = baseline_y + li * line_height_pt
             curr_x = text_x
             t_ratio = 1.0 + (tracking_percent / 100.0)
-            # 10배 정밀도 측정이므로 결과 보정
-            precision_multiplier = 10.0
+            # 200배 정밀도 측정이므로 결과 보정
+            precision_multiplier = 200.0
             
             for ch in line:
                 ch_w_raw = fm_measure.horizontalAdvance(ch) / precision_multiplier
@@ -5838,16 +6061,20 @@ class MainWindow(QMainWindow):
                 if ch.strip():
                     if need_synth_bold:
                         synth_weight = float(getattr(ov, 'synth_bold_weight', 120))
-                        offset_factor = (synth_weight - 100.0) / 100.0 * 0.15
-                        total_bold_dx = font_size * offset_factor
-                        half_dx = total_bold_dx / 2.0
-                        step = 0.05
-                        sx = -half_dx
-                        while sx <= half_dx + 0.001:
-                            target_p = fitz.Point(curr_x + sx, curr_y)
-                            page.insert_text(target_p, ch, fontname=font_ref, 
-                                           morph=(target_p, s_mat), **font_args)
-                            sx += step
+                        # [고도화] PDF 표준 Stroke 방식 합성 볼드
+                        # 다중 렌더링 대신 외곽선(Stroke)을 추가하여 획의 불규칙한 돌출을 방지하고 매끄러운 마감 확보
+                        # 사용자의 가변 굵기(Weight) 설정을 정밀하게 반영
+                        stroke_w = (synth_weight - 100.0) / 100.0 * font_size * 0.02
+                        
+                        target_p = fitz.Point(curr_x, curr_y)
+                        page.insert_text(
+                            target_p, ch, 
+                            fontname=font_ref, 
+                            morph=(target_p, s_mat),
+                            render_mode=2, # Fill then Stroke
+                            border_width=stroke_w,
+                            **font_args
+                        )
                     else:
                         target_p = fitz.Point(curr_x, curr_y)
                         page.insert_text(target_p, ch, fontname=font_ref, 
@@ -5865,7 +6092,10 @@ class MainWindow(QMainWindow):
             return True
 
         # [치명적 결함 해결] 이미지 렌더링 강제 옵션 처리
-        if getattr(ov, 'force_image', False) and mode in ('all', 'text_only'):
+        # [추가] 볼드 처리된 경우 UI와 동일한 결과물을 위해 무조건 이미지 플래튼 수행 (Issue 1 해결)
+        is_bold = bool(ov.flags & 16)
+        if (getattr(ov, 'force_image', False) or is_bold) and mode in ('all', 'text_only'):
+            print(f"    -> 볼드/이미지강제 오버레이 이미지 플래튼 실행: ID {ov.z_index}")
             if self._flatten_overlay_as_image(page, ov):
                 ov.image_flattened = True
                 return True
@@ -5929,29 +6159,9 @@ class MainWindow(QMainWindow):
             tracking_percent = float(getattr(ov, 'tracking', 0.0))
             stretch = float(getattr(ov, 'stretch', 1.0))
             
-            # [정합성 극대화] UI와 동일한 너비 측정을 위해 QFontMetricsF 사용
-            # [수정] UI와 동일한 10배 정밀도 측정 전략 적용
-            from PySide6.QtGui import QImage, QFont, QFontMetricsF
-            dummy_device = QImage(1, 1, QImage.Format.Format_Mono)
-            dpm_72 = int(72 / 0.0254)
-            dummy_device.setDotsPerMeterX(dpm_72)
-            dummy_device.setDotsPerMeterY(dpm_72)
-            
-            qfont_measure = QFont(selected_font_name)
-            precision_multiplier = 10.0
-            qfont_measure.setPixelSize(int(font_size * precision_multiplier))
-            qfont_measure.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
-            qfont_measure.setKerning(False)
-            qfont_measure.setStretch(100)
-            qfont_measure.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0)
-            # [추가] 정밀도 향상을 위한 전략 설정
-            qfont_measure.setStyleStrategy(QFont.StyleStrategy.ForceOutline | QFont.StyleStrategy.PreferAntialias)
-            
-            if ov.flags & 16: qfont_measure.setBold(True)
-            if ov.flags & 2: qfont_measure.setItalic(True)
-            
-            # 72 DPI 장치 컨텍스트에서 측정 (PDF 포인트와 1:1 매칭을 위해 precision_multiplier 고려 필요)
-            fm_measure = QFontMetricsF(qfont_measure, dummy_device)
+            # [정합성 극대화] UI와 동일한 너비 측정을 위해 MainWindow 표준 메트릭 도구 사용
+            precision_multiplier = 200.0
+            fm_measure = self._get_standard_metrics(qfont_measure, precision_multiplier)
 
             # [스타일 판단: UI와 동일하게]
             is_bold_flag = bool(ov.flags & 16)
@@ -6183,6 +6393,10 @@ class MainWindow(QMainWindow):
 
     def apply_background_patch(self, page, original_bbox, new_values, overlay=None, preview=False):
         """각 텍스트 블록별 개별 배경 패치 적용"""
+        # [수정] 오버레이가 있다면 텍스트 크기에 맞춰진 최신 original_bbox를 우선 사용 (정합성 핵심)
+        if overlay and hasattr(overlay, 'original_bbox'):
+            original_bbox = overlay.original_bbox
+            
         # 입력된 bbox가 튜플일 경우 fitz.Rect로 변환 (AttributeError 방지)
         if isinstance(original_bbox, (tuple, list)):
             original_bbox = fitz.Rect(original_bbox)
@@ -6270,7 +6484,16 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
             else:
-                bg_color = self.get_precise_background_color(page, original_bbox)
+                # [최적화] 실시간 프리뷰 중에는 배경색 검출(Slow)을 생략하고 캐시된 색상 사용 (프리징 방지 핵심)
+                cached_bg = getattr(overlay, '_cached_bg_color', None) if overlay else None
+                if preview and cached_bg:
+                    bg_color = cached_bg
+                    print(f"    [Preview Cache] 캐시된 배경색 사용: {bg_color}")
+                else:
+                    bg_color = self.get_precise_background_color(page, original_bbox)
+                    if overlay:
+                        overlay._cached_bg_color = bg_color # 캐시 저장
+                
                 try:
                     self.last_use_custom_patch = False
                 except Exception:
@@ -6312,6 +6535,8 @@ class MainWindow(QMainWindow):
 
                 if not preview:
                     page.draw_rect(patch_rect, color=bg_color, fill=bg_color, width=0)
+                    if hasattr(self, 'mark_doc_modified'):
+                        self.mark_doc_modified()
 
                 if hasattr(self.pdf_viewer, 'add_background_patch'):
                     qcolor = QColor(int(bg_color[0] * 255), int(bg_color[1] * 255), int(bg_color[2] * 255))
@@ -6344,6 +6569,8 @@ class MainWindow(QMainWindow):
                 if not preview:
                     page.draw_rect(safe_rect, color=safe_color, fill=safe_color, width=0)
                     page.draw_rect(original_bbox, color=safe_color, fill=safe_color, width=0)
+                    if hasattr(self, 'mark_doc_modified'):
+                        self.mark_doc_modified()
 
                 overlay_id = getattr(overlay, 'z_index', None) if overlay else None
                 page_index = overlay.page_num if overlay else self.pdf_viewer.current_page_num
@@ -6545,13 +6772,17 @@ class MainWindow(QMainWindow):
             origin = span.get('origin')
             font_size_safe = max(0.5, float(font_size))
             
+            print(f"   [Debug Position] existing_overlay={bool(existing_overlay)}")
+            print(f"   [Debug Position] span.origin={origin}")
+            print(f"   [Debug Position] source_bbox={source_bbox}")
+            
             if existing_overlay:
                 # 기존 오버레이 편집 시: 기존에 설정된 메트릭 유지 (레이아웃 틀어짐 방지)
                 height_ratio = getattr(existing_overlay, 'height_ratio', 1.15)
                 ascent_ratio = getattr(existing_overlay, 'ascent_ratio', 0.85)
                 descent_ratio = getattr(existing_overlay, 'descent_ratio', 0.30)
                 preview_height_ratio = getattr(existing_overlay, 'preview_height_ratio', height_ratio)
-            elif origin:
+            elif origin and len(origin) >= 2:
                 # [중요] PDF에서 추출된 텍스트 스팬을 처음 편집할 때
                 # 1) 일반 텍스트 편집: 원본 PDF의 베이스라인 위치를 100% 보존해야 함
                 # 2) 단, 텍스트가 없는 사각형 선택(패치용)인 경우에만 폰트 메트릭으로 중앙 정렬
@@ -6601,9 +6832,9 @@ class MainWindow(QMainWindow):
                 dummy.setDotsPerMeterY(dpm_72)
                 
                 qf = QFont(selected_font_name)
-                # [수정] 10배 정밀도 측정 전략 적용
-                precision_multiplier = 10.0
-                qf.setPixelSize(int(float(font_size) * precision_multiplier))
+                # [수정] 200배 정밀도 측정 전략 적용 (렌더링과 동기화)
+                precision_multiplier = 200.0
+                qf.setPixelSize(int(round(float(font_size) * precision_multiplier)))
                 qf.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
                 qf.setStyleStrategy(QFont.StyleStrategy.ForceOutline | QFont.StyleStrategy.PreferAntialias)
                 qf.setKerning(False)
@@ -6627,7 +6858,7 @@ class MainWindow(QMainWindow):
                         lw = fm.horizontalAdvance(line) * t_ratio
                     calc_max_w = max(calc_max_w, lw)
                 
-                # 결과값을 다시 10으로 나누어 원래 스케일로 복원
+                # 결과값을 다시 100으로 나누어 원래 스케일로 복원
                 calc_max_w /= precision_multiplier
                 calc_h = len(lines_list) * (font_size * height_ratio)
                 
@@ -6643,22 +6874,24 @@ class MainWindow(QMainWindow):
                     origin = [source_bbox.x0, origin_y]
                     print(f"   [Vertical Center] 패치 영역 중앙 정렬 완료: baseline={origin_y:.1f}")
 
-                # [중요] 패치 크기 자동 맞춤 로직은 '신규 패치 생성(Patch Mode)' 시에만 적용
-                # 일반적인 더블클릭 편집은 사용자가 설정한 여백(Margin) 옵션이 작동해야 하므로 건너뜀
+                # [중요] 텍스트 크기에 맞춰 영역 자동 확장 (Clipping 방지 핵심)
+                # 이전에는 신규 패치 시에만 적용했으나, 일반 편집 시에도 텍스트가 커지면 영역을 늘려야 함
+                new_bbox = fitz.Rect(new_bbox.x0, target_y0, new_bbox.x0 + calc_max_w, target_y0 + calc_h)
+                
                 if not existing_overlay and not span.get('text'):
-                    # 새로운 bbox 설정 (텍스트 실제 크기에 1:1 맞춤)
-                    new_bbox = fitz.Rect(new_bbox.x0, target_y0, new_bbox.x0 + calc_max_w, target_y0 + calc_h)
-                    
-                    # [개선] 패치 영역(original_bbox)도 최종 텍스트 영역에 1:1 동기화
+                    # [개선] 신규 패치 영역(original_bbox)도 최종 텍스트 영역에 1:1 동기화
                     span['original_bbox'] = new_bbox 
                     
                     # 패치 생성 시 여백을 0으로 강제 (자동 맞춤 시에만)
                     for k in ['patch_margin_l', 'patch_margin_r', 'patch_margin_t', 'patch_margin_b']:
                         new_values[k] = 0.0
                     new_values['patch_margin'] = (0.0, 0.0, 0.0, 0.0)
-                    print(f"   [BBox Fit] 영역 동기화 완료: {new_bbox.width:.1f}x{new_bbox.height:.1f}")
+                    print(f"   [BBox Fit] 신규 패치 영역 동기화 완료: {new_bbox.width:.1f}x{new_bbox.height:.1f}")
                 else:
-                    print(f"   [Manual Margin] 일반 편집 모드 - 사용자 여백 설정을 유지합니다.")
+                    # 일반 편집 시에도 original_bbox를 업데이트하여 clipping 방지
+                    if existing_overlay:
+                        existing_overlay.original_bbox = fitz.Rect(new_bbox)
+                    print(f"   [Manual Margin] 일반 편집 모드 - 영역 확장 적용 ({new_bbox.width:.1f}x{new_bbox.height:.1f})")
             except Exception as e_size:
                 print(f"   경고: 텍스트 크기 계산 실패: {e_size}")
 
@@ -6818,6 +7051,9 @@ class MainWindow(QMainWindow):
             insert_point = fitz.Point(original_bbox.x0, original_bbox.y1 - 2)
             page.insert_text(insert_point, text_to_insert, **font_args)
             print(f"Fallback 텍스트 삽입: '{text_to_insert}'")
+            
+            if hasattr(self, 'mark_doc_modified'):
+                self.mark_doc_modified()
             
             return None
             
@@ -7017,6 +7253,11 @@ class MainWindow(QMainWindow):
                 self.undo_manager.save_state(self.pdf_viewer.doc, self.pdf_viewer)
                 self.mark_as_changed()
                 self.update_undo_redo_buttons()
+                
+                # UX 개선: 작업 완료 후 패치 모드 자동 비활성화
+                if hasattr(self, 'set_patch_mode'):
+                    self.set_patch_mode(False)
+                
                 self.pdf_viewer.update()
                 
             except Exception as e:
