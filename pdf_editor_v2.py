@@ -438,7 +438,7 @@ class ThumbnailWidget(QListWidget):
         if getattr(self.editor, '_suppress_scroll_sync', False):
             return
         selected_indexes = self.get_selected_indexes()
-        if len(selected_indexes) == 1:
+        if selected_indexes:
             self.editor.scroll_to_page(selected_indexes[0])
 
     def save_scroll_position(self):
@@ -2463,8 +2463,8 @@ class PDFEditor(QMainWindow):
         
         if trigger_render:
             self._suppress_scroll_sync = False
-            # 레이아웃 정착을 위해 충분한 시간 확보
-            QTimer.singleShot(250, self.render_visible_pages)
+            # 레이아웃 정착을 위해 약간의 시간만 확보 (50ms로 단축)
+            QTimer.singleShot(50, self.render_visible_pages)
 
     def render_visible_pages(self):
         """현재 화면(viewport)에 보이는 페이지들만 고해상도로 렌더링합니다."""
@@ -2500,10 +2500,12 @@ class PDFEditor(QMainWindow):
             zoom_key = int(self.zoom_level * 1000)
             margin = int(v_height * 2.0)
             extended_view_rect = view_rect.adjusted(0, -margin, 0, margin)
+            
+            is_dual = getattr(self, 'dual_page_view', False)
+            found_visible = False
 
             for i, label in enumerate(self.page_labels):
                 try:
-                    # 위젯이 유효하고 부모가 있는지 확인 (C++ 객체 삭제 체크)
                     if not label or label.parent() is None:
                         continue
                         
@@ -2511,6 +2513,7 @@ class PDFEditor(QMainWindow):
                     label_rect = QRect(pos, label.size())
                     
                     if label_rect.intersects(extended_view_rect):
+                        found_visible = True
                         cache_key = (i, zoom_key)
                         pixmap = self._page_cache.get(cache_key)
                         
@@ -2525,6 +2528,12 @@ class PDFEditor(QMainWindow):
                         
                         if not label.pixmap() or label.pixmap().cacheKey() != pixmap.cacheKey():
                             label.setPixmap(pixmap)
+                    elif found_visible:
+                        # 이미 가시 영역을 찾았고, 현재 라벨이 가시 영역 하단보다 아래에 있으면 중단
+                        if label_rect.top() > extended_view_rect.bottom():
+                            # 두쪽 보기의 경우 현재 행의 나머지 하나도 확인하기 위해 인덱스 체크
+                            if not is_dual or i % 2 == 1:
+                                break
                 except (RuntimeError, Exception):
                     continue
         finally:
@@ -2543,6 +2552,10 @@ class PDFEditor(QMainWindow):
                     self.scroll_area.ensureWidgetVisible(target, 0, 0)
             finally:
                 self._suppress_scroll_sync = old_suppress
+            
+            # 스크롤 후 즉시 가시 영역 렌더링 트리거
+            self.render_visible_pages()
+            
             self.update_page_info()
             try:
                 sel_model = self.thumbnail_widget.selectionModel()
