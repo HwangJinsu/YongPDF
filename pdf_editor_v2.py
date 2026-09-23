@@ -1716,7 +1716,7 @@ class PDFEditor(QMainWindow):
             # snapshot for undo
             if self.pdf_document:
                 try:
-                    self._undo_stack.append(self.pdf_document.tobytes(garbage=4, deflate=True))
+                    self._undo_stack.append(self.pdf_document.tobytes(garbage=0, deflate=False))
                     self._redo_stack.clear()
                 except Exception:
                     pass
@@ -2202,7 +2202,7 @@ class PDFEditor(QMainWindow):
         try:
             # push current state to redo, pop from undo
             if self.pdf_document:
-                self._redo_stack.append(self.pdf_document.tobytes(garbage=4, deflate=True))
+                self._redo_stack.append(self.pdf_document.tobytes(garbage=0, deflate=False))
             data = self._undo_stack.pop()
             self._restore_from_bytes(data)
         except Exception as e:
@@ -2213,7 +2213,7 @@ class PDFEditor(QMainWindow):
             return
         try:
             if self.pdf_document:
-                self._undo_stack.append(self.pdf_document.tobytes(garbage=4, deflate=True))
+                self._undo_stack.append(self.pdf_document.tobytes(garbage=0, deflate=False))
             data = self._redo_stack.pop()
             self._restore_from_bytes(data)
         except Exception as e:
@@ -2273,7 +2273,7 @@ class PDFEditor(QMainWindow):
         self.show_status(self.t('status_saved'))
 
     def _save_document_incremental(self, path: str) -> None:
-        self.pdf_document.save(path, incremental=False, deflate=True, garbage=4)
+        self.pdf_document.save(path, incremental=False, deflate=True, garbage=3)
 
     def _save_document_full_replace(self, path: str) -> None:
         base_dir = os.path.dirname(path) or os.getcwd()
@@ -2283,7 +2283,7 @@ class PDFEditor(QMainWindow):
         current_zoom = self.zoom_level
         scroll_value = self.scroll_area.verticalScrollBar().value() if self.scroll_area.verticalScrollBar() else 0
 
-        data = self.pdf_document.tobytes(garbage=4, deflate=True)
+        data = self.pdf_document.tobytes(garbage=3, deflate=True)
         tmp_path = os.path.join(base_dir, f".__yongpdf_tmp_{uuid.uuid4().hex}.pdf")
 
         with open(tmp_path, 'wb') as tmp_file:
@@ -2747,7 +2747,7 @@ class PDFEditor(QMainWindow):
         dest_index = max(0, min(dest_index, self.pdf_document.page_count))
 
         try:
-            self._undo_stack.append(self.pdf_document.tobytes(garbage=4, deflate=True))
+            self._undo_stack.append(self.pdf_document.tobytes(garbage=0, deflate=False))
             self._redo_stack.clear()
         except Exception:
             pass
@@ -2811,7 +2811,7 @@ class PDFEditor(QMainWindow):
         self._suppress_scroll_sync = True
         # snapshot for undo
         try:
-            self._undo_stack.append(self.pdf_document.tobytes(garbage=4, deflate=True))
+            self._undo_stack.append(self.pdf_document.tobytes(garbage=0, deflate=False))
             self._redo_stack.clear()
         except Exception:
             pass
@@ -2841,7 +2841,7 @@ class PDFEditor(QMainWindow):
         self._suppress_scroll_sync = True
         # snapshot for undo
         try:
-            self._undo_stack.append(self.pdf_document.tobytes(garbage=4, deflate=True))
+            self._undo_stack.append(self.pdf_document.tobytes(garbage=0, deflate=False))
             self._redo_stack.clear()
         except Exception:
             pass
