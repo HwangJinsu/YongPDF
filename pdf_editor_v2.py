@@ -638,22 +638,31 @@ class PDFPageLabel(QLabel):
         self.editor = editor
         self.setMouseTracking(True)
 
+    def mousePressEvent(self, event):
+        if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+            try:
+                page_idx = self.editor.page_labels.index(self)
+            except ValueError:
+                page_idx = self.editor.current_page
+            self.editor.select_page(page_idx)
+        super().mousePressEvent(event)
+
     def contextMenuEvent(self, event):
         # Determine this page index in the document view
         try:
             page_idx = self.editor.page_labels.index(self)
         except ValueError:
             page_idx = self.editor.current_page
-        self.editor.current_page = page_idx
+        self.editor.select_page(page_idx)
         t = self.editor.t if hasattr(self.editor, 't') else (lambda k: k)
-        menu = QMenu(self)
-        act_add = QAction(t('add_page'), self)
-        act_del = QAction(t('delete_page'), self)
-        act_up = QAction(t('move_up'), self)
-        act_down = QAction(t('move_down'), self)
-        act_rl = QAction(t('rotate_left'), self)
-        act_rr = QAction(t('rotate_right'), self)
-        act_save = QAction(t('cm_save_selected') if t('cm_save_selected') != 'cm_save_selected' else '💾 Save Selected Pages', self)
+        menu = QMenu(self.editor)
+        act_add = QAction(t('add_page'), menu)
+        act_del = QAction(t('delete_page'), menu)
+        act_up = QAction(t('move_up'), menu)
+        act_down = QAction(t('move_down'), menu)
+        act_rl = QAction(t('rotate_left'), menu)
+        act_rr = QAction(t('rotate_right'), menu)
+        act_save = QAction(t('cm_save_selected') if t('cm_save_selected') != 'cm_save_selected' else '💾 Save Selected Pages', menu)
         menu.addActions([act_add, act_del])
         menu.addSeparator()
         menu.addActions([act_up, act_down])
@@ -1112,14 +1121,6 @@ class PDFEditor(QMainWindow):
             # Use default argument in lambda to capture the current value of 'code'
             act.triggered.connect(lambda checked=False, c=code: self.set_language(c))
             lang_menu.addAction(act)
-
-        #후원 메뉴(카카오페이, 페이팔)
-        support_menu = menubar.addMenu(self.t('support_menu'))
-        donate_kakao_action = QAction(self.t('donate_kakao'), self)
-        donate_kakao_action.triggered.connect(self.show_kakao_donation_dialog)
-        donate_paypal_action = QAction(self.t('donate_paypal'), self)
-        donate_paypal_action.triggered.connect(self.show_paypal_donation_dialog)
-        support_menu.addActions([donate_kakao_action, donate_paypal_action])
 
         #도움말 메뉴(정보, 라이선스)
         help_menu = menubar.addMenu(self.t('help_menu'))
@@ -1612,6 +1613,10 @@ class PDFEditor(QMainWindow):
             app.setStyleSheet(self._get_dark_theme_stylesheet())
         else:  # 'light'
             app.setStyleSheet(self._get_light_theme_stylesheet())
+        border_color = "#333" if theme == 'dark' else "#999"
+        for lbl in getattr(self, 'page_labels', []):
+            if lbl:
+                lbl.setStyleSheet(f"PDFPageLabel {{ background-color: white; border: 1px solid {border_color}; }}")
         # Persist theme and keep actions in sync
         if hasattr(self, 'settings'):
             self.settings.setValue('theme', theme)
@@ -2437,7 +2442,7 @@ class PDFEditor(QMainWindow):
                 
                 page_label = PDFPageLabel(self)
                 page_label.setFixedSize(w, h)
-                page_label.setStyleSheet(f"background-color: white; border: 1px solid {border_color};")
+                page_label.setStyleSheet(f"PDFPageLabel {{ background-color: white; border: 1px solid {border_color}; }}")
                 page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.page_labels.append(page_label)
                 
@@ -2539,6 +2544,29 @@ class PDFEditor(QMainWindow):
         finally:
             self._rendering_in_progress = False
 
+    def select_page(self, page_num: int):
+        """페이지 뷰어 또는 외부에서 특정 페이지를 선택했을 때 상태와 위젯뷰어(썸네일)를 동기화합니다."""
+        if not self.pdf_document or not (0 <= page_num < self.pdf_document.page_count):
+            return
+        self.current_page = page_num
+        self.update_page_info()
+        old_suppress = getattr(self, '_suppress_scroll_sync', False)
+        self._suppress_scroll_sync = True
+        try:
+            self.thumbnail_widget.clearSelection()
+            self.thumbnail_widget.setCurrentRow(
+                page_num,
+                QItemSelectionModel.SelectionFlag.ClearAndSelect
+            )
+            item = self.thumbnail_widget.item(page_num)
+            if item:
+                self.thumbnail_widget.scrollToItem(item, QListWidget.ScrollHint.EnsureVisible)
+            self.thumbnail_widget.viewport().update()
+        except Exception:
+            pass
+        finally:
+            self._suppress_scroll_sync = old_suppress
+
     def scroll_to_page(self, page_num):
         if 0 <= page_num < len(self.page_labels):
             self.current_page = page_num
@@ -2559,10 +2587,14 @@ class PDFEditor(QMainWindow):
             self.update_page_info()
             try:
                 sel_model = self.thumbnail_widget.selectionModel()
-                index = self.thumbnail_widget.model().index(page_num, 0)
-                sel_model.setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
+                if sel_model:
+                    index = self.thumbnail_widget.model().index(page_num, 0)
+                    if index.isValid():
+                        sel_model.setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
+                item = self.thumbnail_widget.item(page_num)
+                if item:
+                    self.thumbnail_widget.scrollToItem(item, QListWidget.ScrollHint.EnsureVisible)
             except Exception:
-                pass
                 pass
 
     def load_thumbnails(self):
@@ -4272,67 +4304,6 @@ class PDFEditor(QMainWindow):
                     preserve_vector=settings.get('preserve_vector', True)
                 )
 
-    def show_kakao_donation_dialog(self):
-        path_candidates: list[str] = []
-        try:
-            path_candidates.append(_resolve_static_path('yongpdf_donation.jpg'))
-        except Exception:
-            pass
-        try:
-            module_dir = os.path.dirname(os.path.abspath(__file__))
-            path_candidates.append(os.path.join(module_dir, 'yongpdf_donation.jpg'))
-        except Exception:
-            pass
-
-        selected_path = None
-        seen: set[str] = set()
-        for candidate in path_candidates:
-            if not candidate or candidate in seen:
-                continue
-            seen.add(candidate)
-            if os.path.exists(candidate):
-                selected_path = candidate
-                break
-
-        if not selected_path:
-            QMessageBox.warning(self, self.app_name, self.t('donate_image_missing'))
-            return
-
-        pixmap = QPixmap(selected_path)
-        if pixmap.isNull():
-            QMessageBox.warning(self, self.app_name, self.t('donate_image_missing'))
-            return
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle(self.t('donate_kakao'))
-        layout = QVBoxLayout(dialog)
-        image_label = QLabel(dialog)
-        image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        max_width = 480
-        if pixmap.width() > max_width:
-            scaled = pixmap.scaledToWidth(max_width, Qt.TransformationMode.SmoothTransformation)
-        else:
-            scaled = pixmap
-        image_label.setPixmap(scaled)
-        layout.addWidget(image_label)
-
-        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
-        button_box.accepted.connect(dialog.accept)
-        layout.addWidget(button_box)
-        dialog.setModal(True)
-        dialog.resize(scaled.width() + 40, scaled.height() + 80)
-        dialog.exec()
-
-    def show_paypal_donation_dialog(self):
-        msg_box = QMessageBox(self)
-        msg_box.setIcon(QMessageBox.Icon.Information)
-        msg_box.setWindowTitle(self.t('donate_paypal'))
-        msg_box.setTextFormat(Qt.TextFormat.RichText)
-        msg_box.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
-        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
-        msg_box.setText(self.t('donate_paypal_message'))
-        msg_box.exec()
-
     def show_about_dialog(self):
         box = QMessageBox(self)
         box.setWindowTitle(self.t('app_info_title'))
@@ -4573,6 +4544,7 @@ class PDFEditor(QMainWindow):
                 self.thumbnail_widget.blockSignals(True)
                 if not multi_selected:
                     try:
+                        self.thumbnail_widget.clearSelection()
                         self.thumbnail_widget.setCurrentRow(
                             self.current_page,
                             QItemSelectionModel.SelectionFlag.ClearAndSelect
@@ -4585,6 +4557,7 @@ class PDFEditor(QMainWindow):
                 item = self.thumbnail_widget.item(self.current_page)
                 if item:
                     self.thumbnail_widget.scrollToItem(item, QListWidget.ScrollHint.PositionAtCenter)
+                self.thumbnail_widget.viewport().update()
             except Exception:
                 pass
             finally:

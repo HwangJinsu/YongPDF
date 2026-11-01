@@ -4940,13 +4940,6 @@ class MainWindow(QMainWindow):
             action.triggered.connect(lambda checked, c=code: self.set_language(c) if checked else None)
             self.language_actions[code] = action
 
-        # ❣️ 후원 메뉴
-        support_menu = menubar.addMenu(self.t('support_menu'))
-        donate_kakao_action = QAction(self.t('donate_kakao'), self)
-        donate_kakao_action.triggered.connect(self.show_kakao_donation_dialog)
-        donate_paypal_action = QAction(self.t('donate_paypal'), self)
-        donate_paypal_action.triggered.connect(self.show_paypal_donation_dialog)
-        support_menu.addActions([donate_kakao_action, donate_paypal_action])
 
         # ℹ️ 도움말 메뉴
         help_menu = menubar.addMenu(self.t('help_menu'))
