@@ -59,24 +59,24 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='YongPDF_text',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    runtime_tmpdir=None,
+    upx=False,
     console=False,
     icon=icon_path if os.path.isfile(icon_path) else None,
 )
 
 coll = COLLECT(
     exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name='YongPDF_text',
 )

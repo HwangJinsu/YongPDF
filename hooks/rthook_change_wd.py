@@ -15,6 +15,16 @@ def resource_path(relative_path):
     
     return os.path.join(base_path, relative_path)
 
+# macOS 환경에서 GUI 앱 실행 시 Homebrew/MacPorts bin 경로를 PATH에 보강
+if sys.platform == 'darwin':
+    extra_paths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin', '/opt/local/bin']
+    current_path = os.environ.get('PATH', '')
+    path_dirs = current_path.split(os.pathsep) if current_path else []
+    for ep in extra_paths:
+        if os.path.isdir(ep) and ep not in path_dirs:
+            path_dirs.insert(0, ep)
+    os.environ['PATH'] = os.pathsep.join(path_dirs)
+
 # 현재 실행 모드 확인 및 로깅
 is_bundled = getattr(sys, 'frozen', False)
 current_path = os.getcwd()

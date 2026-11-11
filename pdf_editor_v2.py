@@ -26,9 +26,10 @@ from PyQt6.QtWidgets import (
     QSplitter, QListWidget, QListWidgetItem, QMenu, QMenuBar,
     QStatusBar, QToolBar, QFileDialog, QDialog, QLabel,
     QPushButton, QScrollArea, QSizePolicy, QMessageBox, QFrame, QLineEdit,
-    QDialogButtonBox, QRubberBand, QSlider, QCheckBox, QProgressDialog, QRadioButton, QTextEdit, QProgressBar, QSplashScreen
+    QDialogButtonBox, QRubberBand, QSlider, QCheckBox, QProgressDialog, QRadioButton, QTextEdit, QProgressBar, QSplashScreen,
+    QToolButton
 )
-from PyQt6.QtCore import Qt, QSize, QPoint, QRect, QEvent, QTimer, QItemSelectionModel, QItemSelection, QSettings, QFileSystemWatcher, QProcess
+from PyQt6.QtCore import Qt, QSize, QPoint, QRect, QEvent, QTimer, QItemSelectionModel, QItemSelection, QSettings, QFileSystemWatcher, QProcess, QObject
 from PyQt6.QtGui import (
     QImage,
     QPixmap,
@@ -48,10 +49,22 @@ from PyQt6.QtGui import (
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 
 
+if sys.platform == 'darwin':
+    extra_paths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin', '/opt/local/bin']
+    current_path = os.environ.get('PATH', '')
+    path_dirs = current_path.split(os.pathsep) if current_path else []
+    for ep in extra_paths:
+        if os.path.isdir(ep) and ep not in path_dirs:
+            path_dirs.insert(0, ep)
+    os.environ['PATH'] = os.pathsep.join(path_dirs)
+
 if sys.platform.startswith('win'):
     GS_FIXED_PATH = r"C:\\Program Files (x86)\\gs\\gs10.06.0\\bin\\gswin32c.exe"
 else:
     GS_FIXED_PATH = None
+
+APP_VERSION = "v1.1"
+GITHUB_URL = "https://github.com/hwangjinsu/yongpdf"
 
 TEXT_EDITOR_EXE_NAME = 'YongPDF_text.exe'
 TEXT_EDITOR_STEM = 'YongPDF_text'
@@ -237,6 +250,30 @@ def _show_startup_splash(app: QApplication) -> Optional[QSplashScreen]:
     )
     app.processEvents()
     return splash
+
+
+class RolloverMenuFilter(QObject):
+    """MS Office 스타일: 확장 툴바 버튼(») 롤오버(호버) 시 추가 도구 팁/팝업 메뉴 표시"""
+    def __init__(self, button: QToolButton, parent=None):
+        super().__init__(parent or button)
+        self.button = button
+        self.hover_timer = QTimer(self)
+        self.hover_timer.setSingleShot(True)
+        self.hover_timer.setInterval(200) # 200ms rollover delay
+        self.hover_timer.timeout.connect(self._on_hover_timeout)
+
+    def _on_hover_timeout(self):
+        if self.button and self.button.underMouse() and self.button.isVisible():
+            if not self.button.isDown():
+                self.button.click()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Enter:
+            self.hover_timer.start()
+        elif event.type() == QEvent.Type.Leave:
+            self.hover_timer.stop()
+        return super().eventFilter(obj, event)
+
 
 class ThumbnailWidget(QListWidget):
     def __init__(self, editor):
@@ -428,7 +465,7 @@ class ThumbnailWidget(QListWidget):
         for i in range(self.count()):
             it = self.item(i)
             if it:
-                it.setText(f"Page {i + 1}")
+                it.setText(f"{i + 1}")
         self.setUpdatesEnabled(True)
         self.doItemsLayout()
         self.viewport().update()
@@ -819,6 +856,7 @@ class PDFEditor(QMainWindow):
             self.app_name = "용PDF_page"
         else:
             self.app_name = "YongPDF_page"
+        self.version = "1.1"
         self.setWindowTitle(self.app_name)
         self.settings = QSettings('pdf-editor-pe', 'pdf-editor-v2')
         # language (ko/en/ja/zh-CN/zh-TW)
@@ -906,10 +944,66 @@ class PDFEditor(QMainWindow):
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         
-        layout = QHBoxLayout(main_widget)
-        layout.setSpacing(0)
-        layout.setContentsMargins(0, 0, 0, 0)
+        main_layout = QVBoxLayout(main_widget)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         
+        self.toolbar_container = QWidget()
+        self.toolbar_container.setObjectName("toolbarContainer")
+        self.toolbar_container.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.toolbar_layout = QVBoxLayout(self.toolbar_container)
+        self.toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        self.toolbar_layout.setSpacing(0)
+
+        # 1행 컨테이너 (기본 1행 노출: 보기 모드까지)
+        self.primary_container = QWidget(self.toolbar_container)
+        self.primary_container.setObjectName("primaryToolbarContainer")
+        primary_layout = QHBoxLayout(self.primary_container)
+        primary_layout.setContentsMargins(4, 2, 4, 2)
+        primary_layout.setSpacing(2)
+
+        self.primary_toolbar = QToolBar("Primary Tools", self.primary_container)
+        self.primary_toolbar.setMovable(False)
+        self.primary_toolbar.setFloatable(False)
+        self.primary_toolbar.setIconSize(QSize(20, 20))
+        self.primary_toolbar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        primary_layout.addWidget(self.primary_toolbar, 1)
+
+        # 1행 가장 우측에 고정된 2행 펼침/접힘 버튼
+        self.expand_toggle_btn = QToolButton(self.primary_container)
+        self.expand_toggle_btn.setObjectName("toolbarExpandButton")
+        self.expand_toggle_btn.setFixedSize(26, 26)
+        self.expand_toggle_btn.setText("▼")
+        self.expand_toggle_btn.setCheckable(True)
+        self.expand_toggle_btn.setChecked(False)
+        self.expand_toggle_btn.clicked.connect(self.toggle_secondary_toolbars)
+        primary_layout.addWidget(self.expand_toggle_btn, 0)
+
+        self.toolbar_layout.addWidget(self.primary_container)
+
+        # 2행 컨테이너 (페이지 조작 및 확장 도구: 기본 숨김)
+        self.secondary_container = QWidget(self.toolbar_container)
+        self.secondary_container.setObjectName("secondaryToolbarContainer")
+        secondary_layout = QHBoxLayout(self.secondary_container)
+        secondary_layout.setContentsMargins(4, 2, 4, 2)
+        secondary_layout.setSpacing(2)
+
+        self.secondary_toolbar = QToolBar("Secondary Tools", self.secondary_container)
+        self.secondary_toolbar.setMovable(False)
+        self.secondary_toolbar.setFloatable(False)
+        self.secondary_toolbar.setIconSize(QSize(20, 20))
+        self.secondary_toolbar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        secondary_layout.addWidget(self.secondary_toolbar, 1)
+
+        self.secondary_dummy_spacer = QWidget(self.secondary_container)
+        self.secondary_dummy_spacer.setFixedSize(26, 26)
+        secondary_layout.addWidget(self.secondary_dummy_spacer, 0)
+
+        self.toolbar_layout.addWidget(self.secondary_container)
+        self.secondary_container.setVisible(False)
+
+        main_layout.addWidget(self.toolbar_container, 0)
+
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setStyleSheet("QSplitter::handle { background-color: #3d3d3d; width: 3px; }")
 
@@ -946,7 +1040,7 @@ class PDFEditor(QMainWindow):
         self.splitter.addWidget(self.scroll_area)
         self.splitter.setSizes([200, 1000])
 
-        layout.addWidget(self.splitter)
+        main_layout.addWidget(self.splitter, 1)
         
         self.scroll_area.verticalScrollBar().valueChanged.connect(self.update_current_page_on_scroll)
         
@@ -986,6 +1080,7 @@ class PDFEditor(QMainWindow):
         
         #파일 메뉴(열기, 저장, 저장 복사, 인쇄, 종료)
         file_menu = menubar.addMenu(self.t('file_menu'))
+        self.file_menu = file_menu
         open_action = QAction(self.t('open'), self)
         open_action.triggered.connect(self.open_file)
         open_action.setShortcut(QKeySequence.StandardKey.Open)
@@ -1004,6 +1099,7 @@ class PDFEditor(QMainWindow):
         exit_action = QAction(self.t('exit'), self)
         exit_action.triggered.connect(self.close)
         exit_action.setShortcut(QKeySequence("Ctrl+Q"))
+        self.exit_action = exit_action
         file_menu.addAction(open_action)
         file_menu.addSeparator()
         file_menu.addActions([save_action, save_as_action, self.print_action])
@@ -1012,6 +1108,7 @@ class PDFEditor(QMainWindow):
         
         #페이지 메뉴(페이지 추가, 삭제, 이동, 회전)
         page_menu = menubar.addMenu(self.t('page_menu'))
+        self.page_menu = page_menu
         add_page_action = QAction(self.t('add_page'), self)
         add_page_action.triggered.connect(self.add_blank_page)
         add_page_action.setShortcut(QKeySequence("Insert"))
@@ -1044,6 +1141,7 @@ class PDFEditor(QMainWindow):
 
          # Undo/Redo + external editor launcher
         edit_menu = menubar.addMenu(self.t('edit_menu'))
+        self.edit_menu = edit_menu
         undo_action_menu = QAction(self.t('undo'), self)
         undo_action_menu.setShortcut(QKeySequence.StandardKey.Undo)
         undo_action_menu.triggered.connect(self.undo_action)
@@ -1056,6 +1154,7 @@ class PDFEditor(QMainWindow):
 
         #보기 메뉴(테마, 단/이중 페이지, 화면 맞춤)
         view_menu = menubar.addMenu(self.t('view_menu'))
+        self.view_menu = view_menu
         theme_group = QActionGroup(self)
         self.light_theme_action = QAction(self.t('theme_light_mode'), self, checkable=True)
         self.light_theme_action.triggered.connect(lambda: self.set_theme('light'))
@@ -1088,17 +1187,23 @@ class PDFEditor(QMainWindow):
 
         #도구 메뉴(압축, 외부 편집기, 고스트스크립트 설정)
         tools_menu = menubar.addMenu(self.t('tools_menu'))
+        self.tools_menu = tools_menu
         compress_action = QAction(self.t('compress_pdf'), self)
         compress_action.triggered.connect(self.show_compression_settings)
+        self.compress_action = compress_action
         launch_editor_action = QAction(self.t('edit_short'), self)
         launch_editor_action.triggered.connect(self.launch_external_editor)
+        self.launch_editor_action = launch_editor_action
         ghostscript_action = QAction(self.t('ghostscript_config'), self)
         ghostscript_action.triggered.connect(self.configure_ghostscript_path)
+        self.ghostscript_action = ghostscript_action
         tools_menu.addActions([compress_action, launch_editor_action, ghostscript_action])
 
         # Language menu (fixed labels per language)
         lang_menu = menubar.addMenu(self.t('language_menu'))
+        self.lang_menu = lang_menu
         lang_group = QActionGroup(self)
+        self.language_actions = {}
         
         # Display labels for all supported language codes
         lang_labels = {
@@ -1121,124 +1226,106 @@ class PDFEditor(QMainWindow):
             # Use default argument in lambda to capture the current value of 'code'
             act.triggered.connect(lambda checked=False, c=code: self.set_language(c))
             lang_menu.addAction(act)
+            self.language_actions[code] = act
 
         #도움말 메뉴(정보, 라이선스)
         help_menu = menubar.addMenu(self.t('help_menu'))
+        self.help_menu = help_menu
         about_action = QAction(self.t('about'), self)
         about_action.triggered.connect(self.show_about_dialog)
+        self.about_action = about_action
         help_menu.addAction(about_action)
         
         usage_guide_action = QAction(self.t('usage_guide'), self)
         usage_guide_action.triggered.connect(lambda: webbrowser.open("https://www.youtube.com/playlist?list=PLs36bSFfggCCUX31PYEH_SNgAmVc3dk_B"))
+        self.usage_guide_action = usage_guide_action
         help_menu.addAction(usage_guide_action)
 
         licenses_action = QAction(self.t('licenses_menu') if self.language!='en' else 'Open-Source Licenses', self)
         licenses_action.triggered.connect(self.show_licenses_dialog)
+        self.licenses_action = licenses_action
         help_menu.addAction(licenses_action)
 
     def setup_toolbar(self):
-        # 기존 툴바 제거 (재설정 시 중복 방지)
-        for tb in self.findChildren(QToolBar):
-            self.removeToolBar(tb)
+        if not hasattr(self, 'primary_toolbar') or not hasattr(self, 'secondary_toolbar'):
+            return
 
-        # 1. 파일 툴바
-        self.file_toolbar = self.addToolBar("File")
-        self.file_toolbar.setMovable(False)
-        self.file_toolbar.setIconSize(QSize(20, 20))
-        self.file_toolbar.setStyleSheet("QToolBar { border-bottom: 1px solid #3d3d3d; padding: 2px; }")
-        
-        self.file_toolbar.addAction(self.open_action)
-        self.file_toolbar.addAction(self.save_action)
-        self.file_toolbar.addSeparator()
-        self.file_toolbar.addAction(self.print_action)
+        self.primary_toolbar.clear()
+        self.secondary_toolbar.clear()
 
-        # 2. 편집 툴바
-        self.edit_toolbar = self.addToolBar("Edit")
-        self.edit_toolbar.setMovable(False)
-        self.edit_toolbar.setIconSize(QSize(20, 20))
-        self.edit_toolbar.setStyleSheet("QToolBar { border-bottom: 1px solid #3d3d3d; padding: 2px; }")
-        
-        self.edit_toolbar.addAction(self.undo_action_act)
-        self.edit_toolbar.addAction(self.redo_action_act)
+        # ----------------------------------------------------
+        # 1행: 기본 1행 노출 (보기 모드까지 배치)
+        # ----------------------------------------------------
+        # 1. 파일
+        self.primary_toolbar.addAction(self.open_action)
+        self.primary_toolbar.addAction(self.save_action)
+        self.primary_toolbar.addAction(self.print_action)
+        self.primary_toolbar.addSeparator()
 
-        # 3. 페이지 이동 툴바
-        self.nav_toolbar = self.addToolBar("Navigation")
-        self.nav_toolbar.setMovable(False)
-        self.nav_toolbar.setIconSize(QSize(20, 20))
-        self.nav_toolbar.setStyleSheet("QToolBar { border-bottom: 1px solid #3d3d3d; padding: 2px; }")
-        
-        prev_btn = QAction(self.t('prev'), self)
-        prev_btn.triggered.connect(self.prev_page)
-        next_btn = QAction(self.t('next'), self)
-        next_btn.triggered.connect(self.next_page)
-        
-        self.nav_toolbar.addAction(prev_btn)
+        # 2. 편집
+        self.primary_toolbar.addAction(self.undo_action_act)
+        self.primary_toolbar.addAction(self.redo_action_act)
+        self.primary_toolbar.addSeparator()
+
+        # 3. 페이지 이동
+        self.prev_page_action = QAction(self.t('prev'), self)
+        self.prev_page_action.triggered.connect(self.prev_page)
+        self.next_page_action = QAction(self.t('next'), self)
+        self.next_page_action.triggered.connect(self.next_page)
+        self.primary_toolbar.addAction(self.prev_page_action)
+
         self.page_input = QLineEdit()
         self.page_input.setFixedWidth(50)
         self.page_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.page_input.returnPressed.connect(self.goto_page)
-        self.nav_toolbar.addWidget(self.page_input)
+        self.primary_toolbar.addWidget(self.page_input)
+
         self.total_pages_label = QLabel("/0")
         self.total_pages_label.setStyleSheet("padding-right: 5px;")
-        self.nav_toolbar.addWidget(self.total_pages_label)
-        self.nav_toolbar.addAction(next_btn)
+        self.primary_toolbar.addWidget(self.total_pages_label)
 
-        # 4. 보기 툴바
-        self.view_toolbar = self.addToolBar("View")
-        self.view_toolbar.setMovable(False)
-        self.view_toolbar.setIconSize(QSize(20, 20))
-        self.view_toolbar.setStyleSheet("QToolBar { border-bottom: 1px solid #3d3d3d; padding: 2px; }")
-        
-        zoom_in_btn = QAction(self.t('zoom_in'), self)
-        zoom_in_btn.triggered.connect(self.zoom_in)
-        zoom_out_btn = QAction(self.t('zoom_out'), self)
-        zoom_out_btn.triggered.connect(self.zoom_out)
-        
-        self.view_toolbar.addAction(zoom_in_btn)
-        self.view_toolbar.addAction(zoom_out_btn)
-        self.view_toolbar.addAction(self.fit_width_action)
-        self.view_toolbar.addAction(self.fit_height_action)
-        self.view_toolbar.addSeparator()
-        self.view_toolbar.addAction(self.single_page_action)
-        self.view_toolbar.addAction(self.dual_page_action)
+        self.primary_toolbar.addAction(self.next_page_action)
+        self.primary_toolbar.addSeparator()
 
-        # 툴바 확장/축소 버튼
-        self.expand_toolbar_action = QAction("▼", self) # 초기 상태: 확장 가능
-        self.expand_toolbar_action.setToolTip("Show More Tools")
-        self.expand_toolbar_action.triggered.connect(self.toggle_secondary_toolbars)
-        self.view_toolbar.addSeparator()
-        self.view_toolbar.addAction(self.expand_toolbar_action)
+        # 4. 확대/축소
+        self.zoom_in_action = QAction(self.t('zoom_in'), self)
+        self.zoom_in_action.triggered.connect(self.zoom_in)
+        self.zoom_out_action = QAction(self.t('zoom_out'), self)
+        self.zoom_out_action.triggered.connect(self.zoom_out)
+        self.primary_toolbar.addAction(self.zoom_in_action)
+        self.primary_toolbar.addAction(self.zoom_out_action)
+        self.primary_toolbar.addAction(self.fit_width_action)
+        self.primary_toolbar.addAction(self.fit_height_action)
+        self.primary_toolbar.addSeparator()
 
-        # 줄바꿈 (화면 너비가 좁을 때를 대비해 툴바를 다음 줄로 내림)
-        self.addToolBarBreak()
+        # 5. 보기 모드
+        self.primary_toolbar.addAction(self.single_page_action)
+        self.primary_toolbar.addAction(self.dual_page_action)
 
-        # 5. 페이지 조작 툴바 (2번째 줄)
-        self.page_ops_toolbar = self.addToolBar("Page Ops")
-        self.page_ops_toolbar.setMovable(False)
-        self.page_ops_toolbar.setIconSize(QSize(20, 20))
-        self.page_ops_toolbar.setStyleSheet("QToolBar { border: none; padding: 2px; }")
-        
-        self.page_ops_toolbar.addAction(self.add_page_action)
-        self.page_ops_toolbar.addAction(self.delete_page_action)
-        self.page_ops_toolbar.addSeparator()
-        self.page_ops_toolbar.addAction(self.move_up_action)
-        self.page_ops_toolbar.addAction(self.move_down_action)
-        self.page_ops_toolbar.addSeparator()
-        self.page_ops_toolbar.addAction(self.rotate_left_action)
-        self.page_ops_toolbar.addAction(self.rotate_right_action)
+        # ----------------------------------------------------
+        # 2행: 펼침/접힘 시 노출되는 페이지 조작 및 확장 도구
+        # ----------------------------------------------------
+        # 6. 페이지 추가/삭제
+        self.secondary_toolbar.addAction(self.add_page_action)
+        self.secondary_toolbar.addAction(self.delete_page_action)
+        self.secondary_toolbar.addSeparator()
 
-        # 6. 도구 및 테마 툴바 (2번째 줄)
-        self.tools_toolbar = self.addToolBar("Tools")
-        self.tools_toolbar.setMovable(False)
-        self.tools_toolbar.setIconSize(QSize(20, 20))
-        self.tools_toolbar.setStyleSheet("QToolBar { border: none; padding: 2px; }")
-        
-        compress_action = QAction(self.t('compress_pdf'), self)
-        compress_action.triggered.connect(self.show_compression_settings)
-        edit_btn = QAction(self.t('edit_short'), self)
-        edit_btn.triggered.connect(self.launch_external_editor)
-        
-        # Theme toggle buttons
+        # 7. 페이지 순서 이동
+        self.secondary_toolbar.addAction(self.move_up_action)
+        self.secondary_toolbar.addAction(self.move_down_action)
+        self.secondary_toolbar.addSeparator()
+
+        # 8. 페이지 회전
+        self.secondary_toolbar.addAction(self.rotate_left_action)
+        self.secondary_toolbar.addAction(self.rotate_right_action)
+        self.secondary_toolbar.addSeparator()
+
+        # 9. 확장 도구
+        self.secondary_toolbar.addAction(self.compress_action)
+        self.secondary_toolbar.addAction(self.launch_editor_action)
+        self.secondary_toolbar.addSeparator()
+
+        # 10. 테마
         theme_group_tb = QActionGroup(self)
         theme_group_tb.setExclusive(True)
         self.theme_light_btn = QAction(self.t('theme_light'), self)
@@ -1249,22 +1336,53 @@ class PDFEditor(QMainWindow):
         self.theme_dark_btn.triggered.connect(lambda: self.set_theme('dark'))
         theme_group_tb.addAction(self.theme_light_btn)
         theme_group_tb.addAction(self.theme_dark_btn)
-        
-        self.tools_toolbar.addAction(compress_action)
-        self.tools_toolbar.addAction(edit_btn)
-        self.tools_toolbar.addSeparator()
-        self.tools_toolbar.addAction(self.theme_light_btn)
-        self.tools_toolbar.addAction(self.theme_dark_btn)
+        self.secondary_toolbar.addAction(self.theme_light_btn)
+        self.secondary_toolbar.addAction(self.theme_dark_btn)
 
-        # 초기 상태: 2번째 줄 숨김
-        self.page_ops_toolbar.setVisible(False)
-        self.tools_toolbar.setVisible(False)
-        
+        # MS Office 방식: 창 너비 부족 시 확장 툴바 버튼(») 롤오버/호버 시 추가 메뉴 표시
+        for tb in (self.primary_toolbar, self.secondary_toolbar):
+            ext_btn = tb.findChild(QToolButton, 'qt_toolbar_ext_button')
+            if ext_btn:
+                ext_btn.setToolTip("추가 도구 (더 보기)" if self.language == 'ko' else "More Tools")
+                if not getattr(tb, '_rollover_filter', None):
+                    filter_obj = RolloverMenuFilter(ext_btn, parent=tb)
+                    ext_btn.installEventFilter(filter_obj)
+                    tb._rollover_filter = filter_obj
+
+        # 1행 우측 고정 2행 펼침/접힘 버튼 상태 및 툴팁 갱신
+        if hasattr(self, 'expand_toggle_btn') and self.expand_toggle_btn:
+            is_visible = hasattr(self, 'secondary_container') and self.secondary_container.isVisible()
+            self.expand_toggle_btn.setChecked(is_visible)
+            self.expand_toggle_btn.setText("▲" if is_visible else "▼")
+            tooltip = ("2행 도구 접기" if is_visible else "2행 도구 펼치기 (페이지 편집/도구)") if self.language == 'ko' else ("Collapse Secondary Tools" if is_visible else "Expand Secondary Tools")
+            self.expand_toggle_btn.setToolTip(tooltip)
+
+        # 하위 호환성 속성 유지
+        self.file_toolbar = self.primary_toolbar
+        self.edit_toolbar = self.primary_toolbar
+        self.nav_toolbar = self.primary_toolbar
+        self.view_toolbar = self.primary_toolbar
+        self.zoom_toolbar = self.primary_toolbar
+        self.view_mode_toolbar = self.primary_toolbar
+        self.page_ops_toolbar = self.secondary_toolbar
+        self.page_edit_toolbar = self.secondary_toolbar
+        self.page_order_toolbar = self.secondary_toolbar
+        self.page_rotate_toolbar = self.secondary_toolbar
+        self.tools_toolbar = self.secondary_toolbar
+        self.theme_toolbar = self.secondary_toolbar
+
     def toggle_secondary_toolbars(self):
-        visible = not self.page_ops_toolbar.isVisible()
-        self.page_ops_toolbar.setVisible(visible)
-        self.tools_toolbar.setVisible(visible)
-        self.expand_toolbar_action.setText("▲" if visible else "▼")
+        """2행 툴바의 펼침/접힘 토글"""
+        if hasattr(self, 'secondary_container') and self.secondary_container:
+            is_visible = not self.secondary_container.isVisible()
+            self.secondary_container.setVisible(is_visible)
+            if hasattr(self, 'expand_toggle_btn') and self.expand_toggle_btn:
+                self.expand_toggle_btn.setChecked(is_visible)
+                self.expand_toggle_btn.setText("▲" if is_visible else "▼")
+                tooltip = ("2행 도구 접기" if is_visible else "2행 도구 펼치기 (페이지 편집/도구)") if self.language == 'ko' else ("Collapse Secondary Tools" if is_visible else "Expand Secondary Tools")
+                self.expand_toggle_btn.setToolTip(tooltip)
+            if hasattr(self, 'toolbar_container') and self.toolbar_container:
+                self.toolbar_container.adjustSize()
 
     def setup_statusbar(self):
         statusbar = self.statusBar()
@@ -1433,22 +1551,65 @@ class PDFEditor(QMainWindow):
     def _handle_external_editor_started(self):
         self._close_external_loading_dialog()
         self.statusBar().showMessage(self.t('external_editor_ready'), 5000)
+        if sys.platform == 'darwin':
+            try:
+                subprocess.run([
+                    'osascript', '-e',
+                    'tell application "System Events" to set frontmost of first process whose name contains "YongPDF_text" or name contains "main_codex1" to true'
+                ], timeout=1, capture_output=True)
+            except Exception:
+                pass
 
     def _get_dark_theme_stylesheet(self):
         return """
             QMainWindow, QDialog { background-color: #2b2b2b; color: #ffffff; }
             QMainWindow::separator { width: 0px; height: 0px; margin: 0px; padding: 0px; border: none; }
             QSplitter::handle { background-color: transparent; width: 0px; height: 0px; }
-            QMenuBar { font-size: 13px; padding: 3px 5px; background-color: #2b2b2b; color: #ffffff; border: none; }
-            QMenuBar::item:selected { background-color: #3d3d3d; }
+            QMenuBar { font-size: 13px; padding: 3px 5px; background-color: #202020; color: #ffffff; border-bottom: 1px solid #333333; }
+            QMenuBar::item:selected { background-color: #383838; }
             QMenu { background-color: #2b2b2b; color: #ffffff; border: 1px solid #3d3d3d; }
             QMenu::item { padding: 8px 22px; }
             QMenu::item:selected { background-color: #3d3d3d; }
             QMenu::separator { height: 1px; background-color: #3d3d3d; margin: 5px 0px; }
-            QToolBar { spacing: 4px; padding: 4px; background-color: #2b2b2b; border: none; margin: 0px; }
+            #toolbarContainer {
+                background-color: #2b2b2b;
+                border-bottom: 1px solid #3d3d3d;
+            }
+            #secondaryToolbarContainer {
+                border-top: 1px solid #363636;
+            }
+            #toolbarExpandButton {
+                background: transparent;
+                color: #cccccc;
+                border: 1px solid transparent;
+                border-radius: 4px;
+                font-size: 11px;
+            }
+            #toolbarExpandButton:hover {
+                background-color: #3d3d3d;
+                color: #ffffff;
+            }
+            #toolbarExpandButton:checked, #toolbarExpandButton:pressed {
+                background-color: #484848;
+                color: #ffffff;
+            }
+            QToolBar { spacing: 4px; padding: 2px; background-color: transparent; border: none; margin: 0px; }
+            QToolBar::separator { width: 1px; background-color: #3d3d3d; margin: 4px 4px; }
             QToolButton { color: #ffffff; padding: 5px 7px; border: 1px solid transparent; border-radius: 4px; font-size: 12px; }
             QToolButton:hover { background-color: #3d3d3d; }
             QToolButton:pressed, QToolButton:checked { background-color: #404040; }
+            QToolButton#qt_toolbar_ext_button {
+                background: transparent;
+                color: #aaaaaa;
+                border: 1px solid transparent;
+                border-radius: 4px;
+                padding: 2px 4px;
+                font-weight: bold;
+            }
+            QToolButton#qt_toolbar_ext_button:hover {
+                background-color: #3d3d3d;
+                color: #ffffff;
+            }
             QStatusBar { padding-left: 8px; background: #2b2b2b; color: #ffffff; border-top: 1px solid #3d3d3d; }
             QStatusBar::item { border: none; }
             #documentContainer {
@@ -1494,9 +1655,9 @@ class PDFEditor(QMainWindow):
             QMenuBar {
                 font-size: 13px;
                 padding: 3px 5px;
-                background-color: #f0f0f0;
+                background-color: #e4e4e4;
                 color: #000000;
-                border: none;
+                border-bottom: 1px solid #d0d0d0;
             }
             QMenuBar::item:selected {
                 background-color: #dcdcdc;
@@ -1518,12 +1679,39 @@ class PDFEditor(QMainWindow):
                 background-color: #e0e0e0;
                 margin: 5px 0px;
             }
+            #toolbarContainer {
+                background-color: #f7f7f7;
+                border-bottom: 1px solid #d0d0d0;
+            }
+            #secondaryToolbarContainer {
+                border-top: 1px solid #e5e5e5;
+            }
+            #toolbarExpandButton {
+                background: transparent;
+                color: #555555;
+                border: 1px solid transparent;
+                border-radius: 4px;
+                font-size: 11px;
+            }
+            #toolbarExpandButton:hover {
+                background-color: #e5e5e5;
+                color: #000000;
+            }
+            #toolbarExpandButton:checked, #toolbarExpandButton:pressed {
+                background-color: #d8d8d8;
+                color: #000000;
+            }
             QToolBar {
                 spacing: 4px;
-                padding: 4px;
-                background-color: #f0f0f0;
+                padding: 2px;
+                background-color: transparent;
                 border: none;
                 margin: 0px;
+            }
+            QToolBar::separator {
+                width: 1px;
+                background-color: #cccccc;
+                margin: 4px 4px;
             }
             QToolButton {
                 color: #000000;
@@ -1539,6 +1727,18 @@ class PDFEditor(QMainWindow):
             QToolButton:pressed, QToolButton:checked {
                 background-color: #c8c8c8;
                 border: 1px solid #aaaaaa;
+            }
+            QToolButton#qt_toolbar_ext_button {
+                background: transparent;
+                color: #555555;
+                border: 1px solid transparent;
+                border-radius: 4px;
+                padding: 2px 4px;
+                font-weight: bold;
+            }
+            QToolButton#qt_toolbar_ext_button:hover {
+                background-color: #e5e5e5;
+                color: #000000;
             }
             QStatusBar {
                 padding-left: 8px;
@@ -1675,7 +1875,143 @@ class PDFEditor(QMainWindow):
             print(f"[i18n] Error initializing languages: {e}")
 
     def t(self, key: str) -> str:
-        return self.translations.get(self.language, {}).get(key, key)
+        # Fallback hierarchy: Current language -> Korean (ko) -> English (en) -> key
+        lang_dict = self.translations.get(self.language, {})
+        if key in lang_dict:
+            return lang_dict[key]
+        fallback_ko = self.translations.get('ko', {})
+        if key in fallback_ko:
+            return fallback_ko[key]
+        fallback_en = self.translations.get('en', {})
+        if key in fallback_en:
+            return fallback_en[key]
+        return key
+
+    def retranslate_ui(self):
+        """메뉴바, 툴바, 상태바, 타이틀 등의 텍스트를 현재 언어에 맞춰 동적으로 갱신합니다.
+        (macOS 네이티브 메뉴바 손상 및 툴바 소실 방지)
+        """
+        # 1. 메뉴바 타이틀 및 액션 텍스트 갱신
+        if hasattr(self, 'file_menu') and self.file_menu:
+            self.file_menu.setTitle(self.t('file_menu'))
+        if hasattr(self, 'open_action') and self.open_action:
+            self.open_action.setText(self.t('open'))
+        if hasattr(self, 'save_action') and self.save_action:
+            self.save_action.setText(self.t('save'))
+        if hasattr(self, 'save_as_action') and self.save_as_action:
+            self.save_as_action.setText(self.t('save_as'))
+        if hasattr(self, 'print_action') and self.print_action:
+            self.print_action.setText(self.t('print'))
+        if hasattr(self, 'exit_action') and self.exit_action:
+            self.exit_action.setText(self.t('exit'))
+
+        if hasattr(self, 'page_menu') and self.page_menu:
+            self.page_menu.setTitle(self.t('page_menu'))
+        if hasattr(self, 'add_page_action') and self.add_page_action:
+            self.add_page_action.setText(self.t('add_page'))
+        if hasattr(self, 'delete_page_action') and self.delete_page_action:
+            self.delete_page_action.setText(self.t('delete_page'))
+        if hasattr(self, 'move_up_action') and self.move_up_action:
+            self.move_up_action.setText(self.t('move_up'))
+        if hasattr(self, 'move_down_action') and self.move_down_action:
+            self.move_down_action.setText(self.t('move_down'))
+        if hasattr(self, 'rotate_left_action') and self.rotate_left_action:
+            self.rotate_left_action.setText(self.t('rotate_left'))
+        if hasattr(self, 'rotate_right_action') and self.rotate_right_action:
+            self.rotate_right_action.setText(self.t('rotate_right'))
+
+        if hasattr(self, 'edit_menu') and self.edit_menu:
+            self.edit_menu.setTitle(self.t('edit_menu'))
+        if hasattr(self, 'undo_action_act') and self.undo_action_act:
+            self.undo_action_act.setText(self.t('undo'))
+        if hasattr(self, 'redo_action_act') and self.redo_action_act:
+            self.redo_action_act.setText(self.t('redo'))
+
+        if hasattr(self, 'view_menu') and self.view_menu:
+            self.view_menu.setTitle(self.t('view_menu'))
+        if hasattr(self, 'light_theme_action') and self.light_theme_action:
+            self.light_theme_action.setText(self.t('theme_light_mode'))
+        if hasattr(self, 'dark_theme_action') and self.dark_theme_action:
+            self.dark_theme_action.setText(self.t('theme_dark_mode'))
+        if hasattr(self, 'single_page_action') and self.single_page_action:
+            self.single_page_action.setText(self.t('single_view'))
+        if hasattr(self, 'dual_page_action') and self.dual_page_action:
+            self.dual_page_action.setText(self.t('dual_view'))
+        if hasattr(self, 'fit_width_action') and self.fit_width_action:
+            self.fit_width_action.setText(self.t('fit_width'))
+        if hasattr(self, 'fit_height_action') and self.fit_height_action:
+            self.fit_height_action.setText(self.t('fit_height'))
+
+        if hasattr(self, 'tools_menu') and self.tools_menu:
+            self.tools_menu.setTitle(self.t('tools_menu'))
+        if hasattr(self, 'compress_action') and self.compress_action:
+            self.compress_action.setText(self.t('compress_pdf'))
+        if hasattr(self, 'launch_editor_action') and self.launch_editor_action:
+            self.launch_editor_action.setText(self.t('edit_short'))
+        if hasattr(self, 'ghostscript_action') and self.ghostscript_action:
+            self.ghostscript_action.setText(self.t('ghostscript_config'))
+
+        if hasattr(self, 'lang_menu') and self.lang_menu:
+            self.lang_menu.setTitle(self.t('language_menu'))
+        if hasattr(self, 'language_actions'):
+            for code, act in self.language_actions.items():
+                act.blockSignals(True)
+                act.setChecked(code == self.language)
+                act.blockSignals(False)
+
+        if hasattr(self, 'help_menu') and self.help_menu:
+            self.help_menu.setTitle(self.t('help_menu'))
+        if hasattr(self, 'about_action') and self.about_action:
+            self.about_action.setText(self.t('about'))
+        if hasattr(self, 'usage_guide_action') and self.usage_guide_action:
+            self.usage_guide_action.setText(self.t('usage_guide'))
+        if hasattr(self, 'licenses_action') and self.licenses_action:
+            self.licenses_action.setText(self.t('licenses_menu') if self.language != 'en' else 'Open-Source Licenses')
+
+        # 2. 툴바 전용 액션 텍스트 및 툴팁 갱신
+        if hasattr(self, 'prev_page_action') and self.prev_page_action:
+            self.prev_page_action.setText(self.t('prev'))
+        if hasattr(self, 'next_page_action') and self.next_page_action:
+            self.next_page_action.setText(self.t('next'))
+        if hasattr(self, 'zoom_in_action') and self.zoom_in_action:
+            self.zoom_in_action.setText(self.t('zoom_in'))
+        if hasattr(self, 'zoom_out_action') and self.zoom_out_action:
+            self.zoom_out_action.setText(self.t('zoom_out'))
+        if hasattr(self, 'theme_light_btn') and self.theme_light_btn:
+            self.theme_light_btn.setText(self.t('theme_light'))
+        if hasattr(self, 'theme_dark_btn') and self.theme_dark_btn:
+            self.theme_dark_btn.setText(self.t('theme_dark'))
+
+        # 툴바 확장 버튼(») 툴팁
+        if hasattr(self, 'primary_toolbar') and self.primary_toolbar:
+            ext_btn = self.primary_toolbar.findChild(QToolButton, 'qt_toolbar_ext_button')
+            if ext_btn:
+                ext_btn.setToolTip("추가 도구 (더 보기)" if self.language == 'ko' else "More Tools")
+        if hasattr(self, 'secondary_toolbar') and self.secondary_toolbar:
+            ext_btn = self.secondary_toolbar.findChild(QToolButton, 'qt_toolbar_ext_button')
+            if ext_btn:
+                ext_btn.setToolTip("추가 도구 (더 보기)" if self.language == 'ko' else "More Tools")
+
+        # 1행 우측 2행 펼침/접힘 토글 버튼 툴팁
+        if hasattr(self, 'expand_toggle_btn') and self.expand_toggle_btn:
+            is_visible = hasattr(self, 'secondary_container') and self.secondary_container.isVisible()
+            tooltip = ("2행 도구 접기" if is_visible else "2행 도구 펼치기 (페이지 편집/도구)") if self.language == 'ko' else ("Collapse Secondary Tools" if is_visible else "Expand Secondary Tools")
+            self.expand_toggle_btn.setToolTip(tooltip)
+
+        # 3. 상태바 툴팁 및 정보 갱신
+        if hasattr(self, 'btn_fit_width') and self.btn_fit_width:
+            self.btn_fit_width.setToolTip(self.t('fit_width'))
+        if hasattr(self, 'btn_fit_height') and self.btn_fit_height:
+            self.btn_fit_height.setToolTip(self.t('fit_height'))
+        if hasattr(self, 'btn_zoom_out') and self.btn_zoom_out:
+            self.btn_zoom_out.setToolTip(self.t('zoom_out'))
+        if hasattr(self, 'btn_zoom_in') and self.btn_zoom_in:
+            self.btn_zoom_in.setToolTip(self.t('zoom_in'))
+
+        # 4. 윈도우 타이틀 및 상태바 텍스트
+        title = os.path.basename(self.current_file) if self.current_file else ''
+        self.setWindowTitle(f"{self.app_name} - {title}" if title else self.app_name)
+        self.update_page_info()
 
     def set_language(self, lang: str):
         if lang not in self.translations:
@@ -1692,19 +2028,9 @@ class PDFEditor(QMainWindow):
             self.settings.setValue('language', lang)
         except Exception:
             pass
-        # rebuild menus and toolbar
-        mb = self.menuBar()
-        mb.clear()
-        self.setup_menubar()
-        # remove all existing toolbars to avoid duplicates
-        for tb in self.findChildren(QToolBar):
-            self.removeToolBar(tb)
-        self.setup_toolbar()
-        # title
-        title = os.path.basename(self.current_file) if self.current_file else ''
-        self.setWindowTitle(f"{self.app_name} - {title}" if title else self.app_name)
-        # refresh statusbar text
-        self.update_page_info()
+
+        # In-place 동적 갱신: 메뉴바 재구축/툴바 삭제로 인한 macOS Cocoa 메뉴 깨짐 및 툴바 소실 방지
+        self.retranslate_ui()
 
 
     def reorder_pages(self, source_rows: list[int], dest_row: int):
@@ -2055,23 +2381,330 @@ class PDFEditor(QMainWindow):
             pass
         self._editor_watch_path = None
 
+    def _find_editor_from_windows_registry(self) -> list[str]:
+        if not sys.platform.startswith('win'):
+            return []
+        found: list[str] = []
+        try:
+            import winreg
+
+            access_views = [winreg.KEY_READ]
+            if hasattr(winreg, 'KEY_WOW64_64KEY'):
+                access_views.append(winreg.KEY_READ | winreg.KEY_WOW64_64KEY)
+            if hasattr(winreg, 'KEY_WOW64_32KEY'):
+                access_views.append(winreg.KEY_READ | winreg.KEY_WOW64_32KEY)
+
+            # 1. App Paths: HKLM & HKCU
+            for hkey in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                for subkey in (
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\YongPDF_text.exe",
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\yongpdf_text.exe",
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\main_codex1.exe",
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\YongPDF.exe",
+                ):
+                    for view in access_views:
+                        try:
+                            with winreg.OpenKey(hkey, subkey, 0, view) as key:
+                                val, _ = winreg.QueryValueEx(key, "")
+                                if val and os.path.isfile(val) and val not in found:
+                                    found.append(val)
+                        except OSError:
+                            pass
+
+            # 2. Inno Setup Uninstall keys (installed apps registry)
+            for hkey in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                for uninst_key in (
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                ):
+                    for view in access_views:
+                        try:
+                            with winreg.OpenKey(hkey, uninst_key, 0, view) as root_key:
+                                num_subkeys, _, _ = winreg.QueryInfoKey(root_key)
+                                for i in range(num_subkeys):
+                                    try:
+                                        sub_name = winreg.EnumKey(root_key, i)
+                                        with winreg.OpenKey(root_key, sub_name, 0, view) as sk:
+                                            try:
+                                                display_name, _ = winreg.QueryValueEx(sk, "DisplayName")
+                                            except OSError:
+                                                display_name = ""
+                                            d_str = str(display_name).lower()
+                                            if "yongpdf_text" in d_str or "yongpdf text" in d_str or "yongpdf" in d_str:
+                                                try:
+                                                    install_loc, _ = winreg.QueryValueEx(sk, "InstallLocation")
+                                                    if install_loc and os.path.isdir(install_loc):
+                                                        for exe_name in ('YongPDF_text.exe', 'yongpdf_text.exe', 'main_codex1.exe', 'YongPDF.exe'):
+                                                            exe_p = os.path.join(install_loc, exe_name)
+                                                            if os.path.isfile(exe_p) and exe_p not in found:
+                                                                found.append(exe_p)
+                                                        for item in os.listdir(install_loc):
+                                                            if item.lower().endswith('.exe') and not item.lower().startswith(('unins', 'setup', 'install')):
+                                                                exe_p = os.path.join(install_loc, item)
+                                                                if os.path.isfile(exe_p) and exe_p not in found:
+                                                                    found.append(exe_p)
+                                                except OSError:
+                                                    pass
+                                    except OSError:
+                                        continue
+                        except OSError:
+                            pass
+        except Exception:
+            pass
+        return found
+
+    def _find_editor_windows(self) -> list[str]:
+        if not sys.platform.startswith('win'):
+            return []
+        found: list[str] = []
+        seen: set[str] = set()
+
+        def add_file(p: str):
+            if not p:
+                return
+            norm = os.path.normpath(p)
+            if norm.lower() in seen:
+                return
+            if os.path.isfile(norm):
+                seen.add(norm.lower())
+                found.append(norm)
+
+        # 1. Base directories to search (guaranteed to include both 64-bit and 32-bit Program Files)
+        base_dirs: list[str] = [
+            r"C:\Program Files",
+            r"C:\Program Files (x86)",
+        ]
+        sys_drive = os.environ.get('SystemDrive', 'C:')
+        if sys_drive and sys_drive.upper() != 'C:':
+            base_dirs.extend([
+                os.path.join(sys_drive, r'\Program Files'),
+                os.path.join(sys_drive, r'\Program Files (x86)'),
+            ])
+        for drive in ('D:', 'E:'):
+            for pf in (r'Program Files', r'Program Files (x86)'):
+                d = f"{drive}\\{pf}"
+                if os.path.isdir(d) and d not in base_dirs:
+                    base_dirs.append(d)
+
+        for ev in ('ProgramW6432', 'ProgramFiles', 'ProgramFiles(x86)'):
+            v = os.environ.get(ev)
+            if v and os.path.isdir(v) and v not in base_dirs:
+                base_dirs.append(v)
+
+        local_app = os.environ.get('LOCALAPPDATA', '')
+        if local_app:
+            base_dirs.append(os.path.join(local_app, 'Programs'))
+
+        # Running executable directory and its parents (e.g. C:\Program Files\YongPDF_page -> ..\yongpdf_text)
+        source_dir = os.path.dirname(os.path.abspath(__file__))
+        exec_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else source_dir
+        for p in (exec_dir, os.path.dirname(exec_dir), os.path.dirname(os.path.dirname(exec_dir))):
+            if p and os.path.isdir(p) and p not in base_dirs:
+                base_dirs.append(p)
+
+        folder_names = (
+            'YongPDF_text',
+            'yongpdf_text',
+            'YongPDF Text',
+            'YongPDF_Text',
+            'yongpdf text',
+            'YongPDF',
+            'yongpdf',
+            'main_codex1',
+            os.path.join('YongPDF', 'YongPDF_text'),
+            os.path.join('YongPDF', 'yongpdf_text'),
+            os.path.join('YongPDF', 'text'),
+        )
+
+        exe_names = (
+            'YongPDF_text.exe',
+            'yongpdf_text.exe',
+            'YongPDF Text.exe',
+            'YongPDF_Text.exe',
+            'main_codex1.exe',
+            'YongPDF.exe',
+            'yongpdf.exe',
+        )
+
+        for base in base_dirs:
+            if not os.path.isdir(base):
+                continue
+            for fn in folder_names:
+                target_dir = os.path.join(base, fn)
+                if not os.path.isdir(target_dir):
+                    continue
+                # A. Known executable names
+                for ex in exe_names:
+                    add_file(os.path.join(target_dir, ex))
+                # B. Any .exe inside target_dir (excluding uninstallers)
+                try:
+                    for item in os.listdir(target_dir):
+                        ilow = item.lower()
+                        if ilow.endswith('.exe') and not ilow.startswith(('unins', 'setup', 'install', 'update')):
+                            add_file(os.path.join(target_dir, item))
+                except Exception:
+                    pass
+                # C. Check 1-level subdirectories (e.g. target_dir\dist\ or target_dir\YongPDF_text\)
+                try:
+                    for sub in os.listdir(target_dir):
+                        sub_dir = os.path.join(target_dir, sub)
+                        if os.path.isdir(sub_dir):
+                            for ex in exe_names:
+                                add_file(os.path.join(sub_dir, ex))
+                            for item in os.listdir(sub_dir):
+                                ilow = item.lower()
+                                if ilow.endswith('.exe') and not ilow.startswith(('unins', 'setup', 'install', 'update')):
+                                    add_file(os.path.join(sub_dir, item))
+                except Exception:
+                    pass
+
+        # 2. Windows Registry
+        for reg_p in self._find_editor_from_windows_registry():
+            add_file(reg_p)
+
+        return found
+
+    def _find_editor_macos(self) -> list[str]:
+        if sys.platform != 'darwin':
+            return []
+        found: list[str] = []
+
+        # 1. Standard application locations (/Applications first as primary)
+        app_dirs = [
+            '/Applications',
+            os.path.expanduser('~/Applications'),
+            '/System/Applications',
+        ]
+        app_names = [
+            'YongPDF_text.app',
+            'YongPDF Text.app',
+            'YongPDF_Text.app',
+            '용PDF_text.app',
+            'main_codex1.app',
+        ]
+        for ad in app_dirs:
+            if not os.path.isdir(ad):
+                continue
+            for name in app_names:
+                full_p = os.path.join(ad, name)
+                if os.path.exists(full_p) and full_p not in found:
+                    found.append(full_p)
+
+        # 2. Spotlight / LaunchServices lookup by Bundle Identifier
+        try:
+            res = subprocess.run(
+                ['mdfind', 'kMDItemCFBundleIdentifier == "com.yongpdf.text"'],
+                capture_output=True, text=True, timeout=2
+            )
+            if res.returncode == 0 and res.stdout:
+                for line in res.stdout.strip().splitlines():
+                    p = line.strip()
+                    if p and os.path.exists(p) and p not in found:
+                        found.append(p)
+        except Exception:
+            pass
+
+        return found
+
+    def _get_macos_bundle_executable(self, app_path: str) -> Optional[str]:
+        if not (sys.platform == 'darwin' and app_path.endswith('.app') and os.path.isdir(app_path)):
+            return None
+        # 1. Parse Info.plist CFBundleExecutable
+        plist_path = os.path.join(app_path, 'Contents', 'Info.plist')
+        if os.path.isfile(plist_path):
+            try:
+                import plistlib
+                with open(plist_path, 'rb') as fp:
+                    pl = plistlib.load(fp)
+                    exe_name = pl.get('CFBundleExecutable')
+                    if exe_name:
+                        binary_path = os.path.join(app_path, 'Contents', 'MacOS', exe_name)
+                        if os.path.isfile(binary_path) and os.access(binary_path, os.X_OK):
+                            return binary_path
+            except Exception:
+                pass
+        # 2. Known default binaries in Contents/MacOS
+        macos_dir = os.path.join(app_path, 'Contents', 'MacOS')
+        if os.path.isdir(macos_dir):
+            for candidate in ('YongPDF_text', 'YongPDF Text', 'main_codex1'):
+                p = os.path.join(macos_dir, candidate)
+                if os.path.isfile(p) and os.access(p, os.X_OK):
+                    return p
+            try:
+                for entry in os.listdir(macos_dir):
+                    p = os.path.join(macos_dir, entry)
+                    if os.path.isfile(p) and os.access(p, os.X_OK):
+                        return p
+            except Exception:
+                pass
+        return None
+
     def _resolve_external_editor_command(self, target_path: str) -> Optional[tuple[str, list[str]]]:
         source_dir = os.path.dirname(os.path.abspath(__file__))
         exec_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else source_dir
         base_dir = getattr(sys, '_MEIPASS', exec_dir)
         candidates: list[tuple[str, bool]] = []
 
+        # 0. Check custom path in QSettings if user previously located it
+        if hasattr(self, 'settings'):
+            saved_custom = self.settings.value('text_editor_path', '')
+            if saved_custom and os.path.exists(saved_custom):
+                candidates.append((os.path.normpath(saved_custom), False))
+
+        # macOS: Prioritize /Applications/YongPDF_text.app and Spotlight search
+        if sys.platform == 'darwin':
+            mac_apps = self._find_editor_macos()
+            for ma in mac_apps:
+                candidates.append((os.path.normpath(ma), False))
+
+        # Windows: Prioritize _find_editor_windows (covers C:\Program Files, WOW64, registry, casing, .exe scanning)
+        if sys.platform.startswith('win'):
+            win_apps = self._find_editor_windows()
+            for wa in win_apps:
+                candidates.append((os.path.normpath(wa), False))
+
         search_roots = [base_dir]
         if source_dir not in search_roots:
             search_roots.append(source_dir)
         if exec_dir not in search_roots:
             search_roots.append(exec_dir)
-        if sys.platform == 'darwin':
+
+        # Windows-specific search roots (Inno Setup install locations)
+        if sys.platform.startswith('win'):
+            # Sibling and parent folders (e.g. C:\Program Files\YongPDF_page -> ..\YongPDF_text)
+            for parent_level in (exec_dir, os.path.dirname(exec_dir), os.path.dirname(os.path.dirname(exec_dir))):
+                if parent_level and os.path.isdir(parent_level):
+                    for sub in ('YongPDF_text', 'yongpdf_text', 'YongPDF', 'yongpdf', 'text', 'main_codex1', ''):
+                        p = os.path.normpath(os.path.join(parent_level, sub))
+                        if p not in search_roots and os.path.isdir(p):
+                            search_roots.append(p)
+
+            # Standard Program Files and LocalAppData directories
+            env_dirs = [
+                r"C:\Program Files",
+                r"C:\Program Files (x86)",
+                os.environ.get('ProgramFiles', r'C:\Program Files'),
+                os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'),
+                os.environ.get('ProgramW6432', r'C:\Program Files'),
+                os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Programs'),
+            ]
+            for ed in env_dirs:
+                if ed and os.path.isdir(ed):
+                    for sub in ('YongPDF_text', 'yongpdf_text', os.path.join('YongPDF', 'YongPDF_text'), os.path.join('YongPDF', 'yongpdf_text'), 'YongPDF', 'yongpdf'):
+                        p = os.path.normpath(os.path.join(ed, sub))
+                        if p not in search_roots and os.path.isdir(p):
+                            search_roots.append(p)
+
+            # Windows Registry (App Paths and Inno Setup Uninstall registry)
+            reg_paths = self._find_editor_from_windows_registry()
+            for rp in reg_paths:
+                candidates.append((os.path.normpath(rp), False))
+
+        elif sys.platform == 'darwin':
             app_root = os.path.normpath(os.path.join(exec_dir, '..', '..'))
             dist_root = os.path.normpath(os.path.join(exec_dir, '..', '..', '..'))
             resources_root = os.path.normpath(os.path.join(exec_dir, '..', 'Resources'))
-            for extra in (app_root, dist_root, resources_root):
-                if extra not in search_roots:
+            for extra in (app_root, dist_root, resources_root, '/Applications', os.path.expanduser('~/Applications')):
+                if extra not in search_roots and os.path.isdir(extra):
                     search_roots.append(extra)
         if sys.platform == 'darwin':
             resources_dir = os.path.normpath(os.path.join(exec_dir, '..', 'Resources'))
@@ -2088,7 +2721,7 @@ class PDFEditor(QMainWindow):
             candidates.append((norm, is_script))
 
         if sys.platform.startswith('win'):
-            for name in (TEXT_EDITOR_EXE_NAME, LEGACY_EDITOR_EXE_NAME):
+            for name in (TEXT_EDITOR_EXE_NAME, 'yongpdf_text.exe', LEGACY_EDITOR_EXE_NAME, 'yongpdf.exe'):
                 for root in search_roots:
                     add_candidate(os.path.join(root, name), False)
         else:
@@ -2112,10 +2745,10 @@ class PDFEditor(QMainWindow):
                     continue
                 return interpreter, [path, target_path]
             if sys.platform == 'darwin' and path.endswith('.app'):
-                app_binary = os.path.join(path, TEXT_EDITOR_APP_BINARY)
-                if os.path.isfile(app_binary):
+                app_binary = self._get_macos_bundle_executable(path)
+                if app_binary and os.path.isfile(app_binary):
                     return app_binary, [target_path]
-                return '/usr/bin/open', ['-a', path, target_path]
+                return '/usr/bin/open', ['-n', '-W', '-a', path, target_path]
             if sys.platform.startswith('win') or os.access(path, os.X_OK):
                 return path, [target_path]
         return None
@@ -3438,8 +4071,14 @@ class PDFEditor(QMainWindow):
                 return (['choco', 'install', 'ghostscript', '-y'], False, 'choco')
             return None
         if sys.platform == 'darwin':
-            if shutil.which('brew'):
-                return (['/bin/bash', '-lc', 'brew install ghostscript'], True, 'Homebrew')
+            brew_bin = shutil.which('brew')
+            if not brew_bin:
+                for bc in ('/opt/homebrew/bin/brew', '/usr/local/bin/brew'):
+                    if os.path.isfile(bc) and os.access(bc, os.X_OK):
+                        brew_bin = bc
+                        break
+            if brew_bin:
+                return ([brew_bin, 'install', 'ghostscript'], False, 'Homebrew')
             return None
         # For other platforms, automatic install is not attempted to avoid requiring elevated privileges.
         return None
@@ -3993,6 +4632,24 @@ class PDFEditor(QMainWindow):
                         except Exception:
                             pass
                         return normalized
+        if sys.platform == 'darwin':
+            mac_candidates = [
+                '/opt/homebrew/bin/gs',
+                '/usr/local/bin/gs',
+                '/opt/local/bin/gs',
+                '/usr/bin/gs',
+            ]
+            for candidate in mac_candidates:
+                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    normalized = self._normalize_ghostscript_executable(candidate)
+                    if normalized and os.path.isfile(normalized):
+                        self._cached_ghostscript_path = normalized
+                        try:
+                            if hasattr(self, 'settings'):
+                                self.settings.setValue('ghostscript_path', normalized)
+                        except Exception:
+                            pass
+                        return normalized
         candidate_names = ['gs']
         if sys.platform.startswith('win'):
             candidate_names = ['gswin64c.exe', 'gswin32c.exe', 'gs']
@@ -4124,6 +4781,60 @@ class PDFEditor(QMainWindow):
         try:
             resolved = self._resolve_external_editor_command(target_path)
             if not resolved:
+                if sys.platform == 'darwin':
+                    confirm_msg = (
+                        "YongPDF_text(텍스트 편집기) 앱을 찾을 수 없습니다.\n"
+                        "/Applications 폴더의 YongPDF_text.app 위치를 직접 지정하시겠습니까?"
+                        if getattr(self, 'language', 'ko') == 'ko' else
+                        "Could not locate YongPDF_text.\nWould you like to select YongPDF_text.app in /Applications?"
+                    )
+                    default_search_dir = '/Applications'
+                    file_filter = "Applications (*.app);;All Files (*.*)"
+                else:
+                    confirm_msg = (
+                        "YongPDF_text(텍스트 편집기) 앱을 찾을 수 없습니다.\n"
+                        "설치된 실행 파일(YongPDF_text.exe)의 위치를 직접 지정하시겠습니까?"
+                        if getattr(self, 'language', 'ko') == 'ko' else
+                        "Could not locate YongPDF_text.\nWould you like to manually locate the executable?"
+                    )
+                    default_search_dir = ""
+                    for cand_dir in (
+                        r"C:\Program Files\yongpdf_text",
+                        r"C:\Program Files\YongPDF_text",
+                        r"C:\Program Files (x86)\yongpdf_text",
+                        r"C:\Program Files (x86)\YongPDF_text",
+                        r"C:\Program Files",
+                        r"C:\Program Files (x86)",
+                        os.environ.get('ProgramFiles', ''),
+                    ):
+                        if cand_dir and os.path.isdir(cand_dir):
+                            default_search_dir = cand_dir
+                            break
+                    if not default_search_dir:
+                        default_search_dir = os.environ.get('ProgramFiles', '')
+                    file_filter = "Executable (*.exe);;All Files (*.*)"
+
+                res = QMessageBox.question(
+                    self,
+                    self.app_name,
+                    confirm_msg,
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes
+                )
+                if res == QMessageBox.StandardButton.Yes:
+                    chosen, _ = QFileDialog.getOpenFileName(
+                        self,
+                        "YongPDF_text 선택" if getattr(self, 'language', 'ko') == 'ko' else "Select YongPDF_text",
+                        default_search_dir,
+                        file_filter
+                    )
+                    if chosen and os.path.exists(chosen):
+                        self.settings.setValue('text_editor_path', chosen)
+                        resolved = self._resolve_external_editor_command(target_path)
+                        if not resolved and os.path.isfile(chosen):
+                            resolved = (chosen, [target_path])
+
+            if not resolved:
                 msg_box = QMessageBox(self)
                 msg_box.setIcon(QMessageBox.Icon.Critical)
                 msg_box.setWindowTitle(self.app_name)
@@ -4143,6 +4854,9 @@ class PDFEditor(QMainWindow):
             self._show_external_loading_dialog()
 
             process = QProcess(self)
+            exe_dir = os.path.dirname(program)
+            if exe_dir and os.path.isdir(exe_dir):
+                process.setWorkingDirectory(exe_dir)
             process.setProgram(program)
             process.setArguments(arguments)
             process.finished.connect(self._on_external_editor_finished)
@@ -4309,9 +5023,31 @@ class PDFEditor(QMainWindow):
         box.setWindowTitle(self.t('app_info_title'))
         box.setTextFormat(Qt.TextFormat.RichText)
         box.setStandardButtons(QMessageBox.StandardButton.Ok)
-        text_html = '<br>'.join(self.t('about_text').splitlines())
-        text_html += "<br/><br/><span style='font-size:11px;color:#606060'>© 2026 YongPDF · Hwang Jinsu. All rights reserved.</span>"
-        box.setText(f"<div style='min-width:320px'>{text_html}</div>")
+        ok_btn = box.button(QMessageBox.StandardButton.Ok)
+        if ok_btn:
+            ok_btn.setText(self.t('btn_ok', default='확인') if hasattr(self, 't') else '확인')
+
+        raw_lines = self.t('about_text').splitlines()
+        formatted_lines = []
+        if raw_lines:
+            first_line = raw_lines[0]
+            if "v1." not in first_line:
+                first_line = f"<b style='font-size:15px;'>{first_line}</b> <span style='color:#007acc;font-weight:bold;font-size:13px;'>{APP_VERSION}</span>"
+            else:
+                first_line = f"<b style='font-size:15px;'>{first_line}</b>"
+            formatted_lines.append(first_line)
+            version_label = "버전" if getattr(self, 'language', 'ko') == 'ko' else "Version"
+            formatted_lines.append(f"<b>{version_label}:</b> {APP_VERSION}")
+            formatted_lines.append(f"<b>GitHub:</b> <a href='{GITHUB_URL}'>{GITHUB_URL}</a>")
+            formatted_lines.extend(raw_lines[1:])
+        else:
+            formatted_lines.append(f"<b style='font-size:15px;'>YongPDF_page</b> <span style='color:#007acc;font-weight:bold;'>{APP_VERSION}</span>")
+            formatted_lines.append(f"<b>Version:</b> {APP_VERSION}")
+            formatted_lines.append(f"<b>GitHub:</b> <a href='{GITHUB_URL}'>{GITHUB_URL}</a>")
+
+        text_html = '<br>'.join(formatted_lines)
+        text_html += "<br/><br/><span style='font-size:11px;color:#8a94a3'>© 2026 YongPDF · Hwang Jinsu. All rights reserved.</span>"
+        box.setText(f"<div style='min-width:340px'>{text_html}</div>")
         pix = _load_static_pixmap('YongPDF_page_img.png')
         if pix:
             scaled = pix.scaled(160, 160, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
@@ -4348,8 +5084,8 @@ class PDFEditor(QMainWindow):
                 "Distributed in compliance with their licenses.\n\n"
             )
         body = (
-            "YongPDF — GNU GPL v3.0\n"
-            "  https://github.com/HwangJinsu/YongPDF\n\n"
+            f"YongPDF — GNU GPL v3.0\n"
+            f"  {GITHUB_URL}\n\n"
             "--------------------------------------------------\n\n"
             "PyMuPDF (MuPDF) — GNU GPL v3.0 / AGPL-3.0\n"
             "  https://pymupdf.readthedocs.io/ / https://mupdf.com/\n\n"
@@ -4567,12 +5303,47 @@ class PDFEditor(QMainWindow):
                     pass
                 self._suppress_scroll_sync = old_suppress
 
+class PdfApplication(QApplication):
+    """macOS 파일 연결(Finder 더블클릭, Dock 드롭) 처리를 지원하는 애플리케이션 클래스"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.editor: Optional[PDFEditor] = None
+        self.pending_open_file: Optional[str] = None
+
+    def event(self, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.FileOpen:
+            file_path = getattr(event, 'file', lambda: '')()
+            if file_path:
+                if self.editor and hasattr(self.editor, 'open_file'):
+                    self.editor.open_file(file_path)
+                    try:
+                        self.editor.raise_()
+                        self.editor.activateWindow()
+                    except Exception:
+                        pass
+                else:
+                    self.pending_open_file = file_path
+            return True
+        return super().event(event)
+
+
 if __name__ == '__main__':
-    app = QApplication(sys.argv)
+    app = PdfApplication(sys.argv)
     splash = _show_startup_splash(app)
     editor: Optional[PDFEditor] = None
     try:
         editor = PDFEditor()
+        app.editor = editor
+
+        initial_path = sys.argv[1] if len(sys.argv) > 1 and os.path.exists(sys.argv[1]) else None
+        if not initial_path and app.pending_open_file:
+            initial_path = app.pending_open_file
+        if initial_path and os.path.exists(initial_path):
+            try:
+                editor.open_file(initial_path)
+            except Exception as e:
+                print(f"[Startup] Failed to open {initial_path}: {e}")
+
         if splash:
             splash.showMessage(
                 'PDF 문서를 준비하는 중입니다...',

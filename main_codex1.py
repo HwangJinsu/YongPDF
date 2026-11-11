@@ -13,22 +13,25 @@ from typing import Optional, Tuple
 
 # Editor build marker for sync/debug
 __EDITOR_BUILD__ = "main_codex1.py patched for font embedding + hover @ 2025-09-20 17:21"
+APP_VERSION = "v1.1"
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QPushButton, QLabel, QFileDialog, QDialog, QLineEdit, 
     QFontComboBox, QCheckBox, QDialogButtonBox, QFormLayout, QMessageBox,
     QScrollArea, QFrame, QSizePolicy, QListWidget, QListWidgetItem, QColorDialog,
-    QProgressDialog, QGraphicsColorizeEffect, QSplashScreen, QSpinBox, QTextEdit
+    QProgressDialog, QGraphicsColorizeEffect, QSplashScreen, QSpinBox, QTextEdit,
+    QToolBar, QRadioButton, QButtonGroup, QSplitter, QToolTip
 )
-from PySide6.QtWidgets import QDoubleSpinBox
+from PySide6.QtWidgets import QDoubleSpinBox, QSlider
 from PySide6.QtGui import (
     QPixmap, QImage, QFont, QPainter, QPen, QColor, QBrush,
     QFontDatabase, QPalette, QIntValidator, QDragEnterEvent, QDropEvent, QFontMetrics,
-    QRawFont, QFontInfo, QFontMetricsF, QAction
+    QRawFont, QFontInfo, QFontMetricsF, QAction, QActionGroup, QCursor, QKeySequence, QPainterPath,
+    QIcon
 )
 from PySide6.QtCore import (
     Qt, Signal, QPoint, QPointF, QTimer, QSize, QPropertyAnimation, 
-    QRect, QRectF, QEasingCurve, QObject, QBuffer, QByteArray, QSettings, QVariantAnimation
+    QRect, QRectF, QEasingCurve, QObject, QBuffer, QByteArray, QSettings, QVariantAnimation, QEvent
 )
 import fitz  # PyMuPDF
 from fontTools.ttLib import TTFont
@@ -211,6 +214,67 @@ def _load_static_pixmap(filename: str) -> Optional[QPixmap]:
         return None
     return pixmap
 
+# --- Bullets & Hancom HWP PUA Defense Utilities ---
+BULLET_CHARS = {
+    '•',  # 0x2022 BULLET
+    '‣',  # 0x2023 TRIANGULAR BULLET
+    '⁃',  # 0x2043 HYPHEN BULLET
+    '∙',  # 0x2219 BULLET OPERATOR
+    '·',  # 0x00B7 MIDDLE DOT
+    'ㆍ', # 0x318d ARAEA
+    '･',  # 0xff65 HALFWIDTH KATAKANA MIDDLE DOT
+    '○',  # 0x25CB WHITE CIRCLE
+    '●',  # 0x25CF BLACK CIRCLE
+    '◎',  # 0x25CE BULLSEYE
+    '◇',  # 0x25C7 WHITE DIAMOND
+    '◆',  # 0x25C6 BLACK DIAMOND
+    '□',  # 0x25A1 WHITE SQUARE
+    '■',  # 0x25A0 BLACK SQUARE
+    '▪',  # 0x25AA BLACK SMALL SQUARE
+    '▫',  # 0x25AB WHITE SMALL SQUARE
+    '▷',  # 0x25B7 WHITE RIGHT-POINTING TRIANGLE
+    '▶',  # 0x25B6 BLACK RIGHT-POINTING TRIANGLE
+    '▸',  # 0x25B8 BLACK RIGHT-POINTING SMALL TRIANGLE
+    '◁',  # 0x25C1 WHITE LEFT-POINTING TRIANGLE
+    '◀',  # 0x25C0 BLACK LEFT-POINTING TRIANGLE
+    '△',  # 0x25B3 WHITE UP-POINTING TRIANGLE
+    '▲',  # 0x25B2 BLACK UP-POINTING TRIANGLE
+    '▽',  # 0x25BD WHITE DOWN-POINTING TRIANGLE
+    '▼',  # 0x25BC BLACK DOWN-POINTING TRIANGLE
+    '※',  # 0x203B REFERENCE MARK
+    '★',  # 0x2605 BLACK STAR
+    '☆',  # 0x2606 WHITE STAR
+    '☞',  # 0x261E WHITE RIGHT POINTING INDEX
+    '☜',  # 0x261C WHITE LEFT POINTING INDEX
+    '→',  # 0x2192 RIGHTWARDS ARROW
+    '⇒',  # 0x21D2 RIGHTWARDS DOUBLE ARROW
+    '➨',  # 0x27A8 HEAVY CONCAVE-POINTED BLACK RIGHTWARDS ARROW
+    '✔',  # 0x2714 HEAVY CHECK MARK
+    '✓',  # 0x2713 CHECK MARK
+    '◦',  # 0x25E6 WHITE BULLET
+    '◘',  # 0x25D8 INVERSE BULLET
+    '◙',  # 0x25D9 INVERSE WHITE CIRCLE
+    '❐',  # 0x2750 UPPER RIGHT DROP-SHADOWED WHITE SQUARE
+    '❑',  # 0x274F LOWER RIGHT DROP-SHADOWED WHITE SQUARE
+    '❖',  # 0x2756 BLACK DIAMOND MINUS WHITE X
+    '✦',  # 0x2726 BLACK FOUR POINTED STAR
+    '✧',  # 0x2727 WHITE FOUR POINTED STAR
+}
+
+def is_pua_char(c: str) -> bool:
+    """한컴 HWP 전용 특수문자 및 유니코드 사용자 정의 영역(PUA) 판별"""
+    if not c:
+        return False
+    o = ord(c)
+    return (0xE000 <= o <= 0xF8FF) or (0xF0000 <= o <= 0x10FFFF)
+
+def is_symbol_font(font_name: str) -> bool:
+    """기호/딩뱃 폰트(Wingdings, Symbol 등) 판별"""
+    if not font_name:
+        return False
+    fn = font_name.lower()
+    return any(k in fn for k in ['wingdings', 'webdings', 'symbol', 'zapfdingbats'])
+
 # --- Enhanced Font Utilities ---
 class FontMatcher:
     def __init__(self):
@@ -268,6 +332,80 @@ class FontMatcher:
         
         return None
 
+# --- 한컴오피스 폰트 파일명/약어 ↔ 표준 한글 폰트명 매핑 테이블 ---
+HNC_FONT_NAME_MAP: dict[str, str] = {
+    # HY 글꼴 (한양정보통신/한컴)
+    'h2gtre': 'HY견고딕',
+    'h2gtrm': 'HY고딕M',
+    'h2hdrm': 'HY헤드라인M',
+    'h2db': 'HY둥근고딕',
+    'h2drb': 'HY둥근고딕B',
+    'h2drm': 'HY둥근고딕M',
+    'h2drl': 'HY둥근고딕L',
+    'h2grre': 'HY견출고딕',
+    'h2grrm': 'HY중고딕',
+    'h2mre': 'HY견명조',
+    'h2mrm': 'HY명조M',
+    'h2mjre': 'HY견명조',
+    'h2mjrm': 'HY명조M',
+    'h2greb': 'HY궁서B',
+    'h2grem': 'HY궁서',
+    'h2gsob': 'HY궁서B',
+    'h2gsom': 'HY궁서',
+    'h2snrm': 'HY신명조',
+    'h2snre': 'HY신견명조',
+    'h2trm': 'HY태백산맥',
+    'h2bdr': 'HY바다',
+    'hypmokgak': 'HY목각파임B',
+    'hypmpb': 'HY목각파임B',
+    'hypmpl': 'HY목각파임L',
+    'hywulb': 'HY울릉도B',
+    'hywulm': 'HY울릉도M',
+    'hypost': 'HY엽서M',
+    'hypostb': 'HY엽서B',
+    'hypostl': 'HY엽서L',
+    'h2snb': 'HY신그래픽B',
+    'h2snm': 'HY신그래픽M',
+
+    # 함초롬 글꼴 (한컴 대표 폰트)
+    'hmkmr': '함초롬바탕',
+    'hmkmrl': '함초롬바탕',
+    'hmkmr_l': '함초롬바탕',
+    'hmkmb': '함초롬바탕',
+    'hmkmd': '함초롬돋움',
+    'hmkmdb': '함초롬돋움',
+    'hamchorombatang': '함초롬바탕',
+    'hamchoromdotum': '함초롬돋움',
+    'hcrbatang': '함초롬바탕',
+    'hcrdotum': '함초롬돋움',
+
+    # 휴먼 글꼴 (한컴)
+    'hmfmm': '휴먼명조',
+    'hmfme': '휴먼견명조',
+    'hmfgm': '휴먼고딕',
+    'hmfge': '휴먼견고딕',
+    'hmfgr': '휴먼중고딕',
+    'hmfdb': '휴먼둥근헤드라인',
+    'hmfmr': '휴먼가는명조',
+    'hmfgrb': '휴먼옛체',
+    'hmfma': '휴먼매직체',
+    'hmfex': '휴먼엑스포',
+
+    # 한컴 글꼴 (한컴오피스 전용)
+    'hcomn': '한컴바탕',
+    'hcomd': '한컴돋움',
+    'hcomc': '한컴쿨재즈',
+    'hcoms': '한컴솔잎',
+    'hcomy': '한컴윤체',
+    'hancombatang': '한컴바탕',
+    'hancomdotum': '한컴돋움',
+
+    # 기타 자주 사용되는 한컴 번들 폰트
+    'mdart': 'MD아트체',
+    'mdgaesung': 'MD개성체',
+    'mdsol': 'MD솔체',
+}
+
 class SystemFontManager:
     _instance = None
     def __new__(cls):
@@ -282,24 +420,229 @@ class SystemFontManager:
 
     def _get_all_names_from_font(self, font_path):
         names = set()
+        base_name = os.path.splitext(os.path.basename(font_path))[0]
+        names.add(base_name)
+
+        # 파일명 약어(한컴 등) 매핑 확인
+        clean_key = re.sub(r'[^a-z0-9]', '', base_name.lower())
+        if clean_key in HNC_FONT_NAME_MAP:
+            kor_name = HNC_FONT_NAME_MAP[clean_key]
+            names.add(kor_name)
+            names.add(kor_name.replace(' ', ''))
+            names.add(kor_name.replace(' ', '-'))
+
         try:
             font = TTFont(font_path, fontNumber=0)
-            names.add(os.path.splitext(os.path.basename(font_path))[0])
-            for record in font['name'].names:
-                if record.nameID in [1, 4, 6]:  # Family name, Full name, PostScript name
-                    try:
-                        name = record.toUnicode()
+            if 'name' in font:
+                for record in font['name'].names:
+                    if record.nameID in [1, 4, 6]:  # Family name, Full name, PostScript name
+                        name = None
+                        try:
+                            name = record.toUnicode()
+                        except Exception:
+                            # 구형 한컴/한국어 폰트의 name 테이블 인코딩 fallback (CP949, EUC-KR, UTF-16-BE)
+                            raw = getattr(record, 'string', None)
+                            if raw and isinstance(raw, (bytes, bytearray)):
+                                for enc in ('cp949', 'euc-kr', 'utf-16-be', 'utf-8', 'latin-1'):
+                                    try:
+                                        decoded = raw.decode(enc).replace('\x00', '').strip()
+                                        if decoded:
+                                            name = decoded
+                                            break
+                                    except Exception:
+                                        continue
                         if name:
-                            names.add(name)
-                            # 하이픈과 공백 변형 추가
-                            names.add(name.replace('-', ' '))
-                            names.add(name.replace(' ', '-'))
-                    except (UnicodeDecodeError, AttributeError):
-                        pass
+                            name = name.strip()
+                            if name:
+                                names.add(name)
+                                # 하이픈과 공백 변형 추가
+                                names.add(name.replace('-', ' '))
+                                names.add(name.replace(' ', '-'))
+                                # 한글명이 들어있는 경우 공백 제거 버전도 추가
+                                if any('가' <= ch <= '힣' for ch in name):
+                                    names.add(name.replace(' ', ''))
         except Exception as e:
             print(f"Error reading font {font_path}: {e}")
-            names.add(os.path.splitext(os.path.basename(font_path))[0])
+            names.add(base_name)
         return list(names)
+
+    def _scan_hnc_subdirs_for_fonts(self, root_path: str, target_set: set[str], max_depth: int = 5) -> None:
+        """지정된 디렉토리 하위에서 TTF, Fonts, Hwp 폰트 디렉토리를 깊이 제한과 함께 고속 탐색."""
+        if not root_path or not os.path.isdir(root_path):
+            return
+
+        # 제외할 비폰트 대용량 디렉토리명 (고속 탐색을 위한 가지치기)
+        skip_dirs = {
+            'clipart', 'cliparts', 'sample', 'samples', 'template', 'templates',
+            'manual', 'manuals', 'help', 'chart', 'theme', 'icons', 'image', 'images',
+            'sound', 'sounds', 'plugin', 'plugins', 'temp', 'backup'
+        }
+
+        norm_root = os.path.abspath(root_path)
+        root_depth = norm_root.count(os.sep)
+
+        try:
+            for current_root, dirs, files in os.walk(norm_root):
+                # 깊이 제한
+                current_depth = current_root.count(os.sep) - root_depth
+                if current_depth > max_depth:
+                    dirs.clear()
+                    continue
+
+                # 불필요 디렉토리 가지치기 (in-place pruning)
+                dirs[:] = [d for d in dirs if d.lower() not in skip_dirs]
+
+                # 디렉토리명 체크: TTF, Hwp, Fonts 등
+                base_name = os.path.basename(current_root).lower()
+                if base_name in ('ttf', 'hwp', 'fonts'):
+                    has_font = any(f.lower().endswith(('.ttf', '.otf', '.ttc')) for f in files)
+                    if has_font or base_name == 'hwp':
+                        target_set.add(os.path.abspath(current_root))
+                elif any(f.lower().endswith(('.ttf', '.otf', '.ttc')) for f in files):
+                    # 경로에 font 또는 ttf 또는 hnc 키워드가 있는 경우
+                    c_lower = current_root.lower()
+                    if 'font' in c_lower or 'ttf' in c_lower or 'hnc' in c_lower:
+                        target_set.add(os.path.abspath(current_root))
+        except (OSError, PermissionError):
+            pass
+
+    def _get_hnc_font_directories(self) -> list[str]:
+        """한컴오피스(Hnc) 설치 경로에서 폰트 디렉토리들을 탐색하여 반환.
+        다양한 한컴오피스 버전(2010, 2014, NEO, 2018, 2020, 2022, 2024 등) 및
+        비표준 설치 드라이브/디렉토리를 레지스트리와 정적/동적 스캔으로 자동 감지.
+        """
+        found_dirs = set()
+
+        # 0. 환경 변수로 지정된 경로가 있다면 우선 확인
+        env_hnc = os.environ.get("HNC_FONT_DIR")
+        if env_hnc and os.path.isdir(env_hnc):
+            found_dirs.add(os.path.abspath(env_hnc))
+
+        if sys.platform == "win32":
+            # 1. Windows 레지스트리 기반 탐색
+            try:
+                import winreg
+                reg_roots = [
+                    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\HNC\HOffice"),
+                    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\HNC\HOffice"),
+                    (winreg.HKEY_CURRENT_USER, r"SOFTWARE\HNC\HOffice"),
+                    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\HNC\Shared"),
+                    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\HNC\Shared"),
+                ]
+
+                for hkey, subkey in reg_roots:
+                    try:
+                        with winreg.OpenKey(hkey, subkey) as root_key:
+                            # 1-a. 현재 키 자체의 값들 조사
+                            try:
+                                count = winreg.QueryInfoKey(root_key)[1]
+                                for i in range(count):
+                                    name, val, _ = winreg.EnumValue(root_key, i)
+                                    if isinstance(val, str) and os.path.isdir(val):
+                                        self._scan_hnc_subdirs_for_fonts(val, found_dirs)
+                            except OSError:
+                                pass
+
+                            # 1-b. 서브키(버전별 키: 8.0, 9.0, 10.0, 11.0, 12.0 등) 조사
+                            try:
+                                subkey_count = winreg.QueryInfoKey(root_key)[0]
+                                for i in range(subkey_count):
+                                    ver_name = winreg.EnumKey(root_key, i)
+                                    try:
+                                        with winreg.OpenKey(root_key, ver_name) as ver_key:
+                                            v_count = winreg.QueryInfoKey(ver_key)[1]
+                                            for j in range(v_count):
+                                                v_name, val, _ = winreg.EnumValue(ver_key, j)
+                                                if isinstance(val, str) and os.path.isdir(val):
+                                                    self._scan_hnc_subdirs_for_fonts(val, found_dirs)
+                                    except OSError:
+                                        continue
+                            except OSError:
+                                pass
+                    except OSError:
+                        continue
+            except Exception as e:
+                print(f"Hnc registry search note: {e}")
+
+            # 2. 알려진 정적 경로 후보군 (버전별 HOffice 디렉토리 및 Shared 디렉토리)
+            drives = []
+            sys_drive = os.environ.get("SystemDrive", "C:")
+            if sys_drive:
+                drives.append(sys_drive.rstrip('\\'))
+            for d in ["C:", "D:", "E:", "F:"]:
+                if d not in drives and os.path.exists(d + "\\"):
+                    drives.append(d)
+
+            program_folder_names = ["Program Files", "Program Files (x86)"]
+
+            office_version_names = [
+                "Office 2026", "Office 2024", "Office 2022", "Office 2020",
+                "Office 2018", "Office NEO", "Office 2014", "Office 2010",
+                "HOffice", "Office"
+            ]
+            hoffice_subdirs = [
+                "HOffice140", "HOffice130", "HOffice120", "HOffice110",
+                "HOffice100", "HOffice95", "HOffice90", "HOffice80", "HOffice"
+            ]
+
+            hnc_roots_to_scan = set()
+
+            for drive in drives:
+                for pf in program_folder_names:
+                    hnc_root = os.path.join(drive + "\\", pf, "Hnc")
+                    if os.path.isdir(hnc_root):
+                        hnc_roots_to_scan.add(hnc_root)
+
+                    # 정적 경로 확인 (Hwp, TTF)
+                    for off_ver in office_version_names:
+                        for hoff in hoffice_subdirs:
+                            p1 = os.path.join(drive + "\\", pf, "Hnc", off_ver, hoff, "Shared", "TTF", "Hwp")
+                            p2 = os.path.join(drive + "\\", pf, "Hnc", off_ver, hoff, "Shared", "TTF")
+                            if os.path.isdir(p1):
+                                found_dirs.add(os.path.abspath(p1))
+                            if os.path.isdir(p2):
+                                found_dirs.add(os.path.abspath(p2))
+
+                        p3 = os.path.join(drive + "\\", pf, "Hnc", off_ver, "Shared", "TTF", "Hwp")
+                        p4 = os.path.join(drive + "\\", pf, "Hnc", off_ver, "Shared", "TTF")
+                        if os.path.isdir(p3):
+                            found_dirs.add(os.path.abspath(p3))
+                        if os.path.isdir(p4):
+                            found_dirs.add(os.path.abspath(p4))
+
+                    p5 = os.path.join(drive + "\\", pf, "Hnc", "Shared", "TTF", "Hwp")
+                    p6 = os.path.join(drive + "\\", pf, "Hnc", "Shared", "TTF")
+                    p7 = os.path.join(drive + "\\", pf, "Hnc", "Shared", "Fonts")
+                    for p in (p5, p6, p7):
+                        if os.path.isdir(p):
+                            found_dirs.add(os.path.abspath(p))
+
+            # 3. 발견된 Hnc 루트들에 대해 동적 스캔 (깊이 5)
+            for hnc_root in hnc_roots_to_scan:
+                self._scan_hnc_subdirs_for_fonts(hnc_root, found_dirs, max_depth=5)
+
+        else:
+            # macOS / Linux 환경에서 Hnc 폰트 디렉토리 탐색 지원
+            candidate_hnc_dirs = [
+                os.path.expanduser("~/Library/Fonts/Hnc"),
+                os.path.expanduser("~/Library/Fonts/Hwp"),
+                "/Library/Fonts/Hnc",
+                "/Library/Fonts/Hwp",
+                os.path.expanduser("~/.fonts/Hnc"),
+                os.path.expanduser("~/.fonts/Hwp"),
+                os.path.expanduser("~/.local/share/fonts/Hnc"),
+                os.path.expanduser("~/.local/share/fonts/Hwp"),
+            ]
+            for cand in candidate_hnc_dirs:
+                if os.path.isdir(cand):
+                    found_dirs.add(os.path.abspath(cand))
+
+        valid_dirs = [d for d in found_dirs if os.path.isdir(d)]
+        if valid_dirs:
+            print(f"Hnc font directories discovered: {len(valid_dirs)} paths")
+            for vd in valid_dirs:
+                print(f"  [HNC] {vd}")
+        return sorted(valid_dirs)
 
     def _find_system_fonts(self):
         font_map = {}
@@ -366,6 +709,15 @@ class SystemFontManager:
             for additional_dir in additional_linux_dirs:
                 if os.path.exists(additional_dir) and additional_dir not in font_dirs:
                     font_dirs.append(additional_dir)
+
+        # 한컴오피스(Hnc) 폰트 디렉토리 자동 감지 및 병합
+        try:
+            hnc_dirs = self._get_hnc_font_directories()
+            for h_dir in hnc_dirs:
+                if h_dir and os.path.isdir(h_dir) and h_dir not in font_dirs:
+                    font_dirs.append(h_dir)
+        except Exception as e:
+            print(f"Warning: Error detecting Hnc font directories: {e}")
         
         # 중복 제거
         font_dirs = list(set(font_dirs))
@@ -603,7 +955,12 @@ class SystemFontManager:
                         return kor_candidates[0]
                 except Exception:
                     pass
-            # 파일명/영문 별칭 (영→한)
+            clean = font_name.split('+')[-1] if font_name and '+' in font_name else (font_name or '')
+            # 파일명/영문 별칭 (영→한) - HNC_FONT_NAME_MAP 우선 확인
+            clean_key = re.sub(r'[^a-z0-9]', '', clean.lower())
+            if clean_key in HNC_FONT_NAME_MAP:
+                return HNC_FONT_NAME_MAP[clean_key]
+
             filename_aliases = {
                 'h2gtre': 'HY견고딕',
                 'h2hdrm': 'HY헤드라인M',
@@ -621,14 +978,13 @@ class SystemFontManager:
                 'noto sans cjk kr': '본고딕',
                 'noto sans kr': '노토 산스 KR',
             }
-            key = (font_name or '').lower().replace(' ', '').replace('-', '')
+            key = clean.lower().replace(' ', '').replace('-', '')
             if key in filename_aliases:
                 return filename_aliases[key]
-            ek = (font_name or '').lower()
+            ek = clean.lower()
             if ek in english_to_kor:
                 return english_to_kor[ek]
             # 마지막: 정제된 입력명 반환
-            clean = font_name.split('+')[-1] if font_name and '+' in font_name else (font_name or '')
             return clean
         except Exception:
             return font_name or ''
@@ -642,6 +998,18 @@ class SystemFontManager:
         clean_font_name = pdf_font_name
         if '+' in pdf_font_name:
             clean_font_name = pdf_font_name.split('+')[-1]
+            
+        # [복원] HWP / Ghostscript 생성 한글 폰트명의 Latin-1 깨짐 복원 (예: ÈÞ¸Õ°íµñ -> 휴먼고딕)
+        for fn_candidate in (clean_font_name, pdf_font_name):
+            try:
+                b = fn_candidate.encode('latin1')
+                dec = b.decode('cp949')
+                if dec and any('\uac00' <= ch <= '\ud7a3' for ch in dec):
+                    clean_font_name = dec
+                    break
+            except Exception:
+                pass
+
         # 추가 정규화: 하위표기 제거 및 특수 접미사 제거
         norm = clean_font_name
         norm = re.sub(r"[,\(\)\[\]]", " ", norm)   # 괄호/콤마 제거
@@ -659,7 +1027,22 @@ class SystemFontManager:
                 if finalized:
                     return finalized
 
-        # 파일명 별칭 매핑 (예: H2gtrE -> HY견고딕)
+        # 파일명 별칭 매핑 (예: H2gtrE -> HY견고딕, HMKMR -> 함초롬바탕)
+        for cand_name in [norm, clean_font_name, pdf_font_name]:
+            if not cand_name:
+                continue
+            cand_key = re.sub(r'[^a-z0-9]', '', cand_name.lower())
+            if cand_key in HNC_FONT_NAME_MAP:
+                mapped_kor = HNC_FONT_NAME_MAP[cand_key]
+                finalized = self._finalize_font_name(mapped_kor)
+                if finalized:
+                    return finalized
+                # font_map에서 부분 매칭도 시도
+                for fn in self.font_map.keys():
+                    if mapped_kor in fn:
+                        finalized = self._finalize_font_name(fn)
+                        if finalized:
+                            return finalized
         filename_aliases = {
             '##h2gtre': 'HY견고딕',
             '##h2hdrm': 'HY헤드라인M',
@@ -675,6 +1058,26 @@ class SystemFontManager:
                 finalized = self._finalize_font_name(font_name)
                 if finalized:
                     return finalized
+
+        # 한국어 대표 서체 패밀리 우선 매칭 (difflib 엉뚱한 매칭 방지)
+        lower_name = norm.lower()
+        clean_lower = clean_font_name.lower()
+        if any(k in lower_name or k in clean_lower for k in ('malgun', '맑은고딕', '맑은 고딕')):
+            for cand in ['Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', 'NanumGothic', 'Nanum Gothic']:
+                if cand in self.font_map:
+                    return self._finalize_font_name(cand)
+        if any(k in lower_name or k in clean_lower for k in ('dotum', '돋움', '고딕', 'gothic')):
+            for cand in ['Apple SD Gothic Neo', 'NanumGothic', 'Nanum Gothic', 'Dotum', '돋움']:
+                if cand in self.font_map:
+                    return self._finalize_font_name(cand)
+        if any(k in lower_name or k in clean_lower for k in ('batang', '바탕', '명조', 'myeongjo', 'myungjo')):
+            for cand in ['Batang', '바탕', 'AppleMyungjo', 'Nanum Myeongjo', 'NanumMyeongjo']:
+                if cand in self.font_map:
+                    return self._finalize_font_name(cand)
+        if any(k in lower_name or k in clean_lower for k in ('gulim', '굴림')):
+            for cand in ['Gulim', '굴림', 'Apple SD Gothic Neo', 'NanumGothic']:
+                if cand in self.font_map:
+                    return self._finalize_font_name(cand)
 
         # 새로운 FontMatcher 사용
         best_match = self.font_matcher.find_best_match(norm)
@@ -812,6 +1215,7 @@ class PdfFontExtractor:
 class TextEditorDialog(QDialog):
     def __init__(self, span_info, pdf_fonts=None, parent=None):
         super().__init__(parent)
+        self.span_info = span_info
         self.main_window = parent if isinstance(parent, QMainWindow) else None
         self.overlay_key = (span_info.get('page_num'), span_info.get('overlay_id')) if span_info.get('overlay_id') is not None else None
         
@@ -822,46 +1226,23 @@ class TextEditorDialog(QDialog):
 
         self.setWindowTitle(self._t('text_editor_title'))
         self.setMinimumSize(500, 350)
+        self.setModal(False)
         
         # 추가 위젯 import
         from PySide6.QtWidgets import QGroupBox, QGridLayout, QComboBox
         
-        # 텍스트 편집 (한글 공백 문제 해결 - 개선된 버전)
+        # 텍스트 편집 (특수문자 · ( ) , 및 공백/스페이스 1:1 온전한 보존)
         original_text = span_info.get('text', '')
-        
-        # 라인 텍스트가 있는 경우 컨텍스트를 고려한 텍스트 추출 (사각형 선택 영역 존중)
-        if 'line_text' in span_info and span_info['line_text']:
-            line_text = span_info['line_text']
-            span_text = span_info.get('text', '').strip()
-            
-            print(f"Processing span: '{span_text}' in line: '{line_text}'")
-            
-            # 사각형 선택의 경우 선택된 span 텍스트만 사용 (전체 라인 텍스트 사용 안함)
-            # 단, 공백 복원을 위해 주변 컨텍스트는 고려
-            if span_text and span_text in line_text:
-                # span의 위치를 찾아서 앞뒤 공백 포함 여부 확인
-                span_index = line_text.find(span_text)
-                extracted_text = span_text
-                
-                # 앞에 공백이 있는지 확인 (단어 경계 유지)
-                if span_index > 0 and line_text[span_index - 1] == ' ':
-                    extracted_text = ' ' + extracted_text
-                
-                # 뒤에 공백이 있는지 확인 (단어 경계 유지)
-                end_index = span_index + len(span_text)
-                if end_index < len(line_text) and line_text[end_index] == ' ':
-                    extracted_text = extracted_text + ' '
-                
-                normalized_text = extracted_text
-                print(f"Extracted span with context: '{normalized_text}'")
-            else:
-                # span을 찾을 수 없으면 원본 span 텍스트 사용
-                normalized_text = span_text if span_text else line_text.strip()
-                print(f"Using span text: '{normalized_text}'")
+        if span_info.get('is_overlay'):
+            # 오버레이 텍스트는 사용자가 입력한 공백 갯수와 특수문자를 원형 그대로 1:1 보존
+            normalized_text = original_text
         else:
-            # 기본 텍스트 정규화 (연속된 공백을 단일 공백으로)
-            normalized_text = re.sub(r'\s+', ' ', original_text.strip())
-            print(f"Using normalized original: '{normalized_text}'")
+            # 원본 텍스트: 전달받은 텍스트(또는 line_text)의 특수문자와 공백을 온전히 보존
+            if not original_text and 'line_text' in span_info:
+                original_text = span_info['line_text']
+            normalized_text = original_text.replace('\r\n', ' ').replace('\n', ' ').replace('\t', '    ')
+        # 한컴 HWP 전용 PUA 문자(렌더링 불가 특수문자) 필터링
+        normalized_text = ''.join(c for c in normalized_text if not is_pua_char(c))
         
         self.text_edit = QLineEdit(normalized_text)
         self.parent_window = parent if isinstance(parent, QMainWindow) else None
@@ -1004,7 +1385,7 @@ class TextEditorDialog(QDialog):
 
         self.tracking_spin = QDoubleSpinBox()
         self.tracking_spin.setDecimals(1)
-        self.tracking_spin.setRange(-20.0, 50.0)  # percent delta
+        self.tracking_spin.setRange(-50.0, 50.0)  # percent delta (HWP 표준 -50% ~ +50%)
         self.tracking_spin.setSingleStep(0.5)
         self.tracking_spin.setValue(float(span_info.get('tracking', 0.0)))
 
@@ -1110,13 +1491,19 @@ class TextEditorDialog(QDialog):
         self.hwp_space_checkbox = QCheckBox("HWP(아래아한글) 공백 너비 적용")
         self.hwp_space_checkbox.setToolTip("띄어쓰기 너비를 한글 1글자의 50%로 강제 조정합니다.")
         
-        # 초기값 설정: 오버레이에 저장된 값 우선, 없으면 문서 전체 설정 따름
-        if 'hwp_space_mode' in span_info:
-            self.hwp_space_checkbox.setChecked(bool(span_info['hwp_space_mode']))
-        elif hasattr(parent, 'is_hwp_doc') and parent.is_hwp_doc:
-            self.hwp_space_checkbox.setChecked(True)
+        # 초기값 설정: 오버레이에 저장된 값 우선, 없으면 폰트 또는 문서 전체 설정 따름
+        is_hwp_mode = False
+        if 'hwp_space_mode' in span_info and span_info['hwp_space_mode'] is not None:
+            is_hwp_mode = bool(span_info['hwp_space_mode'])
         else:
-            self.hwp_space_checkbox.setChecked(False)
+            font_str = str(span_info.get('font', '')).lower()
+            pdf_font_str = str(span_info.get('pdf_font_name', '')).lower()
+            hwp_font_keys = ['hcr', 'h2hdr', 'h2gtr', 'h2mk', 'hygtr', 'hybtr', 'hmk', 'hancom', 'haansoft', 'gulimche', 'batangche']
+            if any(k in font_str or k in pdf_font_str for k in hwp_font_keys):
+                is_hwp_mode = True
+            elif hasattr(parent, 'is_hwp_doc') and parent.is_hwp_doc:
+                is_hwp_mode = True
+        self.hwp_space_checkbox.setChecked(is_hwp_mode)
             
         form_layout.addRow(self.hwp_space_checkbox)
 
@@ -1134,22 +1521,19 @@ class TextEditorDialog(QDialog):
         
         # 위치 조정 버튼 제거됨 - 싱글클릭으로 대체
         
-        # 버튼
-        self.button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        # 시스템 기본 언어 대신 앱 설정 언어로 텍스트 강제 설정
-        self.button_box.button(QDialogButtonBox.StandardButton.Ok).setText(self._t('btn_yes'))
-        self.button_box.button(QDialogButtonBox.StandardButton.Cancel).setText(self._t('btn_cancel'))
-        
-        self.button_box.accepted.connect(self.accept)
-        self.button_box.rejected.connect(self.reject)
-        # OK/Cancel 버튼 크기 동일/확대
-        try:
-            for btn in self.button_box.buttons():
-                btn.setMinimumSize(96, 36)
-        except Exception:
-            pass
+        # 버튼 (Windows / macOS 환경 불문하고 항상 [예] [취소] 순서로 배열)
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        self.btn_ok = QPushButton(self._t('btn_yes'))
+        self.btn_cancel = QPushButton(self._t('btn_cancel'))
+        self.btn_ok.setMinimumSize(96, 36)
+        self.btn_cancel.setMinimumSize(96, 36)
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+        button_layout.addWidget(self.btn_ok)
+        button_layout.addWidget(self.btn_cancel)
+        self.button_layout = button_layout
         
         # 패치 크기 설정 섹션 추가
         patch_group = QGroupBox(self._t('patch_group_title'))
@@ -1229,7 +1613,7 @@ class TextEditorDialog(QDialog):
         font_button_layout = QHBoxLayout()
         font_button_layout.addWidget(self.install_font_button)
         main_layout.addLayout(font_button_layout)
-        main_layout.addWidget(self.button_box)
+        main_layout.addLayout(button_layout)
         self.setLayout(main_layout)
         
         # 실시간 미리보기 시그널 연결
@@ -1467,6 +1851,7 @@ class TextEditorDialog(QDialog):
             if color.isValid():
                 self.text_color = color
                 self.color_button.setStyleSheet(f"background-color: {color.name()}")
+                self._on_values_changed()
 
     def _choose_patch_color(self):
         dlg = QColorDialog(self)
@@ -1481,6 +1866,7 @@ class TextEditorDialog(QDialog):
             if color.isValid():
                 self.patch_color_button_color = color
                 self.patch_color_button.setStyleSheet(f"background-color: {color.name()}")
+                self._on_values_changed()
 
     def start_position_adjustment(self):
         """위치 조정 모드 시작"""
@@ -1517,8 +1903,25 @@ class TextEditorDialog(QDialog):
                 self.patch_margin_spin_r.value() / 100.0 if hasattr(self, 'patch_margin_spin_r') else 0.0,
                 self.patch_margin_spin_t.value() / 100.0 if hasattr(self, 'patch_margin_spin_t') else 0.0,
                 self.patch_margin_spin_b.value() / 100.0 if hasattr(self, 'patch_margin_spin_b') else 0.0
-            )
+            ),
+            "original_bbox": self.span_info.get('original_bbox'),
+            "origin": self.span_info.get('origin'),
+            "page_num": self.span_info.get('page_num', self.overlay_key[0] if self.overlay_key else 0),
+            "overlay_id": self.overlay_key[1] if self.overlay_key else self.span_info.get('overlay_id')
         }
+
+    def _remember_pos(self):
+        parent = self.parent()
+        if parent and hasattr(parent, 'save_text_editor_pos'):
+            parent.save_text_editor_pos(self.pos())
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._remember_pos()
+
+    def closeEvent(self, event):
+        self._remember_pos()
+        super().closeEvent(event)
 
 class TextOverlay:
     """텍스트 오버레이 레이어 관리 클래스 - 완전한 텍스트 속성 지원"""
@@ -1625,6 +2028,8 @@ class TextOverlay:
         if origin is not None:
             self.origin = origin
         if font is not None:
+            if self.font != font:
+                self._loaded_font_family = None
             self.font = font
         if pdf_font_name is not None:
             self.pdf_font_name = pdf_font_name
@@ -1941,36 +2346,24 @@ class TextOverlay:
             # 항상 개별 글자 정밀 배치 수행 (PDF와 1:1 일치 보장)
             needs_precise = True 
 
+            hwp_std_space = effective_point_size * precision_multiplier * 0.50
             for li, line in enumerate(lines):
                 curr_y = base_baseline_y + li * line_height_pt
                 if needs_precise:
                     curr_x = text_x
                     t_ratio = 1.0 + tracking_ratio
-                    
-                    if is_hwp and abs(stretch - 1.0) < 0.001:
-                        parts = re.split(r'( +)', line)
-                        base_space_w = font_metrics_f.horizontalAdvance(' ')
-                        hwp_space_advance = (base_space_w * 1.5 * t_ratio) / precision_multiplier
-                        for part in parts:
-                            if not part: continue
-                            if part.isspace():
-                                curr_x += hwp_space_advance * len(part)
-                            else:
-                                _draw_text_item(curr_x, curr_y, part)
-                                curr_x += (font_metrics_f.horizontalAdvance(part) * t_ratio) / precision_multiplier
-                    else:
-                        for ch in line:
-                            # 순수 글자 너비 측정 (측정용 폰트 사용)
-                            ch_w = font_metrics_f.horizontalAdvance(ch)
-                            # 10배 정밀도 측정이므로 결과를 상쇄
-                            current_advance = (ch_w * 1.5 if (ch == ' ' and is_hwp) else ch_w) / precision_multiplier
-                            
-                            if ch.strip():
-                                _draw_text_item(curr_x, curr_y, ch)
-                            
-                            # 다음 글자 위치 = 순수너비 * 장평 * 자간비율
-                            # (이 계산식은 PDF 플래튼 로직과 완벽히 동일해야 함)
-                            curr_x += current_advance * stretch * t_ratio
+                    for ch in line:
+                        ch_w = font_metrics_f.horizontalAdvance(ch)
+                        if ch == ' ' and is_hwp:
+                            ch_w_eff = max(ch_w, hwp_std_space)
+                        else:
+                            ch_w_eff = ch_w
+                        current_advance = (ch_w_eff / precision_multiplier) * stretch
+                        
+                        if ch.strip():
+                            _draw_text_item(curr_x, curr_y, ch)
+                        
+                        curr_x += current_advance * t_ratio
                     actual_width = (curr_x - text_x)
                 else:
                     _draw_text_item(text_x, curr_y, line)
@@ -2025,8 +2418,423 @@ class TextOverlay:
                 getattr(self, 'patch_margin_r', 0.0),
                 getattr(self, 'patch_margin_t', 0.0),
                 getattr(self, 'patch_margin_b', 0.0)
-            )
+            ),
+            'stretch': getattr(self, 'stretch', 1.0),
+            'tracking': getattr(self, 'tracking', 0.0)
         }
+
+class ImageOverlay:
+    """PDF 페이지에 삽입되는 이미지/서명 오버레이 레이어"""
+    def __init__(self, image_path, bbox, page_num, opacity=1.0, z_index=0):
+        self.image_path = image_path
+        self.pixmap = QPixmap(image_path)
+        self.bbox = fitz.Rect(bbox)  # PDF 포인트 단위 좌표
+        self.page_num = page_num
+        self.opacity = float(opacity)  # 0.0 ~ 1.0
+        self.z_index = z_index
+        self.visible = True
+        self.flattened = False
+
+    def to_dict(self):
+        return {
+            'image_path': self.image_path,
+            'bbox': (self.bbox.x0, self.bbox.y0, self.bbox.x1, self.bbox.y1),
+            'page_num': self.page_num,
+            'opacity': self.opacity,
+            'z_index': self.z_index
+        }
+
+
+class ImagePropertyDialog(QDialog):
+    """삽입된 이미지의 속성(투명도, 크기 등)을 설정하는 대화상자"""
+    def __init__(self, image_overlay, parent=None):
+        super().__init__(parent)
+        self.image_overlay = image_overlay
+        self.viewer = parent
+        self.setWindowTitle("이미지 속성 (서명/이미지)")
+        self.setFixedWidth(320)
+        layout = QVBoxLayout(self)
+
+        form = QFormLayout()
+
+        # 투명도 슬라이더
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(10, 100)
+        curr_op = int(round(image_overlay.opacity * 100))
+        self.opacity_slider.setValue(curr_op)
+        self.opacity_label = QLabel(f"{curr_op}%")
+
+        def on_opacity_changed(val):
+            self.opacity_label.setText(f"{val}%")
+            self.image_overlay.opacity = val / 100.0
+            if self.viewer and hasattr(self.viewer, 'update'):
+                self.viewer.update()
+        self.opacity_slider.valueChanged.connect(on_opacity_changed)
+
+        op_layout = QHBoxLayout()
+        op_layout.addWidget(self.opacity_slider)
+        op_layout.addWidget(self.opacity_label)
+        form.addRow("투명도:", op_layout)
+
+        # 크기 (너비/높이 pt 단위)
+        self.width_spin = QDoubleSpinBox()
+        self.width_spin.setRange(5.0, 3000.0)
+        self.width_spin.setValue(float(image_overlay.bbox.width))
+        self.width_spin.setSuffix(" pt")
+
+        self.height_spin = QDoubleSpinBox()
+        self.height_spin.setRange(5.0, 3000.0)
+        self.height_spin.setValue(float(image_overlay.bbox.height))
+        self.height_spin.setSuffix(" pt")
+
+        orig_w = max(1.0, float(image_overlay.bbox.width))
+        orig_h = max(1.0, float(image_overlay.bbox.height))
+        aspect_ratio = orig_w / orig_h
+
+        def on_width_changed(w):
+            h = w / aspect_ratio
+            self.height_spin.blockSignals(True)
+            self.height_spin.setValue(h)
+            self.height_spin.blockSignals(False)
+            image_overlay.bbox = fitz.Rect(
+                image_overlay.bbox.x0, image_overlay.bbox.y0,
+                image_overlay.bbox.x0 + w, image_overlay.bbox.y0 + h
+            )
+            if self.viewer and hasattr(self.viewer, 'update'):
+                self.viewer.update()
+
+        def on_height_changed(h):
+            w = h * aspect_ratio
+            self.width_spin.blockSignals(True)
+            self.width_spin.setValue(w)
+            self.width_spin.blockSignals(False)
+            image_overlay.bbox = fitz.Rect(
+                image_overlay.bbox.x0, image_overlay.bbox.y0,
+                image_overlay.bbox.x0 + w, image_overlay.bbox.y0 + h
+            )
+            if self.viewer and hasattr(self.viewer, 'update'):
+                self.viewer.update()
+
+        self.width_spin.valueChanged.connect(on_width_changed)
+        self.height_spin.valueChanged.connect(on_height_changed)
+
+        form.addRow("너비:", self.width_spin)
+        form.addRow("높이:", self.height_spin)
+        layout.addLayout(form)
+
+        button_layout = QHBoxLayout()
+        delete_btn = QPushButton("삭제")
+        delete_btn.setStyleSheet("color: red;")
+
+        def on_delete():
+            if self.viewer and hasattr(self.viewer, 'delete_image_overlay'):
+                self.viewer.delete_image_overlay(self.image_overlay)
+            self.reject()
+        delete_btn.clicked.connect(on_delete)
+        button_layout.addWidget(delete_btn)
+
+        button_layout.addStretch()
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        btn_box.accepted.connect(self.accept)
+        button_layout.addWidget(btn_box)
+
+        layout.addLayout(button_layout)
+
+
+class SignatureCanvas(QWidget):
+    """마우스/터치패드로 서명을 직접 그리는 캔버스 위젯"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(520, 240)
+        self.setStyleSheet("background-color: white; border: 1.5px solid #cbd5e1; border-radius: 8px;")
+        self.strokes = []  # list of (QPainterPath, QColor, pen_width)
+        self.current_path = None
+        self.pen_color = QColor(25, 25, 25)
+        self.pen_width = 3.5
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def set_pen_color(self, color):
+        self.pen_color = color
+
+    def set_pen_width(self, width):
+        self.pen_width = width
+
+    def clear(self):
+        self.strokes = []
+        self.current_path = None
+        self.update()
+
+    def has_drawing(self):
+        return len(self.strokes) > 0 or self.current_path is not None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.current_path = QPainterPath(event.position())
+            self.update()
+
+    def mouseMoveEvent(self, event):
+        if self.current_path:
+            self.current_path.lineTo(event.position())
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.current_path:
+            self.current_path.lineTo(event.position())
+            self.strokes.append((self.current_path, self.pen_color, self.pen_width))
+            self.current_path = None
+            self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), Qt.GlobalColor.white)
+
+        # 서명 기준선 가이드 점선
+        guide_pen = QPen(QColor(203, 213, 225), 1.5, Qt.PenStyle.DashLine)
+        painter.setPen(guide_pen)
+        painter.drawLine(30, 185, 490, 185)
+
+        font = QFont()
+        font.setPointSize(9)
+        painter.setFont(font)
+        painter.setPen(QColor(148, 163, 184))
+        painter.drawText(QRect(30, 190, 460, 20), Qt.AlignmentFlag.AlignRight, "서명 기준선 (Sign Here)")
+
+        for path, col, w in self.strokes:
+            pen = QPen(col, w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.strokePath(path, pen)
+
+        if self.current_path:
+            pen = QPen(self.pen_color, self.pen_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.strokePath(self.current_path, pen)
+
+    def get_cropped_pixmap(self, transparent=True):
+        if not self.strokes:
+            return None
+        united_rect = None
+        for path, col, w in self.strokes:
+            br = path.boundingRect().adjusted(-w, -w, w, w)
+            united_rect = br if united_rect is None else united_rect.united(br)
+        if united_rect is None or united_rect.width() <= 2 or united_rect.height() <= 2:
+            return None
+
+        margin = 10.0
+        final_rect = united_rect.adjusted(-margin, -margin, margin, margin).intersected(QRectF(self.rect()))
+        w = max(10, int(round(final_rect.width())))
+        h = max(10, int(round(final_rect.height())))
+
+        pix = QPixmap(w, h)
+        if transparent:
+            pix.fill(Qt.GlobalColor.transparent)
+        else:
+            pix.fill(Qt.GlobalColor.white)
+
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.translate(-final_rect.left(), -final_rect.top())
+        for path, col, pw in self.strokes:
+            pen = QPen(col, pw, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            p.setPen(pen)
+            p.strokePath(path, pen)
+        p.end()
+        return pix
+
+
+class SignaturePadDialog(QDialog):
+    """마우스/펜으로 전자 서명을 그려 즉시 삽입하는 대화상자"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("전자 서명 그리기")
+        self.setFixedSize(550, 390)
+        self.created_pixmap = None
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        info_lbl = QLabel("마우스 또는 트랙패드로 서명을 직접 그리세요:")
+        info_lbl.setStyleSheet("font-weight: bold; color: #334155;")
+        layout.addWidget(info_lbl)
+
+        self.canvas = SignatureCanvas(self)
+        layout.addWidget(self.canvas)
+
+        # 도구 컨트롤 행 (색상 및 굵기 선택)
+        ctrl_layout = QHBoxLayout()
+
+        # 색상 선택
+        ctrl_layout.addWidget(QLabel("색상:"))
+        self.btn_black = QPushButton("● 검정")
+        self.btn_black.setCheckable(True)
+        self.btn_black.setChecked(True)
+        self.btn_black.setStyleSheet("color: black; font-weight: bold;")
+
+        self.btn_blue = QPushButton("● 파랑")
+        self.btn_blue.setCheckable(True)
+        self.btn_blue.setStyleSheet("color: #1d4ed8; font-weight: bold;")
+
+        self.btn_red = QPushButton("● 빨강")
+        self.btn_red.setCheckable(True)
+        self.btn_red.setStyleSheet("color: #dc2626; font-weight: bold;")
+
+        color_group = QButtonGroup(self)
+        color_group.addButton(self.btn_black)
+        color_group.addButton(self.btn_blue)
+        color_group.addButton(self.btn_red)
+
+        self.btn_black.clicked.connect(lambda: self.canvas.set_pen_color(QColor(25, 25, 25)))
+        self.btn_blue.clicked.connect(lambda: self.canvas.set_pen_color(QColor(29, 78, 216)))
+        self.btn_red.clicked.connect(lambda: self.canvas.set_pen_color(QColor(220, 38, 38)))
+
+        ctrl_layout.addWidget(self.btn_black)
+        ctrl_layout.addWidget(self.btn_blue)
+        ctrl_layout.addWidget(self.btn_red)
+
+        ctrl_layout.addSpacing(15)
+
+        # 굵기 선택
+        ctrl_layout.addWidget(QLabel("굵기:"))
+        self.width_group = QButtonGroup(self)
+        self.rb_thin = QRadioButton("얇게")
+        self.rb_norm = QRadioButton("보통")
+        self.rb_thick = QRadioButton("굵게")
+        self.rb_norm.setChecked(True)
+
+        self.width_group.addButton(self.rb_thin)
+        self.width_group.addButton(self.rb_norm)
+        self.width_group.addButton(self.rb_thick)
+
+        self.rb_thin.clicked.connect(lambda: self.canvas.set_pen_width(2.0))
+        self.rb_norm.clicked.connect(lambda: self.canvas.set_pen_width(3.5))
+        self.rb_thick.clicked.connect(lambda: self.canvas.set_pen_width(5.5))
+
+        ctrl_layout.addWidget(self.rb_thin)
+        ctrl_layout.addWidget(self.rb_norm)
+        ctrl_layout.addWidget(self.rb_thick)
+
+        ctrl_layout.addStretch()
+
+        clear_btn = QPushButton("지우기")
+        clear_btn.clicked.connect(self.canvas.clear)
+        ctrl_layout.addWidget(clear_btn)
+
+        layout.addLayout(ctrl_layout)
+
+        # 하단 버튼 행
+        bottom_layout = QHBoxLayout()
+        self.trans_check = QCheckBox("배경 투명화 적용")
+        self.trans_check.setChecked(True)
+        bottom_layout.addWidget(self.trans_check)
+
+        bottom_layout.addStretch()
+
+        apply_btn = QPushButton("서명 삽입")
+        apply_btn.setStyleSheet("background-color: #2563eb; color: white; font-weight: bold; padding: 6px 14px; border-radius: 6px;")
+        apply_btn.clicked.connect(self._on_apply)
+        bottom_layout.addWidget(apply_btn)
+
+        cancel_btn = QPushButton("취소")
+        cancel_btn.clicked.connect(self.reject)
+        bottom_layout.addWidget(cancel_btn)
+
+        layout.addLayout(bottom_layout)
+
+    def _on_apply(self):
+        pix = self.canvas.get_cropped_pixmap(transparent=self.trans_check.isChecked())
+        if not pix or pix.isNull():
+            QMessageBox.warning(self, "서명 없음", "서명을 먼저 그려주세요.")
+            return
+        self.created_pixmap = pix
+        self.accept()
+
+class ThumbnailPanel(QFrame):
+    """좌측 접이식 페이지 썸네일 탐색 패널 (페이지 탐색 전용, 편집 기능 배제)"""
+    page_selected = Signal(int)
+    close_requested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(160)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        # 헤더: 타이틀, 총 페이지수, 접기 버튼
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(4, 2, 4, 2)
+        
+        self.title_lbl = QLabel("📑 페이지")
+        header_layout.addWidget(self.title_lbl)
+
+        self.count_lbl = QLabel("")
+        header_layout.addWidget(self.count_lbl)
+        header_layout.addStretch()
+
+        self.collapse_btn = QPushButton("◀")
+        self.collapse_btn.setToolTip("썸네일 패널 닫기 (F4)")
+        self.collapse_btn.setFixedSize(22, 22)
+        self.collapse_btn.clicked.connect(self.close_requested.emit)
+        header_layout.addWidget(self.collapse_btn)
+
+        layout.addLayout(header_layout)
+
+        # 썸네일 리스트 위젯
+        self.list_widget = QListWidget(self)
+        self.list_widget.setIconSize(QSize(96, 128))
+        self.list_widget.setViewMode(QListWidget.ViewMode.IconMode)
+        self.list_widget.setMovement(QListWidget.Movement.Static)
+        self.list_widget.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.list_widget.setSpacing(8)
+        self.list_widget.setFrameShape(QFrame.Shape.NoFrame)
+        self.list_widget.itemClicked.connect(self._on_item_clicked)
+        layout.addWidget(self.list_widget)
+
+        self.current_theme_mode = 'light'
+        self.apply_theme('light')
+
+    def apply_theme(self, mode: str):
+        """다크/라이트 테마에 따른 스타일시트 적용"""
+        self.current_theme_mode = mode
+        if mode == 'dark':
+            self.setStyleSheet(
+                "ThumbnailPanel { background-color: #1e1f22; border-right: 1.5px solid #333842; }"
+            )
+            self.title_lbl.setStyleSheet("font-weight: bold; font-size: 12px; color: #e2e8f0;")
+            self.count_lbl.setStyleSheet("font-size: 11px; color: #94a3b8; font-weight: bold;")
+            self.collapse_btn.setStyleSheet(
+                "QPushButton { border: none; border-radius: 4px; background: transparent; font-size: 11px; color: #94a3b8; }"
+                "QPushButton:hover { background-color: #2d3139; color: #f8fafc; }"
+            )
+            self.list_widget.setStyleSheet(
+                "QListWidget { background: transparent; border: none; outline: none; }"
+                "QListWidget::item { border: 2px solid transparent; border-radius: 6px; padding: 4px; color: #cbd5e1; font-size: 11px; font-weight: bold; }"
+                "QListWidget::item:hover { background-color: rgba(255, 255, 255, 0.08); }"
+                "QListWidget::item:selected { border: 2px solid #3b82f6; background-color: rgba(59, 130, 246, 0.25); color: #60a5fa; }"
+            )
+        else:
+            self.setStyleSheet(
+                "ThumbnailPanel { background-color: #f8fafc; border-right: 1.5px solid #cbd5e1; }"
+            )
+            self.title_lbl.setStyleSheet("font-weight: bold; font-size: 12px; color: #334155;")
+            self.count_lbl.setStyleSheet("font-size: 11px; color: #64748b; font-weight: bold;")
+            self.collapse_btn.setStyleSheet(
+                "QPushButton { border: none; border-radius: 4px; background: transparent; font-size: 11px; color: #64748b; }"
+                "QPushButton:hover { background-color: #e2e8f0; color: #0f172a; }"
+            )
+            self.list_widget.setStyleSheet(
+                "QListWidget { background: transparent; border: none; outline: none; }"
+                "QListWidget::item { border: 2px solid transparent; border-radius: 6px; padding: 4px; color: #475569; font-size: 11px; font-weight: bold; }"
+                "QListWidget::item:hover { background-color: rgba(148, 163, 184, 0.15); }"
+                "QListWidget::item:selected { border: 2px solid #2563eb; background-color: rgba(37, 99, 235, 0.12); color: #1d4ed8; }"
+            )
+
+    def _on_item_clicked(self, item):
+        row = self.list_widget.row(item)
+        if row >= 0:
+            self.page_selected.emit(row)
+
 
 class PdfViewerWidget(QLabel):
     text_selected = Signal(dict)
@@ -2076,6 +2884,7 @@ class PdfViewerWidget(QLabel):
         self.hover_timer.timeout.connect(self.check_hover)
         self.hover_timer.start(100)  # 100ms마다 체크
         self._text_dict_cache = {}  # page_num -> text_dict 캐시
+        self._visual_lines_cache = {}  # page_num -> visual_lines 캐시
         
         # 싱글/더블 클릭 구분을 위한 타이머
         self.single_click_timer = QTimer()
@@ -2086,11 +2895,258 @@ class PdfViewerWidget(QLabel):
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMouseTracking(True)  # 마우스 트래킹 활성화
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # 키보드 포커스 가능하도록 설정
+        self.setCursor(Qt.CursorShape.CrossCursor)  # 기본 커서 모양: 십자
+
+        # 스페이스바 핸드 툴 및 줌 툴 상태
+        self.space_pressed = False
+        self.alt_pressed = False
+        self.ctrl_pressed = False
+        self.shift_pressed = False
+        self.selection_is_eraser = False
+        self.panning = False
+        self.pan_start_global = None
+        self.pan_start_h = 0
+        self.pan_start_v = 0
+        self._cached_zoom_in_cursor = None
+        self._cached_zoom_out_cursor = None
+
+        # 격자 및 줄자 보기 옵션
+        self.show_grid = False
+        self.show_ruler = False
+
+        # 이미지/서명 오버레이 시스템
+        self.image_overlays = {}  # page_num -> [ImageOverlay]
+        self.image_id_counter = 0
+        self.active_image = None
+        self.dragging_image = False
+        self.resizing_image = False
+        self.drag_start_pos = None
+        self.drag_start_bbox = None
+
+        # 복사/붙여넣기 데이터 버퍼
+        self.copied_data = None
+
+        # 텍스트 오버레이 드래그 상태
+        self.potential_drag_overlay = None
+        self.dragging_overlay = False
+
+        # 본문 검색 하이라이트 상태
+        self.search_highlights = []
+        self.active_search_rect = None
+
+        # 스마트 스냅 (자석 정렬 가이드선)
+        self.smart_snap_enabled = True
+        self.active_snap_guides = []
+
         # 선택 애니메이션
         self._anim_phase = 0
         self._anim_timer = QTimer()
         self._anim_timer.timeout.connect(self._tick_anim)
         self._anim_timer.start(120)
+
+    def _apply_smart_snap(self, rect, ignore_obj=None):
+        """
+        rect: fitz.Rect (드래그 중인 후보 BBox)
+        ignore_obj: 드래그 중인 원본 객체 (스냅 대상에서 제외)
+        반환: (snapped_fitz_rect, guides) where guides is list of ('v', x) or ('h', y)
+        """
+        if not getattr(self, 'smart_snap_enabled', True) or not self.doc:
+            return rect, []
+
+        try:
+            page = self.doc.load_page(self.current_page_num)
+            pw = float(page.rect.width)
+            ph = float(page.rect.height)
+        except Exception:
+            return rect, []
+
+        snap_targets_x = [0.0, pw / 2.0, pw]
+        snap_targets_y = [0.0, ph / 2.0, ph]
+
+        # 다른 텍스트 오버레이 좌표 수집
+        if hasattr(self, 'text_overlays') and self.current_page_num in self.text_overlays:
+            for ov in self.text_overlays[self.current_page_num]:
+                if ov is not ignore_obj and getattr(ov, 'visible', True):
+                    b = ov.bbox
+                    snap_targets_x.extend([b.x0, (b.x0 + b.x1) / 2.0, b.x1])
+                    snap_targets_y.extend([b.y0, (b.y0 + b.y1) / 2.0, b.y1])
+
+        # 다른 이미지 오버레이 좌표 수집
+        if hasattr(self, 'image_overlays') and self.current_page_num in self.image_overlays:
+            for img in self.image_overlays[self.current_page_num]:
+                if img is not ignore_obj and getattr(img, 'visible', True):
+                    b = img.bbox
+                    snap_targets_x.extend([b.x0, (b.x0 + b.x1) / 2.0, b.x1])
+                    snap_targets_y.extend([b.y0, (b.y0 + b.y1) / 2.0, b.y1])
+
+        threshold = 5.0  # 5pt 자석 반경
+        scale = getattr(self, 'pixmap_scale_factor', 1.0)
+        if scale > 0:
+            threshold = max(3.0, 5.0 / scale)
+
+        best_dx = None
+        best_dist_x = threshold + 1.0
+        guide_x = None
+
+        cand_x = [rect.x0, (rect.x0 + rect.x1) / 2.0, rect.x1]
+        for cx in cand_x:
+            for tx in snap_targets_x:
+                dist = abs(cx - tx)
+                if dist <= threshold and dist < best_dist_x:
+                    best_dist_x = dist
+                    best_dx = tx - cx
+                    guide_x = tx
+
+        best_dy = None
+        best_dist_y = threshold + 1.0
+        guide_y = None
+
+        cand_y = [rect.y0, (rect.y0 + rect.y1) / 2.0, rect.y1]
+        for cy in cand_y:
+            for ty in snap_targets_y:
+                dist = abs(cy - ty)
+                if dist <= threshold and dist < best_dist_y:
+                    best_dist_y = dist
+                    best_dy = ty - cy
+                    guide_y = ty
+
+        guides = []
+        dx_final = best_dx if best_dx is not None else 0.0
+        dy_final = best_dy if best_dy is not None else 0.0
+
+        if guide_x is not None:
+            guides.append(('v', guide_x))
+        if guide_y is not None:
+            guides.append(('h', guide_y))
+
+        snapped = fitz.Rect(
+            rect.x0 + dx_final, rect.y0 + dy_final,
+            rect.x1 + dx_final, rect.y1 + dy_final
+        )
+        return snapped, guides
+
+    def _get_scroll_area(self):
+        """뷰어를 감싸고 있는 QScrollArea 객체 반환"""
+        main_win = self.window()
+        if hasattr(main_win, 'scroll_area') and main_win.scroll_area:
+            return main_win.scroll_area
+        p = self.parent()
+        while p:
+            if isinstance(p, QScrollArea):
+                return p
+            p = p.parent()
+        return None
+
+    def _create_zoom_cursor(self, mode='in'):
+        pix = QPixmap(32, 32)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # 돋보기 외곽선 및 반투명 렌즈
+        p.setPen(QPen(QColor(40, 40, 40), 2.2))
+        p.setBrush(QColor(255, 255, 255, 235))
+        p.drawEllipse(3, 3, 16, 16)
+        
+        # 돋보기 손잡이
+        p.setPen(QPen(QColor(40, 40, 40), 3.0))
+        p.drawLine(15, 15, 25, 25)
+        
+        # 기호 (+ 또는 -)
+        p.setPen(QPen(QColor(20, 20, 20), 2.0))
+        p.drawLine(7, 11, 15, 11)  # 가로 막대
+        if mode == 'in':
+            p.drawLine(11, 7, 11, 15)  # 세로 막대
+        p.end()
+        return QCursor(pix, 11, 11)
+
+    def _get_zoom_in_cursor(self):
+        if not hasattr(self, '_cached_zoom_in_cursor') or self._cached_zoom_in_cursor is None:
+            self._cached_zoom_in_cursor = self._create_zoom_cursor('in')
+        return self._cached_zoom_in_cursor
+
+    def _get_zoom_out_cursor(self):
+        if not hasattr(self, '_cached_zoom_out_cursor') or self._cached_zoom_out_cursor is None:
+            self._cached_zoom_out_cursor = self._create_zoom_cursor('out')
+        return self._cached_zoom_out_cursor
+
+    def update_tool_cursor(self):
+        """현재 활성화된 도구 및 단축키(Space, Ctrl, Alt, Shift) 상태에 따른 커서 갱신"""
+        if getattr(self, 'panning', False):
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            return
+
+        modifiers = QApplication.keyboardModifiers()
+        has_ctrl = getattr(self, 'ctrl_pressed', False) or bool(modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier))
+        has_alt = getattr(self, 'alt_pressed', False) or bool(modifiers & Qt.KeyboardModifier.AltModifier)
+        has_shift = getattr(self, 'shift_pressed', False) or bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        is_space = getattr(self, 'space_pressed', False)
+
+        # 1. 줌 툴 커서 (Space + Alt, Space + Ctrl + Alt, 또는 Ctrl + Alt) -> Zoom Out (돋보기 -)
+        if (is_space and has_alt) or (has_ctrl and has_alt):
+            self.setCursor(self._get_zoom_out_cursor())
+            return
+
+        # 2. 줌 툴 커서 (Space + Ctrl) -> Zoom In (돋보기 +)
+        if is_space and has_ctrl:
+            self.setCursor(self._get_zoom_in_cursor())
+            return
+
+        # 3. 핸드 툴 커서 (Space 단독) -> Open Hand (펼친 손)
+        if is_space:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            return
+
+        # 3-1. Shift(지우개모드) 또는 Ctrl(패치모드) 준비 커서 -> CrossCursor
+        parent_window = self.window()
+        is_patch_or_eraser = bool(parent_window and getattr(parent_window, 'patch_precise_mode', False))
+        if has_shift or has_ctrl or is_patch_or_eraser:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            return
+
+        # 4. 이미지 핸들 또는 이미지 호버 상태 (스페이스바 미사용 시)
+        if hasattr(self, 'mouse_pos') and self.doc:
+            try:
+                pdf_x, pdf_y = self._widget_point_to_pdf(self.mouse_pos)
+                if pdf_x is not None and pdf_y is not None:
+                    pdf_point = fitz.Point(pdf_x, pdf_y)
+                    if self.active_image and self._is_on_image_resize_handle(self.active_image, pdf_point):
+                        self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+                        return
+                    elif self._find_image_at_point(pdf_point):
+                        self.setCursor(Qt.CursorShape.SizeAllCursor)
+                        return
+            except Exception:
+                pass
+
+        # 5. 텍스트 호버 및 드래그 상태 (오버레이는 이동 화살표 SizeAllCursor, 일반 텍스트는 ArrowCursor, 빈 공간은 CrossCursor)
+        if getattr(self, 'dragging_overlay', False):
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+            return
+
+        if getattr(self, 'hover_rect', None):
+            is_ov = isinstance(getattr(self, 'hover_span_info', None), dict) and self.hover_span_info.get('is_overlay', False)
+            if is_ov:
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
+            else:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+        else:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def enterEvent(self, event):
+        self.setFocus()
+        self.update_tool_cursor()
+        super().enterEvent(event)
+
+    def focusOutEvent(self, event):
+        self.space_pressed = False
+        self.alt_pressed = False
+        self.ctrl_pressed = False
+        self.shift_pressed = False
+        if getattr(self, 'panning', False):
+            self.panning = False
+        self.update_tool_cursor()
+        super().focusOutEvent(event)
 
     def _tick_anim(self):
         self._anim_phase = (self._anim_phase + 1) % 16
@@ -2102,18 +3158,89 @@ class PdfViewerWidget(QLabel):
         self.doc = doc
         self.current_page_num = 0
         self._text_dict_cache = {} # 캐시 초기화
+        self._visual_lines_cache = {} # Visual lines 캐시 초기화
         self.pdf_font_extractor = PdfFontExtractor(doc)
         self.pdf_fonts = self.pdf_font_extractor.extract_fonts_from_document()
         self.active_overlay = None
+        self.image_overlays = {}
+        self.active_image = None
     
     def keyPressEvent(self, event):
-        """키보드 이벤트 처리 (Ctrl 키 감지 및 텍스트 위치 조정)"""
-        if event.key() == Qt.Key.Key_Control:
-            self.ctrl_pressed = False
-            self.setCursor(Qt.CursorShape.CrossCursor)
-        
+        """키보드 이벤트 처리 (스페이스바 핸드툴, 줌툴, 복사/붙여넣기, 이미지 조작, 텍스트 위치 조정)"""
+        # 스페이스바 누름: 핸드 툴 모드 활성화 (Adobe 스타일)
+        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
+            self.space_pressed = True
+            if self.hover_rect:
+                self.hover_rect = None
+                self.hover_span_info = None
+                self.update()
+            self.update_tool_cursor()
+            event.accept()
+            return
+
+        # Shift 키 상태
+        if event.key() == Qt.Key.Key_Shift:
+            self.shift_pressed = True
+            self.update_tool_cursor()
+            return
+
+        # Ctrl / Meta(Mac Cmd) 키 상태
+        if event.key() in (Qt.Key.Key_Control, Qt.Key.Key_Meta):
+            self.ctrl_pressed = True
+            self.update_tool_cursor()
+            return
+
+        # Alt / Option 키 상태
+        if event.key() == Qt.Key.Key_Alt:
+            self.alt_pressed = True
+            self.update_tool_cursor()
+            return
+
+        # 복사 (Ctrl+C)
+        if (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier)) and event.key() == Qt.Key.Key_C:
+            if self.copy_selected():
+                event.accept()
+                return
+
+        # 붙여넣기 (Ctrl+V)
+        if (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier)) and event.key() == Qt.Key.Key_V:
+            if self.paste_clipboard():
+                event.accept()
+                return
+
+        # 이미지 선택 상태 조작
+        if self.active_image:
+            if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+                self.delete_image_overlay(self.active_image)
+                event.accept()
+                return
+            elif event.key() == Qt.Key.Key_BracketLeft:  # [ : 투명도 감소
+                self.active_image.opacity = max(0.1, round(self.active_image.opacity - 0.1, 2))
+                self.update()
+                event.accept()
+                return
+            elif event.key() == Qt.Key.Key_BracketRight:  # ] : 투명도 증가
+                self.active_image.opacity = min(1.0, round(self.active_image.opacity + 0.1, 2))
+                self.update()
+                event.accept()
+                return
+            elif event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
+                step = 5.0 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1.0
+                dx = -step if event.key() == Qt.Key.Key_Left else (step if event.key() == Qt.Key.Key_Right else 0)
+                dy = -step if event.key() == Qt.Key.Key_Up else (step if event.key() == Qt.Key.Key_Down else 0)
+                b = self.active_image.bbox
+                self.active_image.bbox = fitz.Rect(b.x0 + dx, b.y0 + dy, b.x1 + dx, b.y1 + dy)
+                self.update()
+                event.accept()
+                return
+            elif event.key() == Qt.Key.Key_Escape:
+                self.active_image = None
+                self.update()
+                event.accept()
+                return
+
         # 텍스트 위치 조정 모드에서 방향키 처리
-        elif (self.text_adjustment_mode or self.quick_adjustment_mode) and self.selected_text_info:
+        if (self.text_adjustment_mode or self.quick_adjustment_mode) and self.selected_text_info:
             # 선택된 텍스트가 오버레이 텍스트인지 확인 (원본텍스트 위치조정 차단)
             if hasattr(self.selected_text_info, 'get') and not self.is_overlay_text(self.selected_text_info, self.selected_text_info.get('original_bbox')):
                 print("원본 텍스트는 위치조정할 수 없습니다. 오직 수정된 오버레이 텍스트만 조정 가능합니다.")
@@ -2164,25 +3291,149 @@ class PdfViewerWidget(QLabel):
 
     def keyReleaseEvent(self, event):
         """키보드 해제 이벤트 처리"""
-        if event.key() == Qt.Key.Key_Control:
+        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
+            self.space_pressed = False
+            if not getattr(self, 'panning', False):
+                self.update_tool_cursor()
+            event.accept()
+            return
+
+        if event.key() == Qt.Key.Key_Shift:
+            self.shift_pressed = False
+            self.update_tool_cursor()
+            return
+
+        if event.key() in (Qt.Key.Key_Control, Qt.Key.Key_Meta):
             self.ctrl_pressed = False
-            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.update_tool_cursor()
+            return
+
+        if event.key() == Qt.Key.Key_Alt:
+            self.alt_pressed = False
+            self.update_tool_cursor()
+            return
+
         super().keyReleaseEvent(event)
     
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            # Ctrl+클릭으로 사각형 선택 모드 시작
-            if self.ctrl_pressed:
-                self.selection_mode = True
-                self.selection_start = event.position().toPoint()
-                self.selection_rect = None
-                self.selected_texts = []
-                print("사각형 선택 모드 시작 - 드래그하여 영역을 선택하세요")
+        # 0. 마우스 휠 클릭(미들 버튼) 또는 스페이스바/단축키 조합 핸드툴 & 줌툴 처리
+        modifiers = event.modifiers()
+        has_ctrl = getattr(self, 'ctrl_pressed', False) or bool(modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier))
+        has_alt = getattr(self, 'alt_pressed', False) or bool(modifiers & Qt.KeyboardModifier.AltModifier)
+        has_shift = getattr(self, 'shift_pressed', False) or bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        is_space = getattr(self, 'space_pressed', False)
+
+        # 0-1. 줌 툴 클릭 처리 (Ctrl + Spacebar + 클릭: 화면 확대 / Ctrl + Alt + Spacebar + 클릭: 화면 축소)
+        if (is_space and (has_ctrl or has_alt)) or (has_ctrl and has_alt):
+            if event.button() == Qt.MouseButton.LeftButton:
+                self.single_click_timer.stop()
+                self.pending_single_click_pos = None
+                parent_window = self.window()
+                scroll_area = self._get_scroll_area()
+                vp_pos = scroll_area.viewport().mapFromGlobal(event.globalPosition().toPoint()) if scroll_area else event.position().toPoint()
+                
+                if has_alt:
+                    if hasattr(parent_window, 'zoom_out'):
+                        parent_window.zoom_out(vp_pos)
+                else:
+                    if hasattr(parent_window, 'zoom_in'):
+                        parent_window.zoom_in(vp_pos)
+                self.update_tool_cursor()
+                event.accept()
                 return
-            
-            # 텍스트 조정 모드에서 다른 지점 클릭 시 모드 종료
+
+        # 0-2. 핸드 툴 패닝 시작 (Spacebar + 좌클릭 드래그 또는 마우스 미들버튼 클릭)
+        if (event.button() == Qt.MouseButton.LeftButton and is_space) or (event.button() == Qt.MouseButton.MiddleButton):
+            self.single_click_timer.stop()
+            self.pending_single_click_pos = None
+            self.panning = True
+            self.pan_start_global = event.globalPosition().toPoint()
+            scroll_area = self._get_scroll_area()
+            if scroll_area:
+                self.pan_start_h = scroll_area.horizontalScrollBar().value()
+                self.pan_start_v = scroll_area.verticalScrollBar().value()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            parent_window = self.window()
+            if parent_window and hasattr(parent_window, 'show_status_message'):
+                t_msg = parent_window.t('status_panning', default="화면 이동(패닝) 중...") if hasattr(parent_window, 't') else "화면 이동(패닝) 중..."
+                parent_window.show_status_message(t_msg)
+            event.accept()
+            return
+
+        if event.button() == Qt.MouseButton.LeftButton:
             click_pos = event.position().toPoint()
             pdf_x, pdf_y = self._widget_point_to_pdf(click_pos)
+
+            parent_window = self.window()
+            is_eraser_btn = bool(parent_window and getattr(parent_window, 'patch_precise_mode', False) and getattr(parent_window, 'patch_only_mode', False))
+            is_patch_btn = bool(parent_window and getattr(parent_window, 'patch_precise_mode', False) and not getattr(parent_window, 'patch_only_mode', False))
+
+            is_eraser_mode = (has_shift and not has_ctrl and not is_space) or (is_eraser_btn and not is_space and not has_alt)
+            is_patch_mode = (has_ctrl and not has_shift and not is_space and not has_alt and not is_eraser_btn) or (is_patch_btn and not has_shift and not is_space and not has_alt)
+
+            # 지우개모드: Shift+드래그 또는 지우개 모드 툴바 버튼 활성화 시 (영역 배경 패치만 즉시 적용)
+            if is_eraser_mode:
+                self.single_click_timer.stop()
+                self.pending_single_click_pos = None
+                self.selection_mode = True
+                self.selection_is_eraser = True
+                self.selection_start = click_pos
+                self.selection_rect = None
+                self.selected_texts = []
+                if parent_window:
+                    parent_window.patch_only_mode = True
+                    if hasattr(parent_window, 'show_status_message'):
+                        t_msg = parent_window.t('status_eraser_drag', default="지우개 모드: 영역을 드래그하여 배경색으로 지웁니다") if hasattr(parent_window, 't') else "지우개 모드: 영역을 드래그하여 배경색으로 지웁니다"
+                        parent_window.show_status_message(t_msg)
+                print("지우개 모드 선택 시작")
+                event.accept()
+                return
+
+            # 패치모드: Ctrl+드래그 또는 패치 모드 툴바 버튼 활성화 시 (영역 선택 및 텍스트 편집 대화상자)
+            if is_patch_mode:
+                self.single_click_timer.stop()
+                self.pending_single_click_pos = None
+                self.selection_mode = True
+                self.selection_is_eraser = False
+                self.selection_start = click_pos
+                self.selection_rect = None
+                self.selected_texts = []
+                if parent_window:
+                    parent_window.patch_only_mode = False
+                    if hasattr(parent_window, 'show_status_message'):
+                        t_msg = parent_window.t('status_patch_drag', default="패치 모드: 편집할 텍스트 영역을 드래그하세요") if hasattr(parent_window, 't') else "패치 모드: 편집할 텍스트 영역을 드래그하세요"
+                        parent_window.show_status_message(t_msg)
+                print("패치 모드 선택 시작")
+                event.accept()
+                return
+
+            # 1. 이미지 오버레이 핸들 또는 이미지 본체 클릭 감지
+            if pdf_x is not None and pdf_y is not None:
+                pdf_point = fitz.Point(pdf_x, pdf_y)
+                # 리사이즈 핸들 클릭 확인
+                if self.active_image and self._is_on_image_resize_handle(self.active_image, pdf_point):
+                    self.resizing_image = True
+                    self.drag_start_pos = (pdf_x, pdf_y)
+                    self.drag_start_bbox = fitz.Rect(self.active_image.bbox)
+                    self.update()
+                    return
+
+                # 이미지 본체 클릭 확인
+                hit_img = self._find_image_at_point(pdf_point)
+                if hit_img:
+                    self.active_image = hit_img
+                    self.dragging_image = True
+                    self.drag_start_pos = (pdf_x, pdf_y)
+                    self.drag_start_bbox = fitz.Rect(hit_img.bbox)
+                    self.active_overlay = None
+                    self.update()
+                    return
+                else:
+                    if self.active_image:
+                        self.active_image = None
+                        self.update()
+            
+            # 텍스트 조정 모드에서 다른 지점 클릭 시 모드 종료
             if self.selected_text_info and pdf_x is not None and pdf_y is not None:
                 current_bbox = self.selected_text_info.get('original_bbox')
                 if current_bbox:
@@ -2198,7 +3449,6 @@ class PdfViewerWidget(QLabel):
                     # 같은 텍스트 영역 내 클릭이면 계속 조정 모드 유지
                     return
 
-        # 드래그 방식 제거 - 단순 클릭 처리
         # 싱글클릭 타이머 설정 (더블클릭 감지용)
         click_pos = event.position().toPoint()
         pdf_x, pdf_y = self._widget_point_to_pdf(click_pos)
@@ -2211,8 +3461,14 @@ class PdfViewerWidget(QLabel):
                     break
         if overlay_hit:
             self.active_overlay = (self.current_page_num, overlay_hit.z_index)
+            self.potential_drag_overlay = overlay_hit
+            self.drag_start_pos = (pdf_x, pdf_y)
+            self.drag_start_bbox = fitz.Rect(overlay_hit.bbox)
         else:
-            self.active_overlay = None
+            mw = getattr(self, 'main_window', None) or self.window()
+            if not (mw and getattr(mw, 'current_text_editor', None) is not None):
+                self.active_overlay = None
+            self.potential_drag_overlay = None
         self.update() # 즉시 갱신하여 패치 투명도 반영
         self.pending_single_click_pos = click_pos
         self.single_click_timer.start(300)  # 300ms 후 싱글클릭 처리
@@ -2220,18 +3476,85 @@ class PdfViewerWidget(QLabel):
     
     def mouseMoveEvent(self, event):
         current_pos = event.position().toPoint()
-        
+        self.mouse_pos = current_pos
+
+        # 핸드 툴 화면 패닝 드래그 처리
+        if getattr(self, 'panning', False):
+            curr_global = event.globalPosition().toPoint()
+            dx = curr_global.x() - self.pan_start_global.x()
+            dy = curr_global.y() - self.pan_start_global.y()
+            scroll_area = self._get_scroll_area()
+            if scroll_area:
+                scroll_area.horizontalScrollBar().setValue(self.pan_start_h - dx)
+                scroll_area.verticalScrollBar().setValue(self.pan_start_v - dy)
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+
+        pdf_x, pdf_y = self._widget_point_to_pdf(current_pos)
+
+        # 텍스트 오버레이 마우스 드래그 이동 처리
+        if getattr(self, 'potential_drag_overlay', None) and pdf_x is not None and pdf_y is not None:
+            dx = pdf_x - self.drag_start_pos[0]
+            dy = pdf_y - self.drag_start_pos[1]
+            if abs(dx) > 0.4 or abs(dy) > 0.4 or getattr(self, 'dragging_overlay', False):
+                self.dragging_overlay = True
+                self.single_click_timer.stop()
+                self.pending_single_click_pos = None
+                raw_bbox = fitz.Rect(
+                    self.drag_start_bbox.x0 + dx, self.drag_start_bbox.y0 + dy,
+                    self.drag_start_bbox.x1 + dx, self.drag_start_bbox.y1 + dy
+                )
+                snapped_bbox, guides = self._apply_smart_snap(raw_bbox, ignore_obj=self.potential_drag_overlay)
+                self.active_snap_guides = guides
+                self.potential_drag_overlay.move_to(snapped_bbox)
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
+                self.update()
+                return
+
+        # 이미지 리사이즈 처리
+        if self.resizing_image and self.active_image and pdf_x is not None and pdf_y is not None:
+            orig_w = float(self.active_image.pixmap.width())
+            orig_h = float(self.active_image.pixmap.height())
+            aspect = (orig_w / orig_h) if orig_h > 0 else 1.0
+            new_w = max(15.0, pdf_x - self.drag_start_bbox.x0)
+            new_h = new_w / aspect
+            self.active_image.bbox = fitz.Rect(
+                self.drag_start_bbox.x0, self.drag_start_bbox.y0,
+                self.drag_start_bbox.x0 + new_w, self.drag_start_bbox.y0 + new_h
+            )
+            self.update()
+            return
+
+        # 이미지 이동 드래그 처리
+        if self.dragging_image and self.active_image and pdf_x is not None and pdf_y is not None:
+            dx = pdf_x - self.drag_start_pos[0]
+            dy = pdf_y - self.drag_start_pos[1]
+            raw_bbox = fitz.Rect(
+                self.drag_start_bbox.x0 + dx, self.drag_start_bbox.y0 + dy,
+                self.drag_start_bbox.x1 + dx, self.drag_start_bbox.y1 + dy
+            )
+            snapped_bbox, guides = self._apply_smart_snap(raw_bbox, ignore_obj=self.active_image)
+            self.active_snap_guides = guides
+            self.active_image.bbox = snapped_bbox
+            self.update()
+            return
+
         # 사각형 선택 모드 처리
         if self.selection_mode and self.selection_start:
             self.selection_rect = QRect(self.selection_start, current_pos).normalized()
             self.update()  # 선택 사각형 그리기
             return
-        
-        # 호버 상태 업데이트를 위해 마우스 위치 저장
-        self.mouse_pos = current_pos
+
+        # 줄자 표시 상태면 마우스 인디케이터 갱신을 위해 update 호출
+        if getattr(self, 'show_ruler', False):
+            self.update()
 
     def leaveEvent(self, event):
-        """마우스가 위젯을 벗어날 때 호버 하이라이트 제거"""
+        """마우스가 위젯을 벗어날 때 호버 하이라이트 제거 및 십자 커서 복원"""
+        if not getattr(self, 'space_pressed', False) and not getattr(self, 'panning', False):
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        self.active_snap_guides = []
         if self.hover_rect:
             self.hover_rect = None
             self.hover_span_info = None
@@ -2239,38 +3562,138 @@ class PdfViewerWidget(QLabel):
         super().leaveEvent(event)
     
     def mouseReleaseEvent(self, event):
-        # 사각형 선택 모드 완료
-        if self.selection_mode and self.selection_rect:
-            self.complete_area_selection()
-            self.selection_mode = False
+        # 텍스트 오버레이 드래그 완료 처리
+        if getattr(self, 'dragging_overlay', False):
+            self.dragging_overlay = False
+            self.potential_drag_overlay = None
+            self.active_snap_guides = []
+            main_window = self.window()
+            if main_window and hasattr(main_window, 'undo_manager') and self.doc:
+                try:
+                    main_window.undo_manager.save_state(self.doc, self)
+                except Exception:
+                    pass
+            self.update_tool_cursor()
+            self.update()
             return
-        
-        # 드래그 방식 완전 제거 - 단순 클릭만 처리
-        pass
-            
-            # 드래그 관련 코드 제거됨
+        self.potential_drag_overlay = None
+        self.active_snap_guides = []
+
+        # 핸드 툴 패닝 완료
+        if getattr(self, 'panning', False):
+            self.panning = False
+            self.update_tool_cursor()
+            parent_window = self.window()
+            if parent_window and hasattr(parent_window, 'update_status_mode_message'):
+                parent_window.update_status_mode_message()
+            event.accept()
+            return
+
+        # 이미지 이동/리사이즈 완료 처리
+        if self.dragging_image or self.resizing_image:
+            self.dragging_image = False
+            self.resizing_image = False
+            self.active_snap_guides = []
+            main_window = self.window()
+            if main_window and hasattr(main_window, 'undo_manager') and self.doc:
+                try:
+                    main_window.undo_manager.save_state(self.doc, self)
+                except Exception:
+                    pass
+            self.update()
+            return
+
+        # 사각형 선택 모드 완료
+        if self.selection_mode:
+            if self.selection_rect:
+                self.complete_area_selection()
+            self.selection_mode = False
+            self.selection_rect = None
+            self.selection_start = None
+            self.selection_is_eraser = False
+            main_window = self.window()
+            if main_window and hasattr(main_window, 'update_status_mode_message'):
+                main_window.update_status_mode_message()
+            return
     
     def wheelEvent(self, event):
-        """휠 이벤트 처리 (Ctrl+휠로 줌) - 마우스 포인터 중심 확대 개선"""
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+        """휠 이벤트 처리 (Ctrl+휠: 줌, Shift+휠: 페이지 이동, 휠: 연속 스크롤)"""
+        modifiers = event.modifiers()
+        has_ctrl = getattr(self, 'ctrl_pressed', False) or bool(modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier))
+        has_alt = getattr(self, 'alt_pressed', False) or bool(modifiers & Qt.KeyboardModifier.AltModifier)
+        has_shift = getattr(self, 'shift_pressed', False) or bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+
+        # 1. Shift + 마우스휠 > 페이지 이동
+        if has_shift and not has_ctrl and not has_alt:
+            parent_window = self.window()
+            if self.doc and hasattr(parent_window, 'next_page') and hasattr(parent_window, 'prev_page'):
+                delta = event.angleDelta().y() or event.angleDelta().x()
+                if delta < 0:
+                    parent_window.next_page()
+                elif delta > 0:
+                    parent_window.prev_page()
+                event.accept()
+                return
+
+        # 2. Ctrl 또는 Alt + 마우스휠 > 확대/축소 (마우스 포인터 중심)
+        if has_ctrl or has_alt:
             parent_window = self.window()
             if hasattr(parent_window, 'zoom_factor'):
                 delta = event.angleDelta().y()
-                # 마우스 포인터의 뷰포트 내 상대 좌표 계산
-                mouse_pos = event.position().toPoint()
+                scroll_area = self._get_scroll_area()
+                if scroll_area:
+                    mouse_pos = scroll_area.viewport().mapFromGlobal(event.globalPosition().toPoint())
+                else:
+                    mouse_pos = event.position().toPoint()
                 
                 if delta > 0:
                     parent_window.zoom_in(mouse_pos)
                 else:
                     parent_window.zoom_out(mouse_pos)
             event.accept()
-        else:
-            if self.parent():
-                self.parent().wheelEvent(event)
+            return
+        # 일반 마우스 휠: 수직 연속 스크롤 페이지 전환 처리
+        scroll_area = self._get_scroll_area()
+        parent_window = self.window()
+        continuous_scroll = getattr(parent_window, 'continuous_scroll_enabled', True)
+
+        if continuous_scroll and scroll_area and self.doc and hasattr(parent_window, 'next_page'):
+            vbar = scroll_area.verticalScrollBar()
+            delta = event.angleDelta().y()
+            
+            # 페이지 아래쪽 끝에서 아래로 휠 스크롤 시 -> 다음 페이지로 전환
+            if delta < 0 and vbar.value() >= vbar.maximum():
+                self._wheel_accum = getattr(self, '_wheel_accum', 0) + abs(delta)
+                if self._wheel_accum >= 120:
+                    self._wheel_accum = 0
+                    if self.current_page_num < len(self.doc) - 1:
+                        parent_window.next_page()
+                        vbar.setValue(vbar.minimum())
+                        event.accept()
+                        return
+            # 페이지 위쪽 끝에서 위로 휠 스크롤 시 -> 이전 페이지로 전환
+            elif delta > 0 and vbar.value() <= vbar.minimum():
+                self._wheel_accum = getattr(self, '_wheel_accum', 0) + abs(delta)
+                if self._wheel_accum >= 120:
+                    self._wheel_accum = 0
+                    if self.current_page_num > 0:
+                        parent_window.prev_page()
+                        vbar.setValue(vbar.maximum())
+                        event.accept()
+                        return
+            else:
+                self._wheel_accum = 0
+
+        if self.parent():
+            self.parent().wheelEvent(event)
     
     def check_hover(self):
         """마우스 호버 체크 및 텍스트 블록 하이라이트 (캐시 적용 최적화)"""
         if not self.doc or not hasattr(self, 'mouse_pos'):
+            return
+        
+        # 스페이스바(핸드 툴/줌 툴) 또는 패닝 중에는 호버 갱신 및 커서 덮어쓰기 방지
+        if getattr(self, 'space_pressed', False) or getattr(self, 'panning', False):
             return
         
         try:
@@ -2280,6 +3703,14 @@ class PdfViewerWidget(QLabel):
                 return
             
             pdf_point = fitz.Point(pdf_x, pdf_y)
+
+            # 이미지 리사이즈 핸들 또는 이미지 호버 검사
+            if self.active_image and self._is_on_image_resize_handle(self.active_image, pdf_point):
+                self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+                return
+            elif self._find_image_at_point(pdf_point):
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
+                return
             
             # 캐시된 텍스트 데이터 사용
             if self.current_page_num not in self._text_dict_cache:
@@ -2297,7 +3728,10 @@ class PdfViewerWidget(QLabel):
             # 0) 오버레이 레이어 히트 테스트 (PDF 텍스트보다 우선)
             if self.text_overlays.get(self.current_page_num):
                 for ov in reversed(self.text_overlays[self.current_page_num]):
-                    if ov.visible and self._rect_contains_point(ov.bbox, pdf_point):
+                    hit_ov = self._rect_contains_point(ov.bbox, pdf_point)
+                    if not hit_ov and getattr(ov, 'original_bbox', None):
+                        hit_ov = self._rect_contains_point(ov.original_bbox, pdf_point)
+                    if ov.visible and hit_ov:
                         overlay_hover_rect = ov.bbox
                         overlay_hover_span_info = {
                             'text': ov.text,
@@ -2314,53 +3748,504 @@ class PdfViewerWidget(QLabel):
                         }
                         break
 
-            for block in text_dict.get("blocks", []):
-                if block.get('type') == 0:
-                    for line in block.get("lines", []):
-                        for span in line.get("spans", []):
-                            bbox = fitz.Rect(span["bbox"])
-                            if self._rect_contains_point(bbox, pdf_point):
-                                span_info = span.copy()
-                                span_info['original_bbox'] = bbox
-                                
-                                # 오버레이 텍스트인지 확인
-                                if self.is_overlay_text(span, bbox):
-                                    if not overlay_hover_rect:  # 첫 번째 오버레이 텍스트 우선
-                                        overlay_hover_rect = bbox
-                                        overlay_hover_span_info = span_info
-                                else:
-                                    if not original_hover_rect:  # 첫 번째 원본 텍스트
-                                        original_hover_rect = bbox
-                                        original_hover_span_info = span_info
-            
+            # 현재 편집 중인 active_overlay가 있다면 해당 오버레이 객체 확인
+            active_ov_obj = None
+            if self.active_overlay and self.active_overlay[0] == self.current_page_num:
+                active_ov_obj = self.get_overlay_by_id(self.active_overlay[0], self.active_overlay[1])
+
+            visual_lines = self._get_visual_lines_for_page(self.current_page_num)
+            for vl in visual_lines:
+                # 활성 편집 중인 오버레이와 겹치는 원본 텍스트블록은 파란색 호버로 덮지 않음
+                if active_ov_obj:
+                    a_bbox = active_ov_obj.original_bbox or active_ov_obj.bbox
+                    vl_b = vl['original_bbox']
+                    if vl_b.x0 < a_bbox.x1 and vl_b.x1 > a_bbox.x0 and vl_b.y0 < a_bbox.y1 and vl_b.y1 > a_bbox.y0:
+                        continue
+
+                if self._rect_contains_point(vl['original_bbox'], pdf_point, tol=1.5):
+                    span_info = {
+                        'text': vl['text'],
+                        'font': vl['font'],
+                        'size': vl['size'],
+                        'flags': vl['flags'],
+                        'color': vl['color'],
+                        'origin': vl['origin'],
+                        'original_bbox': vl['original_bbox'],
+                        'line_text': vl['text'],
+                        'line_spans': vl['line_spans'],
+                        'is_overlay': False
+                    }
+                    # 오버레이 텍스트인지 확인
+                    if any(self.is_overlay_text(s, fitz.Rect(s["bbox"])) for s in vl.get('line_spans', [])):
+                        if not overlay_hover_rect:
+                            overlay_hover_rect = vl['original_bbox']
+                            overlay_hover_span_info = span_info
+                    else:
+                        if not original_hover_rect:
+                            original_hover_rect = vl['original_bbox']
+                            original_hover_span_info = span_info
+                    break
+
             # 오버레이 텍스트가 있으면 우선, 없으면 원본 텍스트 사용
             new_hover_rect = overlay_hover_rect if overlay_hover_rect else original_hover_rect
             new_hover_span_info = overlay_hover_span_info if overlay_hover_span_info else original_hover_span_info
-            
+
             # 호버 상태가 변경되었을 때 또는 호버 중일 때 주기적 갱신
             if new_hover_rect != self.hover_rect:
                 self.hover_rect = new_hover_rect
                 self.hover_span_info = new_hover_span_info
                 self.update() # 상태 변화(해제 포함) 시 즉시 화면 갱신
-                
-                # 커서 변경 (Ctrl 키 상태에 따라)
-                if new_hover_rect:
-                    if self.ctrl_pressed:
-                        self.setCursor(Qt.CursorShape.CrossCursor)
-                    else:
-                        self.setCursor(Qt.CursorShape.PointingHandCursor)
-                else:
-                    if self.ctrl_pressed:
-                        self.setCursor(Qt.CursorShape.CrossCursor)
-                    else:
-                        self.setCursor(Qt.CursorShape.ArrowCursor)
-            
+                self.update_tool_cursor()
+
             # 호버 유지 중에도 주기적 update (애니메이션 등 반영)
             elif self.hover_rect:
+                self.update_tool_cursor()
                 self.update()
-                    
+            else:
+                self.update_tool_cursor()
+
         except Exception:
             pass
+
+    def invalidate_visual_lines_cache(self, page_num=None):
+        """Visual lines 및 text_dict 캐시 무효화"""
+        if hasattr(self, '_visual_lines_cache'):
+            if page_num is not None:
+                self._visual_lines_cache.pop(page_num, None)
+            else:
+                self._visual_lines_cache.clear()
+        if hasattr(self, '_text_dict_cache'):
+            if page_num is not None:
+                self._text_dict_cache.pop(page_num, None)
+            else:
+                self._text_dict_cache.clear()
+
+    def _get_visual_lines_for_page(self, page_num: int) -> list[dict]:
+        """페이지 내 rawdict 문자(chars)들을 분석하여 한컴 HWP PDF 특수문자/괄호/공백 누락 없이
+        시각적 동일 라인(Visual Line) 단위로 완벽하게 병합된 라인 리스트 반환."""
+        if not self.doc or page_num < 0 or page_num >= len(self.doc):
+            return []
+        
+        if hasattr(self, '_visual_lines_cache') and page_num in self._visual_lines_cache:
+            return self._visual_lines_cache[page_num]
+            
+        try:
+            page = self.doc.load_page(page_num)
+            rd = page.get_text('rawdict')
+            rot_mat = page.rotation_matrix if page.rotation != 0 else None
+            visual_lines = []
+            
+            for block in rd.get('blocks', []):
+                if block.get('type') != 0:
+                    continue
+                
+                # 블록 내 모든 chars 수집 및 span 참조 보존 (페이지 회전 보정 적용)
+                chars_with_info = []
+                for line in block.get('lines', []):
+                    line_dir = line.get('dir', (1.0, 0.0))
+                    if rot_mat:
+                        v = fitz.Point(line_dir[0], line_dir[1]) * rot_mat - fitz.Point(0, 0) * rot_mat
+                        eff_dir = (v.x, v.y)
+                    else:
+                        eff_dir = line_dir
+                    for span in line.get('spans', []):
+                        font = span.get('font', '')
+                        size = float(span.get('size', 12.0))
+                        color = span.get('color', 0)
+                        flags = span.get('flags', 0)
+                        for ch in span.get('chars', []):
+                            cb = fitz.Rect(ch['bbox'])
+                            if rot_mat:
+                                cb = cb * rot_mat
+                            orig = ch.get('origin')
+                            if orig and rot_mat:
+                                opt = fitz.Point(orig) * rot_mat
+                                orig = (opt.x, opt.y)
+                            chars_with_info.append({
+                                'c': ch['c'],
+                                'bbox': (cb.x0, cb.y0, cb.x1, cb.y1),
+                                'origin': orig,
+                                'font': font,
+                                'size': size,
+                                'color': color,
+                                'flags': flags,
+                                'span': span,
+                                'dir': eff_dir
+                            })
+                if not chars_with_info:
+                    continue
+                
+                # 중복 음영/레이어 문자 제거 (HWP PDF에서 그림자/외곽선 시뮬레이션으로 동일 위치 중복 방지)
+                deduped_chars = []
+                for ch in chars_with_info:
+                    cb = ch['bbox']
+                    dup = False
+                    for ex in deduped_chars:
+                        eb = ex['bbox']
+                        if abs(cb[0] - eb[0]) < 1.5 and abs(cb[1] - eb[1]) < 1.5 and ch['c'] == ex['c']:
+                            dup = True
+                            if ex['color'] != 0 and ch['color'] == 0:
+                                ex['color'] = 0
+                                ex['font'] = ch['font']
+                                ex['span'] = ch['span']
+                            break
+                    if not dup:
+                        deduped_chars.append(ch)
+                chars_with_info = deduped_chars
+                
+                # 블록의 주 진행 방향 판정 (수평 vs 수직)
+                is_vertical = any(abs(c.get('dir', (1.0, 0.0))[1]) > abs(c.get('dir', (1.0, 0.0))[0]) for c in chars_with_info)
+
+                block_lines = []
+                if not is_vertical:
+                    for ch in chars_with_info:
+                        cb = ch['bbox']
+                        cy = (cb[1] + cb[3]) / 2.0
+                        ch_h = max(cb[3] - cb[1], 8.0)
+                        
+                        matched = None
+                        for bl in block_lines:
+                            if abs(cy - bl['y_mid']) <= max(3.5, ch_h * 0.45):
+                                matched = bl
+                                break
+                        if matched:
+                            matched['chars'].append(ch)
+                            matched['y0'] = min(matched['y0'], cb[1])
+                            matched['y1'] = max(matched['y1'], cb[3])
+                            matched['y_mid'] = (matched['y0'] + matched['y1']) / 2.0
+                        else:
+                            block_lines.append({
+                                'y_mid': cy,
+                                'y0': cb[1],
+                                'y1': cb[3],
+                                'chars': [ch]
+                            })
+                    block_lines.sort(key=lambda bl: bl['y0'])
+                else:
+                    for ch in chars_with_info:
+                        cb = ch['bbox']
+                        cx = (cb[0] + cb[2]) / 2.0
+                        ch_w = max(cb[2] - cb[0], 8.0)
+                        
+                        matched = None
+                        for bl in block_lines:
+                            if abs(cx - bl['x_mid']) <= max(3.5, ch_w * 0.45):
+                                matched = bl
+                                break
+                        if matched:
+                            matched['chars'].append(ch)
+                            matched['x0'] = min(matched['x0'], cb[0])
+                            matched['x1'] = max(matched['x1'], cb[2])
+                            matched['x_mid'] = (matched['x0'] + matched['x1']) / 2.0
+                        else:
+                            block_lines.append({
+                                'x_mid': cx,
+                                'x0': cb[0],
+                                'x1': cb[2],
+                                'chars': [ch]
+                            })
+                    block_lines.sort(key=lambda bl: bl['x0'])
+                
+                for bl in block_lines:
+                    if not is_vertical:
+                        bl['chars'].sort(key=lambda c: c['bbox'][0])
+                    else:
+                        bl_dir = bl['chars'][0].get('dir', (0.0, 1.0))
+                        if bl_dir[1] < 0:
+                            bl['chars'].sort(key=lambda c: -c['bbox'][3])
+                        else:
+                            bl['chars'].sort(key=lambda c: c['bbox'][1])
+                        
+                    # [시각적 공백 복원] PDF 문자 간격(Gap)을 분석하여 누락된 공백 문자(' ') 복원
+                    # Word/PowerPoint 등에서 공백 글리프 없이 좌표 이동(TJ)으로 띄어쓰기된 텍스트 처리
+                    spaced_chars = []
+                    for ch in bl['chars']:
+                        if not spaced_chars:
+                            spaced_chars.append(ch)
+                        else:
+                            prev_ch = spaced_chars[-1]
+                            p_c = prev_ch.get('c', '')
+                            c_c = ch.get('c', '')
+                            if not is_vertical:
+                                gap = ch['bbox'][0] - prev_ch['bbox'][2]
+                            else:
+                                bl_dir = ch.get('dir', (0.0, 1.0))
+                                if bl_dir[1] < 0:
+                                    gap = prev_ch['bbox'][1] - ch['bbox'][3]
+                                else:
+                                    gap = ch['bbox'][1] - prev_ch['bbox'][3]
+                            f_sz = max(float(ch.get('size', 12.0)), float(prev_ch.get('size', 12.0)), 10.0)
+                            max_seg_gap = max(35.0, f_sz * 3.5)
+                            
+                            # 공백 판정 임계치: 글자 크기의 18% 이상 및 2.0pt 이상, 컬럼 분할 거리 미만
+                            if (not p_c.isspace()) and (not c_c.isspace()) and (max_seg_gap >= gap >= max(2.0, f_sz * 0.18)):
+                                if not is_vertical:
+                                    sp_bbox = (prev_ch['bbox'][2], prev_ch['bbox'][1], ch['bbox'][0], prev_ch['bbox'][3])
+                                    sp_origin = (prev_ch['bbox'][2], prev_ch.get('origin', (0, 0))[1] if prev_ch.get('origin') else prev_ch['bbox'][3])
+                                else:
+                                    bl_dir = ch.get('dir', (0.0, 1.0))
+                                    if bl_dir[1] < 0:
+                                        sp_bbox = (prev_ch['bbox'][0], ch['bbox'][3], prev_ch['bbox'][2], prev_ch['bbox'][1])
+                                        sp_origin = (prev_ch.get('origin', (0, 0))[0], prev_ch['bbox'][1])
+                                    else:
+                                        sp_bbox = (prev_ch['bbox'][0], prev_ch['bbox'][3], prev_ch['bbox'][2], ch['bbox'][1])
+                                        sp_origin = (prev_ch.get('origin', (0, 0))[0], prev_ch['bbox'][3])
+                                spaced_chars.append({
+                                    'c': ' ',
+                                    'bbox': sp_bbox,
+                                    'origin': sp_origin,
+                                    'font': prev_ch.get('font', ''),
+                                    'size': prev_ch.get('size', 12.0),
+                                    'color': prev_ch.get('color', 0),
+                                    'flags': prev_ch.get('flags', 0),
+                                    'span': prev_ch.get('span'),
+                                    'dir': prev_ch.get('dir')
+                                })
+                            spaced_chars.append(ch)
+
+                    # 과도한 수평/수직 간격(컬럼 분할) 처리
+                    segments = []
+                    curr_seg = []
+                    for ch in spaced_chars:
+                        if not curr_seg:
+                            curr_seg.append(ch)
+                        else:
+                            prev_ch = curr_seg[-1]
+                            if not is_vertical:
+                                gap = ch['bbox'][0] - prev_ch['bbox'][2]
+                            else:
+                                bl_dir = ch.get('dir', (0.0, 1.0))
+                                if bl_dir[1] < 0:
+                                    gap = prev_ch['bbox'][1] - ch['bbox'][3]
+                                else:
+                                    gap = ch['bbox'][1] - prev_ch['bbox'][3]
+                            f_sz = max(ch['size'], prev_ch['size'], 10.0)
+                            if gap > max(35.0, f_sz * 3.5):
+                                segments.append(curr_seg)
+                                curr_seg = [ch]
+                            else:
+                                curr_seg.append(ch)
+                    if curr_seg:
+                        segments.append(curr_seg)
+                        
+                    for seg in segments:
+                        # [방어로직] 한컴 HWP 전용 PUA 특수문자, 글머리기호(Bullet), 및 선행/후행 공백을 텍스트블록에서 제외
+                        # 1. 선두의 불릿 기호, 한컴 PUA 특수문자, 심볼 폰트 문자 및 선행 공백 검출/제외 (들여쓰기 인덴트 폭 오차 완벽 해결)
+                        start_idx = 0
+                        while start_idx < len(seg):
+                            ch = seg[start_idx]
+                            c_str = ch.get('c', '')
+                            f_str = ch.get('font', '')
+                            if c_str.isspace() or is_pua_char(c_str) or (c_str in BULLET_CHARS) or is_symbol_font(f_str):
+                                start_idx += 1
+                            else:
+                                break
+                        if start_idx >= len(seg):
+                            continue
+                            
+                        # 2. 말미의 한컴 PUA 특수문자, 심볼 문자 및 불릿/후행 공백 검출/제외
+                        end_idx = len(seg)
+                        while end_idx > start_idx:
+                            ch = seg[end_idx - 1]
+                            c_str = ch.get('c', '')
+                            f_str = ch.get('font', '')
+                            if c_str.isspace() or is_pua_char(c_str) or (c_str in BULLET_CHARS) or is_symbol_font(f_str):
+                                end_idx -= 1
+                            else:
+                                break
+                                
+                        clean_seg = seg[start_idx:end_idx]
+                        # 본문 중간에 섞인 PUA 문자(렌더링 불가 문자) 필터링
+                        clean_seg = [c for c in clean_seg if not is_pua_char(c.get('c', ''))]
+                        if not clean_seg:
+                            continue
+                        seg = clean_seg
+
+                        seg_text = ''.join(c['c'] for c in seg)
+                        if not seg_text.strip():
+                            continue
+                        x0 = min(c['bbox'][0] for c in seg)
+                        y0 = min(c['bbox'][1] for c in seg)
+                        x1 = max(c['bbox'][2] for c in seg)
+                        y1 = max(c['bbox'][3] for c in seg)
+                        seg_rect = fitz.Rect(x0, y0, x1, y1)
+                        
+                        non_space_chars = [c for c in seg if c['c'].strip()]
+                        target_chars = non_space_chars if non_space_chars else seg
+                        from collections import Counter
+                        font_counter = Counter(c['font'] for c in target_chars)
+                        size_counter = Counter(c['size'] for c in target_chars)
+                        color_counter = Counter(c['color'] for c in target_chars)
+                        flags_counter = Counter(c['flags'] for c in target_chars)
+                        
+                        prim_font = font_counter.most_common(1)[0][0]
+                        prim_size = size_counter.most_common(1)[0][0]
+                        prim_color = color_counter.most_common(1)[0][0]
+                        prim_flags = flags_counter.most_common(1)[0][0]
+                        
+                        # [고도화] 지배적 주 폰트/크기를 사용하는 첫 번째 글자의 베이스라인 우선 채택 (복합 크기 라인 Y축 오차 완벽 해결)
+                        baseline_y = None
+                        for c in target_chars:
+                            if c.get('origin') and c.get('size') == prim_size:
+                                baseline_y = c['origin'][1]
+                                break
+                        if baseline_y is None:
+                            for c in seg:
+                                if c.get('origin'):
+                                    baseline_y = c['origin'][1]
+                                    break
+                        if baseline_y is None:
+                            baseline_y = y0 + (prim_size * 0.85)
+                        
+                        # origin의 x는 첫 실제 글자의 시작점과 1:1 일치
+                        if not is_vertical:
+                            first_origin = (seg[0]['origin'][0] if seg[0].get('origin') else x0, baseline_y)
+                        else:
+                            first_origin = (seg[0]['origin'][0] if seg[0].get('origin') else x0,
+                                            seg[0]['origin'][1] if seg[0].get('origin') else baseline_y)
+                        
+                        seg_spans = []
+                        seen_spans = set()
+                        for c in seg:
+                            sp = c.get('span')
+                            if sp and id(sp) not in seen_spans:
+                                seen_spans.add(id(sp))
+                                seg_spans.append(sp)
+                                
+                        visual_lines.append({
+                            'text': seg_text,
+                            'font': prim_font,
+                            'size': prim_size,
+                            'color': prim_color,
+                            'flags': prim_flags,
+                            'origin': first_origin,
+                            'original_bbox': seg_rect,
+                            'line_text': seg_text,
+                            'line_spans': seg_spans,
+                            'chars': seg,
+                            'is_overlay': False,
+                            'is_vertical': is_vertical
+                        })
+                        
+            if not hasattr(self, '_visual_lines_cache'):
+                self._visual_lines_cache = {}
+            self._visual_lines_cache[page_num] = visual_lines
+            return visual_lines
+        except Exception as e:
+            print(f"[VisualLines] Error extracting visual lines: {e}")
+            return []
+
+    def _merge_line_spans(self, spans_in_line: list[dict], pdf_point: Optional[fitz.Point] = None) -> tuple[str, fitz.Rect, list[dict], dict]:
+        """라인 내 spans들을 공백 및 특수문자 규칙을 반영하여 하나의 텍스트와 통합 bbox로 병합.
+        표나 컬럼처럼 수평 gap이 과도하게 큰 경우 세그먼트를 분리하고,
+        pdf_point가 주어진 경우 클릭 지점이 속한 세그먼트를 우선 선택.
+        반환값: (merged_text, merged_bbox, target_spans, primary_attrs)
+        """
+        empty_attrs = {'font': '', 'size': 12.0, 'color': 0, 'flags': 0, 'origin': None}
+        if not spans_in_line:
+            return "", fitz.Rect(), [], empty_attrs
+
+        # x0 기준 정렬
+        sorted_spans = sorted(spans_in_line, key=lambda s: s["bbox"][0])
+
+        # 1. 과도한 수평 간격(예: 28pt 이상이거나 폰트 크기의 2.8배 초과)을 기준으로 세그먼트 분할
+        segments: list[list[dict]] = []
+        current_segment: list[dict] = []
+
+        for s in sorted_spans:
+            if not current_segment:
+                current_segment.append(s)
+            else:
+                prev_s = current_segment[-1]
+                gap = s["bbox"][0] - prev_s["bbox"][2]
+                font_sz = float(s.get("size") or prev_s.get("size") or 12.0)
+                max_gap = max(28.0, font_sz * 2.8)
+                if gap > max_gap:
+                    segments.append(current_segment)
+                    current_segment = [s]
+                else:
+                    current_segment.append(s)
+        if current_segment:
+            segments.append(current_segment)
+
+        # 2. pdf_point가 있는 경우 해당 세그먼트 선택, 없으면 클릭 위치와 가장 가까운 세그먼트
+        target_spans = segments[0]
+        if pdf_point is not None:
+            best_seg = None
+            min_dist = float('inf')
+            for seg in segments:
+                x0 = min(s["bbox"][0] for s in seg)
+                y0 = min(s["bbox"][1] for s in seg)
+                x1 = max(s["bbox"][2] for s in seg)
+                y1 = max(s["bbox"][3] for s in seg)
+                seg_rect = fitz.Rect(x0, y0, x1, y1)
+                if self._rect_contains_point(seg_rect, pdf_point, tol=2.0):
+                    best_seg = seg
+                    break
+                cx = (x0 + x1) / 2.0
+                cy = (y0 + y1) / 2.0
+                d = ((pdf_point.x - cx) ** 2 + (pdf_point.y - cy) ** 2) ** 0.5
+                if d < min_dist:
+                    min_dist = d
+                    best_seg = seg
+            if best_seg:
+                target_spans = best_seg
+
+        # 3. 세그먼트 내 spans 결합 및 정밀 공백 산출
+        x0 = min(s["bbox"][0] for s in target_spans)
+        y0 = min(s["bbox"][1] for s in target_spans)
+        x1 = max(s["bbox"][2] for s in target_spans)
+        y1 = max(s["bbox"][3] for s in target_spans)
+        merged_bbox = fitz.Rect(x0, y0, x1, y1)
+
+        merged_text = ""
+        for i, s in enumerate(target_spans):
+            span_text = s.get("text", "")
+            if not span_text:
+                continue
+            span_bbox = fitz.Rect(s["bbox"])
+
+            if i > 0:
+                prev_s = target_spans[i - 1]
+                prev_text = prev_s.get("text", "")
+                prev_bbox = fitz.Rect(prev_s["bbox"])
+                horizontal_gap = span_bbox.x0 - prev_bbox.x1
+
+                font_size = float(s.get("size") or prev_s.get("size") or 12.0)
+                # 기준 공백 임계치 및 단위 계산 (특수문자 왜곡 방어)
+                space_threshold = max(1.8, font_size * 0.22)
+                space_unit = max(2.5, font_size * 0.32)
+
+                num_spaces = 0
+                if horizontal_gap >= space_threshold:
+                    num_spaces = max(1, int(round(horizontal_gap / space_unit)))
+                    num_spaces = min(num_spaces, 10)
+                elif self._needs_space_between_spans(prev_s, s):
+                    num_spaces = 1
+
+                if num_spaces > 0:
+                    existing_spaces = 0
+                    if merged_text.endswith(' '):
+                        existing_spaces += 1
+                    if span_text.startswith(' '):
+                        existing_spaces += 1
+                    add_spaces = max(0, num_spaces - existing_spaces)
+                    if add_spaces > 0:
+                        merged_text += (" " * add_spaces)
+
+            merged_text += span_text
+
+        # 4. 세그먼트의 대표 스타일 산출 (글자 수가 가장 많은 span의 속성 채택)
+        primary_span = max(target_spans, key=lambda s: len(s.get("text", "").strip()) if s.get("text") else 0)
+        primary_attrs = {
+            'font': primary_span.get('font', 'Arial'),
+            'size': float(primary_span.get('size', 12.0)),
+            'color': primary_span.get('color', 0),
+            'flags': primary_span.get('flags', 0),
+            'origin': target_spans[0].get('origin') or primary_span.get('origin')
+        }
+
+        return merged_text, merged_bbox, target_spans, primary_attrs
     
     def mouseDoubleClickEvent(self, event):
         # PDF 문서가 로드되지 않았으면 무시
@@ -2375,25 +4260,33 @@ class PdfViewerWidget(QLabel):
         if self.quick_adjustment_mode:
             self.exit_quick_adjustment_mode()
         
-        # 디버깅을 위해 항상 이벤트 처리 (Ctrl 키 조건 제거)
-        print("Double click detected!")  # 디버깅 출력
+        print("Double click detected!")
+        self.hover_rect = None
+        self.hover_span_info = None
         
         try:
             # 라벨 내에서의 클릭 위치
             label_pos = event.position().toPoint()
-            print(f"Click position: {label_pos}")  # 디버깅 출력
-            
             pdf_x, pdf_y = self._widget_point_to_pdf(label_pos)
             if pdf_x is None or pdf_y is None:
                 return
             
             pdf_point = fitz.Point(pdf_x, pdf_y)
-            print(f"PDF coordinates: ({pdf_x}, {pdf_y})")  # 디버깅 출력
+            print(f"PDF coordinates: ({pdf_x}, {pdf_y})")
+
+            # 이미지 더블클릭 검사 -> 이미지 속성 대화상자 오픈
+            hit_img = self._find_image_at_point(pdf_point)
+            if hit_img:
+                self.active_image = hit_img
+                self.update()
+                dlg = ImagePropertyDialog(hit_img, self)
+                dlg.exec()
+                return
 
             # 오버레이 레이어 우선 히트 테스트 (빈 영역 오버레이 포함)
             if self.text_overlays.get(self.current_page_num):
                 for ov in reversed(self.text_overlays[self.current_page_num]):
-                    if ov.visible and self._rect_contains_point(ov.bbox, pdf_point):
+                    if ov.visible and self._rect_contains_point(ov.bbox, pdf_point, tol=2.0):
                         print("Overlay hit - open editor")
                         self.active_overlay = (self.current_page_num, ov.z_index)
                         span_info = {
@@ -2418,195 +4311,125 @@ class PdfViewerWidget(QLabel):
                         self.text_selected.emit(span_info)
                         return
 
-            page = self.doc.load_page(self.current_page_num)
-            text_dict = page.get_text("dict")
+            visual_lines = self._get_visual_lines_for_page(self.current_page_num)
             
-            # 더블클릭: 정확히 클릭한 텍스트 찾기 (거리 우선순위가 아닌 직접 포함 여부 확인)
-            clicked_overlay_spans = []  # 클릭 지점에 포함되는 오버레이 텍스트들
-            clicked_original_spans = []  # 클릭 지점에 포함되는 원본 텍스트들
-            found_spans = 0
+            clicked_overlay_info = None
+            clicked_original_info = None
             
-            print(f"더블클릭한 위치에서 텍스트 검색 중...")
+            print(f"더블클릭한 위치에서 텍스트 검색 중... (후보 라인수: {len(visual_lines)})")
             
-            for block in text_dict.get("blocks", []):
-                if block.get('type') != 0:
-                    continue
-                    
-                for line in block.get("lines", []):
-                    for span in line.get("spans", []):
-                        found_spans += 1
-                        bbox = fitz.Rect(span["bbox"])
-                        span_text = span.get("text", "").strip()
-                        
-                        # 더블클릭은 정확한 포함 여부만 확인 (거리 계산 불필요)
-                        if self._rect_contains_point(bbox, pdf_point):
-                            print(f"OK 클릭 지점에 포함된 텍스트: '{span_text}' bbox={bbox}")
-                            
-                            # 오버레이 텍스트인지 확인하여 분류
-                            if self.is_overlay_text(span, bbox):
-                                clicked_overlay_spans.append(span)
-                                print(f"   → 오버레이 텍스트로 분류")
-                            else:
-                                clicked_original_spans.append(span)
-                                print(f"   → 원본 텍스트로 분류")
+            # 1단계: 마우스 클릭점이 속한 visual line 탐색
+            for vl in visual_lines:
+                hit = self._rect_contains_point(vl['original_bbox'], pdf_point, tol=2.0)
+                if not hit:
+                    # 라인 내 개별 글자 히트 검사 (미세 여백 클릭 지원)
+                    for c in vl.get('chars', []):
+                        if self._rect_contains_point(fitz.Rect(c['bbox']), pdf_point, tol=1.5):
+                            hit = True
+                            break
+                if hit:
+                    is_ov = any(self.is_overlay_text(s, fitz.Rect(s["bbox"])) for s in vl.get('line_spans', []))
+                    info = {
+                        'text': vl['text'],
+                        'font': vl['font'],
+                        'size': vl['size'],
+                        'flags': vl['flags'],
+                        'color': vl['color'],
+                        'origin': vl['origin'],
+                        'original_bbox': vl['original_bbox'],
+                        'line_text': vl['text'],
+                        'line_spans': vl['line_spans'],
+                        'chars': vl.get('chars', []),
+                        'is_overlay': is_ov,
+                        'is_vertical': vl.get('is_vertical', False)
+                    }
+                    if is_ov:
+                        if not clicked_overlay_info:
+                            clicked_overlay_info = info
+                    else:
+                        if not clicked_original_info:
+                            clicked_original_info = info
+                    break
             
-            # 더블클릭에서는 클릭 지점에 직접 포함된 텍스트만 선택
-            selected_span = None
+            # 2단계: 직접 히트되지 않은 경우 가장 가까운 visual line 탐색 (허용거리: 4.0pt)
+            if not clicked_overlay_info and not clicked_original_info and visual_lines:
+                closest_vl = None
+                min_dist = float('inf')
+                for vl in visual_lines:
+                    r = vl['original_bbox']
+                    dx = max(0, r.x0 - pdf_point.x, pdf_point.x - r.x1)
+                    dy = max(0, r.y0 - pdf_point.y, pdf_point.y - r.y1)
+                    dist = (dx*dx + dy*dy) ** 0.5
+                    if dist <= 4.0 and dist < min_dist:
+                        min_dist = dist
+                        closest_vl = vl
+                if closest_vl:
+                    is_ov = any(self.is_overlay_text(s, fitz.Rect(s["bbox"])) for s in closest_vl.get('line_spans', []))
+                    info = {
+                        'text': closest_vl['text'],
+                        'font': closest_vl['font'],
+                        'size': closest_vl['size'],
+                        'flags': closest_vl['flags'],
+                        'color': closest_vl['color'],
+                        'origin': closest_vl['origin'],
+                        'original_bbox': closest_vl['original_bbox'],
+                        'line_text': closest_vl['text'],
+                        'line_spans': closest_vl['line_spans'],
+                        'chars': closest_vl.get('chars', []),
+                        'is_overlay': is_ov,
+                        'is_vertical': closest_vl.get('is_vertical', False)
+                    }
+                    if is_ov:
+                        clicked_overlay_info = info
+                    else:
+                        clicked_original_info = info
             
-            # 오버레이 텍스트가 있으면 우선 선택
-            if clicked_overlay_spans:
-                selected_span = clicked_overlay_spans[0]  # 첫 번째 오버레이 텍스트 선택
-                try:
-                    overlay_rect = fitz.Rect(selected_span.get('bbox', selected_span.get('original_bbox', selected_span.get('bbox'))))
-                    overlay_obj = self.find_overlay_at_position(self.current_page_num, overlay_rect)
-                    if overlay_obj:
-                        self.active_overlay = (self.current_page_num, overlay_obj.z_index)
-                except Exception:
-                    pass
-                print(f"더블클릭으로 선택된 오버레이 텍스트: '{selected_span.get('text', '')}'")
-            elif clicked_original_spans:
-                selected_span = clicked_original_spans[0]  # 첫 번째 원본 텍스트 선택
-                print(f"더블클릭으로 선택된 원본 텍스트: '{selected_span.get('text', '')}'")
-            else:
+            # 오버레이 텍스트 우선, 없으면 원본 텍스트 선택
+            chosen_info = clicked_overlay_info if clicked_overlay_info else clicked_original_info
+            
+            if not chosen_info:
                 print(f"X 더블클릭한 위치에 텍스트가 없습니다. (검사한 span: {found_spans}개)")
                 return
+
+            print(f"더블클릭으로 선택된 텍스트 블록: '{chosen_info['text']}' bbox={chosen_info['original_bbox']}")
             
-            print(f"전체 {found_spans}개 span 중 클릭 지점에 포함된 텍스트: 오버레이={len(clicked_overlay_spans)}, 원본={len(clicked_original_spans)}")
+            # 오버레이 객체 연결 확인
+            overlay = self.find_overlay_by_current_position(self.current_page_num, chosen_info['original_bbox'])
+            if not overlay:
+                overlay = self.find_overlay_at_position(self.current_page_num, chosen_info['original_bbox'])
             
-            if selected_span:
-                print(f"Selected span text: '{selected_span.get('text', '')}'")
-                
-                # 라인 정보 수집 (한글 공백 문제 해결 - 개선된 버전)
-                line_text = ""
-                line_spans = []
-                target_line = None
-                
-                # 먼저 선택된 span이 속한 line을 찾기
-                for block in text_dict.get("blocks", []):
-                    if block.get('type') != 0:
-                        continue
-                    for line in block.get("lines", []):
-                        for span in line.get("spans", []):
-                            if span == selected_span:
-                                target_line = line
-                                break
-                        if target_line:
-                            break
-                    if target_line:
-                        break
-                
-                # 선택된 라인의 모든 span을 분석하여 정확한 공백 복원 (더 정밀한 버전)
-                if target_line:
-                    spans_in_line = target_line.get("spans", [])
-                    
-                    # 디버깅 정보 출력
-                    print(f"Line has {len(spans_in_line)} spans")
-                    for i, s in enumerate(spans_in_line):
-                        print(f"  Span {i}: '{s.get('text', '')}' bbox: {s.get('bbox', [])}")
-                    
-                    for i, s in enumerate(spans_in_line):
-                        span_text = s.get("text", "")
-                        span_bbox = fitz.Rect(s["bbox"])
-                        
-                        if i > 0 and span_text.strip():  # 빈 텍스트 무시
-                            # 이전 span과의 거리 계산
-                            prev_bbox = fitz.Rect(spans_in_line[i-1]["bbox"])
-                            horizontal_gap = span_bbox.x0 - prev_bbox.x1
-                            
-                            # 더 정확한 문자 크기 계산
-                            prev_text = spans_in_line[i-1].get("text", "").strip()
-                            if prev_text:
-                                # 한글과 영문의 평균 너비가 다르므로 텍스트 타입별로 계산
-                                korean_chars = sum(1 for c in prev_text if '가' <= c <= '힣')
-                                other_chars = len(prev_text) - korean_chars
-                                
-                                # 한글은 일반적으로 더 넓음
-                                if korean_chars > 0:
-                                    avg_char_width = (prev_bbox.x1 - prev_bbox.x0) / len(prev_text)
-                                    space_threshold = avg_char_width * 0.4  # 한글은 40%
-                                else:
-                                    avg_char_width = (prev_bbox.x1 - prev_bbox.x0) / len(prev_text)
-                                    space_threshold = avg_char_width * 0.25  # 영문은 25%
-                            else:
-                                avg_char_width = span_bbox.height  # 대략적인 추정
-                                space_threshold = avg_char_width * 0.3
-                            
-                            # 공백 추가 조건 (더 관대한 조건)
-                            should_add_space = (
-                                horizontal_gap > space_threshold and
-                                horizontal_gap < avg_char_width * 3 and  # 임계값 완화
-                                not line_text.endswith(' ') and
-                                not span_text.startswith(' ') and
-                                len(line_text.strip()) > 0
-                            )
-                            
-                            # 한글 문자와 숫자/영문 사이의 공백 처리 또는 일반 공백 조건
-                            if should_add_space or self._needs_space_between_spans(spans_in_line[i-1], s):
-                                line_text += " "
-                                print(f"Added space between '{prev_text}' and '{span_text}' (gap: {horizontal_gap:.2f})")
-                            else:
-                                print(f"No space between '{prev_text}' and '{span_text}' (gap: {horizontal_gap:.2f}, threshold: {space_threshold:.2f})")
-                        
-                        line_text += span_text
-                        line_spans.append(s)
-                    
-                    print(f"Final line_text: '{line_text}'")
-                
-                # 레이어 오버레이 확인 후 span 정보 준비
-                selected_bbox = fitz.Rect(selected_span["bbox"])
-                
-                # 현재 위치에 레이어 오버레이가 있는지 확인
-                overlay = self.find_overlay_by_current_position(self.current_page_num, selected_bbox)
-                if not overlay:
-                    # 원본 위치 기준으로도 확인
-                    overlay = self.find_overlay_at_position(self.current_page_num, selected_bbox)
-                
-                if overlay:
-                    print(f"기존 레이어 오버레이 감지: '{overlay.text}' (ID: {overlay.z_index})")
-                    # 레이어 오버레이의 현재 속성을 편집창에 전달
-                    span_info = {
-                        'text': overlay.text,
-                        'font': overlay.font,
-                        'size': float(overlay.size), # 정밀도 유지를 위해 float 사용
-                        'flags': overlay.flags,
-                        'color': overlay.color,
-                        'original_bbox': overlay.original_bbox,  # 원본 위치 사용
-                        'current_bbox': overlay.bbox,  # 현재 위치 추가
-                        'origin': getattr(overlay, 'origin', selected_span.get('origin')), # 원본 베이스라인 정보 유지
-                        'line_text': line_text.strip(),
-                        'line_spans': line_spans,
-                        'is_overlay': True,  # 오버레이 텍스트 표시
-                        'overlay_id': overlay.z_index,
-                        'page_num': self.current_page_num,
-                        'stretch': getattr(overlay, 'stretch', 1.0),
-                        'tracking': getattr(overlay, 'tracking', 0.0),
-                        'hwp_space_mode': getattr(overlay, 'hwp_space_mode', False),
-                        'synth_bold_weight': getattr(overlay, 'synth_bold_weight', 120),
-                        'underline_weight': getattr(overlay, 'underline_weight', 0.6),
-                        'underline_offset': getattr(overlay, 'underline_offset', 1.5)
-                    }
-                    self.active_overlay = (self.current_page_num, overlay.z_index)
-                    print(f"   편집창에 오버레이 속성 전달: {overlay.font}, {overlay.size}pt, flags={overlay.flags}")
-                else:
-                    # 원본 텍스트의 속성을 편집창에 전달
-                    span_info = {
-                        'text': selected_span.get('text', ''),
-                        'font': selected_span.get('font', ''),
-                        'size': float(selected_span.get('size', 12.0)), # 정밀도 유지를 위해 float 사용
-                        'flags': selected_span.get('flags', 0),
-                        'color': selected_span.get('color', 0),
-                        'origin': selected_span.get('origin'), # 베이스라인 좌표 필수
-                        'original_bbox': selected_bbox,
-                        'line_text': line_text.strip(),
-                        'line_spans': line_spans,
-                        'is_overlay': False  # 원본 텍스트 표시
-                    }
-                    self.active_overlay = None
-                
-                print("OK 더블클릭 텍스트 선택 완료 - 편집창으로 전달")
-                self.text_selected.emit(span_info)
+            if overlay:
+                print(f"기존 레이어 오버레이 감지: '{overlay.text}' (ID: {overlay.z_index})")
+                span_info = {
+                    'text': overlay.text,
+                    'font': overlay.font,
+                    'size': float(overlay.size),
+                    'flags': overlay.flags,
+                    'color': overlay.color,
+                    'original_bbox': overlay.original_bbox,
+                    'current_bbox': overlay.bbox,
+                    'origin': getattr(overlay, 'origin', chosen_info.get('origin')),
+                    'line_text': chosen_info['text'],
+                    'line_spans': chosen_info['line_spans'],
+                    'is_overlay': True,
+                    'overlay_id': overlay.z_index,
+                    'page_num': self.current_page_num,
+                    'stretch': getattr(overlay, 'stretch', 1.0),
+                    'tracking': getattr(overlay, 'tracking', 0.0),
+                    'hwp_space_mode': getattr(overlay, 'hwp_space_mode', False),
+                    'synth_bold_weight': getattr(overlay, 'synth_bold_weight', 120),
+                    'underline_weight': getattr(overlay, 'underline_weight', 0.6),
+                    'underline_offset': getattr(overlay, 'underline_offset', 1.5)
+                }
+                self.active_overlay = (self.current_page_num, overlay.z_index)
             else:
-                print(f"X 더블클릭 위치에 적합한 텍스트를 찾을 수 없습니다.")
+                span_info = chosen_info.copy() if hasattr(chosen_info, 'copy') else dict(chosen_info)
+                span_info['is_overlay'] = False
+                span_info['overlay_id'] = None
+                self.active_overlay = None
+
+            print("OK 더블클릭 텍스트 선택 완료 - 편집창으로 전달")
+            self.text_selected.emit(span_info)
                 
         except Exception as e:
             print(f"Error in mouseDoubleClickEvent: {e}")
@@ -2671,6 +4494,31 @@ class PdfViewerWidget(QLabel):
         painter.save()
         painter.translate(offset_x, offset_y)
         painter.scale(scale, scale)
+
+        # 1-1. 격자 (Grid) 렌더링
+        if getattr(self, 'show_grid', False):
+            painter.save()
+            try:
+                pen_sub = QPen(QColor(180, 180, 180, 50), 0.5 / scale, Qt.PenStyle.DotLine)
+                pen_main = QPen(QColor(140, 140, 140, 90), 0.8 / scale, Qt.PenStyle.SolidLine)
+                
+                # 수직선 (10pt 보조선, 50pt 주선)
+                x = 0.0
+                while x <= pw_pt:
+                    is_main = (int(round(x)) % 50 == 0)
+                    painter.setPen(pen_main if is_main else pen_sub)
+                    painter.drawLine(QPointF(x, 0), QPointF(x, ph_pt))
+                    x += 10.0
+                    
+                # 수평선 (10pt 보조선, 50pt 주선)
+                y = 0.0
+                while y <= ph_pt:
+                    is_main = (int(round(y)) % 50 == 0)
+                    painter.setPen(pen_main if is_main else pen_sub)
+                    painter.drawLine(QPointF(0, y), QPointF(pw_pt, y))
+                    y += 10.0
+            finally:
+                painter.restore()
         
         # 2. 배경 패치 렌더링 (PDF 좌표계)
         if hasattr(self, 'background_patches') and self.current_page_num in self.background_patches:
@@ -2710,8 +4558,35 @@ class PdfViewerWidget(QLabel):
                 finally:
                     painter.restore()
 
+        # 2-1. 본문 검색 하이라이트 렌더링 (PDF 좌표계)
+        if getattr(self, 'search_highlights', None):
+            painter.save()
+            try:
+                for srect in self.search_highlights:
+                    painter.fillRect(QRectF(srect.x0, srect.y0, srect.width, srect.height), QColor(254, 240, 138, 170))
+                
+                act_rect = getattr(self, 'active_search_rect', None)
+                if act_rect:
+                    painter.fillRect(QRectF(act_rect.x0, act_rect.y0, act_rect.width, act_rect.height), QColor(251, 146, 60, 200))
+                    pen_w = 2.0 / scale if scale > 0 else 2.0
+                    painter.setPen(QPen(QColor(234, 88, 12), pen_w))
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawRect(QRectF(act_rect.x0, act_rect.y0, act_rect.width, act_rect.height))
+            finally:
+                painter.restore()
+
         # 3. 호버 하이라이트 (PDF 좌표계)
-        if self.hover_rect:
+        # 활성 편집 오버레이(active_overlay) 영역과 겹치면 파란색 호버를 억제하여 초록색 하이라이트 보호
+        draw_hover = bool(self.hover_rect)
+        if draw_hover and self.active_overlay and self.active_overlay[0] == self.current_page_num:
+            act_ov = self.get_overlay_by_id(self.active_overlay[0], self.active_overlay[1])
+            if act_ov:
+                act_r = act_ov.bbox
+                h_r = self.hover_rect
+                if (h_r.x0 < act_r.x1 and h_r.x1 > act_r.x0 and h_r.y0 < act_r.y1 and h_r.y1 > act_r.y0):
+                    draw_hover = False
+
+        if draw_hover:
             painter.save()
             try:
                 is_ov = isinstance(self.hover_span_info, dict) and self.hover_span_info.get('is_overlay', False)
@@ -2778,23 +4653,396 @@ class PdfViewerWidget(QLabel):
                     except Exception as e_ov:
                         print(f"오버레이 렌더링 에러: {e_ov}")
 
+        # 6-1. 이미지/서명 오버레이 렌더링 (PDF 좌표계)
+        if hasattr(self, 'image_overlays') and self.current_page_num in self.image_overlays:
+            for img_ov in self.image_overlays[self.current_page_num]:
+                if not img_ov.visible or img_ov.pixmap.isNull():
+                    continue
+                painter.save()
+                try:
+                    painter.setOpacity(img_ov.opacity)
+                    target_rect = QRectF(img_ov.bbox.x0, img_ov.bbox.y0, img_ov.bbox.width, img_ov.bbox.height)
+                    painter.drawPixmap(target_rect, img_ov.pixmap, QRectF(img_ov.pixmap.rect()))
+
+                    # 선택된 이미지 강조 테두리 및 리사이즈 핸들
+                    if self.active_image == img_ov:
+                        painter.setOpacity(1.0)
+                        pen_w = 1.5 / scale if scale > 0 else 1.5
+                        painter.setPen(QPen(QColor(30, 144, 255), pen_w, Qt.PenStyle.DashLine))
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        painter.drawRect(target_rect)
+
+                        # 모서리 리사이즈 핸들
+                        handle_size = 8.0 / scale
+                        painter.setPen(QPen(QColor(30, 144, 255), pen_w))
+                        painter.setBrush(QBrush(QColor(255, 255, 255)))
+                        corners = [
+                            QPointF(target_rect.left(), target_rect.top()),
+                            QPointF(target_rect.right(), target_rect.top()),
+                            QPointF(target_rect.left(), target_rect.bottom()),
+                            QPointF(target_rect.right(), target_rect.bottom())
+                        ]
+                        for c in corners:
+                            painter.drawRect(QRectF(c.x() - handle_size / 2, c.y() - handle_size / 2, handle_size, handle_size))
+                finally:
+                    painter.restore()
+
+        # 6.5 스마트 스냅 가이드선 렌더링 (PDF 좌표계)
+        if getattr(self, 'active_snap_guides', None):
+            painter.save()
+            try:
+                page = self.doc.load_page(self.current_page_num) if self.doc else None
+                pw = page.rect.width if page else 595.0
+                ph = page.rect.height if page else 842.0
+                pen_w = 1.2 / scale if scale > 0 else 1.2
+                guide_pen = QPen(QColor(234, 17, 121, 230), pen_w, Qt.PenStyle.DashLine)
+                painter.setPen(guide_pen)
+                for orient, val in self.active_snap_guides:
+                    if orient == 'v':
+                        painter.drawLine(QPointF(val, 0), QPointF(val, ph))
+                    elif orient == 'h':
+                        painter.drawLine(QPointF(0, val), QPointF(pw, val))
+            finally:
+                painter.restore()
+
         # PDF 좌표계 변환 종료 (반드시 호출)
         try:
             painter.restore()
         except Exception:
             pass
 
-        # 7. 사각형 영역 선택 (Ctrl + 드래그) - 이건 화면 좌표계 유지
+        # 7. 사각형 영역 선택 (Ctrl + 드래그: 패치모드 / Shift + 드래그: 지우개모드) - 이건 화면 좌표계 유지
         if self.selection_mode and self.selection_rect:
             painter.save()
             try:
-                painter.setPen(QPen(QColor(255, 0, 0, 200), 2))
-                painter.setBrush(QBrush(QColor(255, 0, 0, 50)))
+                is_eraser = getattr(self, 'selection_is_eraser', False)
+                if is_eraser:
+                    painter.setPen(QPen(QColor(249, 115, 22, 230), 2, Qt.PenStyle.DashLine))
+                    painter.setBrush(QBrush(QColor(249, 115, 22, 60)))
+                else:
+                    painter.setPen(QPen(QColor(255, 0, 0, 200), 2))
+                    painter.setBrush(QBrush(QColor(255, 0, 0, 50)))
                 painter.drawRect(self.selection_rect)
             finally:
                 painter.restore()
 
+        # 8. 줄자 (Ruler) 렌더링 (화면 좌표계 최상단 오버레이)
+        if getattr(self, 'show_ruler', False):
+            painter.save()
+            try:
+                ruler_thickness = 22
+                ruler_bg = QColor(38, 40, 44, 235) if theme == 'dark' else QColor(245, 245, 247, 235)
+                ruler_fg = QColor(180, 180, 185) if theme == 'dark' else QColor(80, 80, 85)
+                ruler_border = QColor(60, 62, 68) if theme == 'dark' else QColor(210, 210, 215)
+                font_ruler = QFont('Arial', 7)
+                painter.setFont(font_ruler)
+
+                # 1) 상단 수평 줄자
+                top_ruler_rect = QRectF(0, 0, self.width(), ruler_thickness)
+                painter.fillRect(top_ruler_rect, ruler_bg)
+                painter.setPen(QPen(ruler_border, 1))
+                painter.drawLine(QPointF(0, ruler_thickness), QPointF(self.width(), ruler_thickness))
+
+                pt = 0.0
+                while pt <= pw_pt:
+                    sx = offset_x + pt * scale
+                    if 0 <= sx <= self.width():
+                        is_100 = (int(round(pt)) % 100 == 0)
+                        is_50 = (int(round(pt)) % 50 == 0)
+                        h = 14 if is_100 else (8 if is_50 else 4)
+                        painter.setPen(QPen(ruler_fg, 1))
+                        painter.drawLine(QPointF(sx, ruler_thickness - h), QPointF(sx, ruler_thickness))
+                        if is_100 and sx + 30 <= self.width():
+                            painter.drawText(QRectF(sx + 2, 2, 40, 12), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, str(int(round(pt))))
+                    pt += 10.0
+
+                # 2) 좌측 수직 줄자
+                left_ruler_rect = QRectF(0, 0, ruler_thickness, self.height())
+                painter.fillRect(left_ruler_rect, ruler_bg)
+                painter.setPen(QPen(ruler_border, 1))
+                painter.drawLine(QPointF(ruler_thickness, 0), QPointF(ruler_thickness, self.height()))
+
+                pt = 0.0
+                while pt <= ph_pt:
+                    sy = offset_y + pt * scale
+                    if 0 <= sy <= self.height():
+                        is_100 = (int(round(pt)) % 100 == 0)
+                        is_50 = (int(round(pt)) % 50 == 0)
+                        w = 14 if is_100 else (8 if is_50 else 4)
+                        painter.setPen(QPen(ruler_fg, 1))
+                        painter.drawLine(QPointF(ruler_thickness - w, sy), QPointF(ruler_thickness, sy))
+                        if is_100 and sy + 15 <= self.height():
+                            painter.save()
+                            painter.translate(2, sy + 2)
+                            painter.drawText(QRectF(0, 0, 30, 12), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, str(int(round(pt))))
+                            painter.restore()
+                    pt += 10.0
+
+                # 3) 좌상단 코너 단위 표시 (pt)
+                corner_rect = QRectF(0, 0, ruler_thickness, ruler_thickness)
+                painter.fillRect(corner_rect, ruler_bg)
+                painter.setPen(QPen(ruler_border, 1))
+                painter.drawRect(corner_rect)
+                painter.setPen(QPen(ruler_fg, 1))
+                painter.drawText(corner_rect, Qt.AlignmentFlag.AlignCenter, "pt")
+
+                # 4) 마우스 포인터 실시간 추적 인디케이터
+                if hasattr(self, 'mouse_pos') and self.mouse_pos:
+                    mx = self.mouse_pos.x()
+                    my = self.mouse_pos.y()
+                    pen_ind = QPen(QColor(255, 69, 58, 220), 1)
+                    painter.setPen(pen_ind)
+                    painter.drawLine(QPointF(mx, 0), QPointF(mx, ruler_thickness))
+                    painter.drawLine(QPointF(0, my), QPointF(ruler_thickness, my))
+            finally:
+                painter.restore()
+
         painter.end()
+
+    def _find_image_at_point(self, pdf_point):
+        """PDF 좌표에 위치한 이미지 반환 (최상위 레이어 우선)"""
+        if not hasattr(self, 'image_overlays') or self.current_page_num not in self.image_overlays:
+            return None
+        for img in reversed(self.image_overlays[self.current_page_num]):
+            if img.visible and self._rect_contains_point(img.bbox, pdf_point):
+                return img
+        return None
+
+    def _is_on_image_resize_handle(self, img_ov, pdf_point):
+        """이미지의 우하단 리사이즈 핸들 위에 있는지 검사"""
+        if not img_ov:
+            return False
+        scale = getattr(self, 'pixmap_scale_factor', 1.0)
+        hs = 10.0 / scale if scale > 0 else 10.0
+        handle_rect = fitz.Rect(img_ov.bbox.x1 - hs, img_ov.bbox.y1 - hs, img_ov.bbox.x1 + hs, img_ov.bbox.y1 + hs)
+        return self._rect_contains_point(handle_rect, pdf_point)
+
+    def add_image_overlay(self, image_path, bbox=None, opacity=1.0):
+        """현재 페이지에 이미지/서명 오버레이 추가"""
+        if not os.path.exists(image_path):
+            return None
+        pixmap = QPixmap(image_path)
+        if pixmap.isNull():
+            return None
+
+        page = self.doc.load_page(self.current_page_num) if self.doc else None
+        pw = page.rect.width if page else 595.0
+        ph = page.rect.height if page else 842.0
+
+        if bbox is None:
+            orig_w = float(pixmap.width())
+            orig_h = float(pixmap.height())
+            aspect = orig_w / orig_h if orig_h > 0 else 1.0
+            w = min(140.0, pw * 0.4)
+            h = w / aspect
+            mx, my = pw / 2.0 - w / 2.0, ph / 2.0 - h / 2.0
+            if hasattr(self, 'mouse_pos') and self.mouse_pos:
+                px, py = self._widget_point_to_pdf(self.mouse_pos)
+                if px is not None and py is not None and 0 <= px <= pw and 0 <= py <= ph:
+                    mx, my = px - w / 2.0, py - h / 2.0
+            bbox = fitz.Rect(mx, my, mx + w, my + h)
+
+        img_ov = ImageOverlay(image_path, bbox, self.current_page_num, opacity=opacity, z_index=self.image_id_counter)
+        self.image_id_counter += 1
+
+        if self.current_page_num not in self.image_overlays:
+            self.image_overlays[self.current_page_num] = []
+        self.image_overlays[self.current_page_num].append(img_ov)
+        self.active_image = img_ov
+        self.active_overlay = None
+        self.update()
+
+        main_win = self.window()
+        if main_win and hasattr(main_win, 'undo_manager') and self.doc:
+            try:
+                main_win.undo_manager.save_state(self.doc, self)
+            except Exception:
+                pass
+        return img_ov
+
+    def delete_image_overlay(self, image_overlay):
+        """이미지 오버레이 삭제"""
+        main_win = self.window()
+        if main_win and hasattr(main_win, 'undo_manager') and self.doc:
+            try:
+                main_win.undo_manager.save_state(self.doc, self)
+            except Exception:
+                pass
+
+        for p, lst in self.image_overlays.items():
+            if image_overlay in lst:
+                lst.remove(image_overlay)
+                break
+        if self.active_image == image_overlay:
+            self.active_image = None
+        self.update()
+
+    def copy_selected(self):
+        """현재 선택/호버된 텍스트상자 또는 이미지 복사"""
+        # 1. 이미지 선택된 경우
+        if self.active_image:
+            self.copied_data = {
+                'type': 'image',
+                'image_path': self.active_image.image_path,
+                'width': self.active_image.bbox.width,
+                'height': self.active_image.bbox.height,
+                'opacity': self.active_image.opacity
+            }
+            main_win = self.window()
+            if main_win and hasattr(main_win, 'statusBar'):
+                main_win.statusBar().showMessage("이미지가 복사되었습니다.", 2000)
+            return True
+
+        # 2. 오버레이 선택된 경우
+        target_ov = None
+        if self.active_overlay and isinstance(self.active_overlay, (tuple, list)):
+            target_ov = self.get_overlay_by_id(self.active_overlay[0], self.active_overlay[1])
+        elif self.selected_text_info and self.selected_text_info.get('is_overlay'):
+            target_ov = self.get_overlay_by_id(
+                self.selected_text_info.get('page_num', self.current_page_num),
+                self.selected_text_info.get('overlay_id')
+            )
+
+        if target_ov:
+            self.copied_data = {
+                'type': 'text',
+                'text': target_ov.text,
+                'font': target_ov.font,
+                'size': target_ov.size,
+                'color': target_ov.color,
+                'flags': target_ov.flags,
+                'width': target_ov.bbox.width,
+                'height': target_ov.bbox.height,
+                'synth_bold_weight': getattr(target_ov, 'synth_bold_weight', 120),
+                'underline_weight': getattr(target_ov, 'underline_weight', 0.6),
+                'underline_offset': getattr(target_ov, 'underline_offset', 1.5),
+                'hwp_space_mode': getattr(target_ov, 'hwp_space_mode', False),
+                'stretch': getattr(target_ov, 'stretch', 1.0),
+                'tracking': getattr(target_ov, 'tracking', 0.0),
+                'origin': getattr(target_ov, 'origin', None)
+            }
+            QApplication.clipboard().setText(target_ov.text)
+            main_win = self.window()
+            if main_win and hasattr(main_win, 'statusBar'):
+                main_win.statusBar().showMessage(f"텍스트상자 복사됨: '{target_ov.text}'", 2000)
+            return True
+
+        # 3. 호버된 텍스트가 있는 경우
+        if self.hover_span_info:
+            info = self.hover_span_info
+            text = info.get('text', '')
+            bbox = fitz.Rect(info.get('bbox', info.get('original_bbox', [0, 0, 50, 20])))
+            self.copied_data = {
+                'type': 'text',
+                'text': text,
+                'font': info.get('font', 'Arial'),
+                'size': float(info.get('size', 12.0)),
+                'color': info.get('color', 0),
+                'flags': info.get('flags', 0),
+                'width': bbox.width,
+                'height': bbox.height,
+                'synth_bold_weight': info.get('synth_bold_weight', 120),
+                'underline_weight': info.get('underline_weight', 0.6),
+                'underline_offset': info.get('underline_offset', 1.5),
+                'hwp_space_mode': info.get('hwp_space_mode', False),
+                'origin': info.get('origin', None)
+            }
+            QApplication.clipboard().setText(text)
+            main_win = self.window()
+            if main_win and hasattr(main_win, 'statusBar'):
+                main_win.statusBar().showMessage(f"텍스트 복사됨: '{text}'", 2000)
+            return True
+
+        return False
+
+    def paste_clipboard(self):
+        """클립보드 내용(텍스트상자 또는 이미지) 붙여넣기"""
+        main_win = self.window()
+        if main_win and hasattr(main_win, 'undo_manager') and self.doc:
+            try:
+                main_win.undo_manager.save_state(self.doc, self)
+            except Exception:
+                pass
+
+        pdf_x, pdf_y = None, None
+        if hasattr(self, 'mouse_pos') and self.mouse_pos:
+            pdf_x, pdf_y = self._widget_point_to_pdf(self.mouse_pos)
+
+        page = self.doc.load_page(self.current_page_num) if self.doc else None
+        pw = page.rect.width if page else 595.0
+        ph = page.rect.height if page else 842.0
+
+        if pdf_x is None or pdf_y is None or pdf_x < 0 or pdf_x > pw or pdf_y < 0 or pdf_y > ph:
+            pdf_x, pdf_y = pw / 2.0 - 50.0, ph / 2.0 - 20.0
+
+        # 1. 이미지 붙여넣기
+        if self.copied_data and self.copied_data.get('type') == 'image':
+            img_path = self.copied_data['image_path']
+            w = self.copied_data.get('width', 140.0)
+            h = self.copied_data.get('height', 100.0)
+            opacity = self.copied_data.get('opacity', 1.0)
+            bbox = fitz.Rect(pdf_x, pdf_y, pdf_x + w, pdf_y + h)
+            self.add_image_overlay(img_path, bbox=bbox, opacity=opacity)
+            if main_win and hasattr(main_win, 'statusBar'):
+                main_win.statusBar().showMessage("이미지가 붙여넣어졌습니다.", 2000)
+            return True
+
+        # 2. 서식 복사된 텍스트상자 붙여넣기
+        if self.copied_data and self.copied_data.get('type') == 'text':
+            d = self.copied_data
+            w = max(20.0, d.get('width', 80.0))
+            h = max(12.0, d.get('height', float(d.get('size', 12.0)) * 1.3))
+            bbox = fitz.Rect(pdf_x, pdf_y, pdf_x + w, pdf_y + h)
+            
+            ov = self.add_text_overlay(
+                text=d.get('text', ''),
+                font=d.get('font', 'Arial'),
+                size=d.get('size', 12.0),
+                color=d.get('color', 0),
+                bbox=bbox,
+                page_num=self.current_page_num,
+                flags=d.get('flags', 0),
+                synth_bold_weight=d.get('synth_bold_weight', 120),
+                underline_weight=d.get('underline_weight', 0.6),
+                underline_offset=d.get('underline_offset', 1.5),
+                hwp_space_mode=d.get('hwp_space_mode', False),
+                source_bbox=bbox
+            )
+            if hasattr(ov, 'stretch'):
+                ov.stretch = d.get('stretch', 1.0)
+            if hasattr(ov, 'tracking'):
+                ov.tracking = d.get('tracking', 0.0)
+
+            self.active_overlay = (self.current_page_num, ov.z_index)
+            self.update()
+            if main_win and hasattr(main_win, 'statusBar'):
+                main_win.statusBar().showMessage(f"텍스트상자 붙여넣음: '{ov.text}'", 2000)
+            return True
+
+        # 3. 시스템 클립보드 일반 텍스트 붙여넣기
+        clip_text = QApplication.clipboard().text()
+        if clip_text:
+            size = 12.0
+            w = max(40.0, len(clip_text) * size * 0.6)
+            h = size * 1.5
+            bbox = fitz.Rect(pdf_x, pdf_y, pdf_x + w, pdf_y + h)
+            ov = self.add_text_overlay(
+                text=clip_text,
+                font='Arial',
+                size=size,
+                color=0,
+                bbox=bbox,
+                page_num=self.current_page_num,
+                flags=0,
+                source_bbox=bbox
+            )
+            self.active_overlay = (self.current_page_num, ov.z_index)
+            self.update()
+            if main_win and hasattr(main_win, 'statusBar'):
+                main_win.statusBar().showMessage(f"클립보드 텍스트 붙여넣음: '{clip_text}'", 2000)
+            return True
+
+        return False
     
     def _pdf_rect_to_screen_rect(self, pdf_rect):
         """PDF 좌표 사각형을 화면 좌표 사각형으로 변환"""
@@ -2904,6 +5152,30 @@ class PdfViewerWidget(QLabel):
             print(f"_widget_point_to_pdf error: {e}")
             return None, None
 
+    def _pdf_rect_to_widget_rect(self, pdf_rect):
+        """PDF 좌표 fitz.Rect를 위젯(화면) 좌표 QRect로 변환"""
+        try:
+            scale = getattr(self, 'pixmap_scale_factor', 1.0)
+            if scale <= 0 or not self.doc:
+                return None
+            crect = self.contentsRect()
+            page = self.doc.load_page(self.current_page_num)
+            pw_pt = float(page.rect.width)
+            ph_pt = float(page.rect.height)
+            pw_px = pw_pt * scale
+            ph_px = ph_pt * scale
+            offset_x = crect.left() + (crect.width() - pw_px) / 2.0
+            offset_y = crect.top() + (crect.height() - ph_px) / 2.0
+
+            rx0 = offset_x + pdf_rect.x0 * scale
+            ry0 = offset_y + pdf_rect.y0 * scale
+            rw = pdf_rect.width * scale
+            rh = pdf_rect.height * scale
+            return QRect(int(round(rx0)), int(round(ry0)), int(round(rw)), int(round(rh)))
+        except Exception as e:
+            print(f"_pdf_rect_to_widget_rect error: {e}")
+            return None
+
     def enter_text_adjustment_mode(self, text_info):
         """텍스트 위치 조정 모드 진입"""
         self.text_adjustment_mode = True
@@ -2913,6 +5185,9 @@ class PdfViewerWidget(QLabel):
         overlay_id = text_info.get('overlay_id')
         if overlay_id is not None:
             self.active_overlay = (self.current_page_num, overlay_id)
+        mw = getattr(self, 'main_window', None) or self.window()
+        if mw and hasattr(mw, 'update_status_mode_message'):
+            mw.update_status_mode_message()
         self.update()
     
     def exit_text_adjustment_mode(self):
@@ -2922,6 +5197,9 @@ class PdfViewerWidget(QLabel):
         self.setCursor(Qt.CursorShape.ArrowCursor)
         print("텍스트 위치 조정 모드 종료")
         self.active_overlay = None
+        mw = getattr(self, 'main_window', None) or self.window()
+        if mw and hasattr(mw, 'update_status_mode_message'):
+            mw.update_status_mode_message()
         self.update()
     
     def adjust_text_position(self, dx, dy):
@@ -3068,14 +5346,26 @@ class PdfViewerWidget(QLabel):
             # 1) 선택영역에서 텍스트/스타일 추출
             # 텍스트: 영역 내 텍스트를 가져와 한 줄로 정규화
             try:
-                region_text = page.get_text("text", clip=pdf_selection_rect) or ""
-                region_text = re.sub(r"\s+", " ", region_text).strip()
+                # visual lines에서 선택 영역과 교차하는 텍스트 추출 (시각적 공백 복원 반영)
+                vlines = self._get_visual_lines_for_page(self.current_page_num)
+                intersected_texts = []
+                for vl in vlines:
+                    if self._rects_overlap(vl['original_bbox'], pdf_selection_rect, tol=1.0):
+                        intersected_texts.append(vl['text'])
+                if intersected_texts:
+                    region_text = ' '.join(intersected_texts).strip()
+                else:
+                    rot_clip = (pdf_selection_rect * page.derotation_matrix) if page.rotation != 0 else pdf_selection_rect
+                    region_text = page.get_text("text", clip=rot_clip) or ""
+                    region_text = re.sub(r"\s+", " ", region_text).strip()
+                region_text = ''.join(c for c in region_text if not is_pua_char(c))
             except Exception:
                 region_text = ""
 
             # 스타일: 가장 빈도 높은 폰트 / 평균 크기 / 가장 빈도 높은 색상
             try:
                 text_dict = page.get_text("dict")
+                rot_mat = page.rotation_matrix if page.rotation != 0 else None
                 fonts = []
                 sizes = []
                 colors = []
@@ -3085,6 +5375,8 @@ class PdfViewerWidget(QLabel):
                     for line in block.get("lines", []):
                         for span in line.get("spans", []):
                             span_bbox = fitz.Rect(span["bbox"])
+                            if rot_mat:
+                                span_bbox = span_bbox * rot_mat
                             if span_bbox.intersects(pdf_selection_rect):
                                 if span.get('font'): fonts.append(span['font'])
                                 if span.get('size'): sizes.append(float(span['size']))
@@ -3116,7 +5408,7 @@ class PdfViewerWidget(QLabel):
                 'page_num': self.current_page_num
             }
 
-            patch_only_mode = getattr(main_window, 'patch_only_mode', False)
+            patch_only_mode = getattr(main_window, 'patch_only_mode', False) or getattr(self, 'selection_is_eraser', False)
 
             if patch_only_mode:
                 if hasattr(main_window, 'undo_manager') and self.doc:
@@ -3185,7 +5477,9 @@ class PdfViewerWidget(QLabel):
                 keep_enabled = False # 무조건 해제
                 self.selection_mode = False
                 self.selection_rect = None
+                self.selection_is_eraser = False
                 self.ctrl_pressed = keep_enabled
+                self.shift_pressed = False
                 try:
                     self.setCursor(Qt.CursorShape.ArrowCursor)
                 except Exception:
@@ -3239,100 +5533,10 @@ class PdfViewerWidget(QLabel):
             except Exception as e_pre:
                 print(f"패치모드 미리보기 오버레이 생성 실패: {e_pre}")
 
-            dialog = TextEditorDialog(span_info, getattr(main_window, 'pdf_fonts', None), main_window)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                # 편집 취소: undo()를 통해 선행 생성된 오버레이와 패치 원복
-                print("사각형 선택 편집 취소 - 이전 상태로 복구")
-                if hasattr(main_window, 'undo'):
-                    main_window.undo()
-                
-                self.selection_rect = None
-                self.selection_mode = False
-                keep_enabled = getattr(main_window, 'patch_precise_mode', False)
-                self.ctrl_pressed = keep_enabled
-                try:
-                    self.setCursor(Qt.CursorShape.CrossCursor if keep_enabled else Qt.CursorShape.ArrowCursor)
-                except Exception:
-                    pass
-                self.update()
-                return
-
-            # 편집 확정: 값 수집 및 최종 반영
-            new_values = dialog.get_values()
-            print(f"사각형 선택 후 오버레이 값: {new_values}")
-            
-            try:
-                # 최종 확정: 오버레이와 패치 최종 갱신
-                overlay = main_window.insert_overlay_text(page, span_info, new_values)
-                main_window.apply_background_patch(page, span_info['original_bbox'], new_values, overlay=overlay, preview=True)
-                
-                # [UX 개선] 작업 완료 시에만 패치모드 자동 해제
-                if hasattr(main_window, 'set_patch_mode'):
-                    main_window.set_patch_mode(False)
-                
-                # 변경 완료 후 새로운 상태 저장
-                if hasattr(main_window, 'undo_manager'):
-                    main_window.undo_manager.save_state(self.doc, self)
-                if hasattr(main_window, 'mark_as_changed'):
-                    main_window.mark_as_changed()
-                if hasattr(main_window, 'update_undo_redo_buttons'):
-                    main_window.update_undo_redo_buttons()
-                
-                if overlay:
-                    overlay_info = {
-                        'text': overlay.text,
-                        'font': overlay.font,
-                        'size': overlay.size,
-                        'flags': overlay.flags,
-                        'color': overlay.color,
-                        'original_bbox': overlay.original_bbox,
-                        'current_bbox': overlay.bbox,
-                        'is_overlay': True,
-                        'overlay_id': overlay.z_index,
-                        'page_num': self.current_page_num,
-                        'synth_bold_weight': getattr(overlay, 'synth_bold_weight', 120),
-                        'underline_weight': getattr(overlay, 'underline_weight', 0.6),
-                        'underline_offset': getattr(overlay, 'underline_offset', 1.5)
-                    }
-                    self.selected_text_info = overlay_info
-                    self.active_overlay = (self.current_page_num, overlay.z_index)
-                
-                # UX 개선: 작업 완료 후 패치 모드 자동 비활성화
-                if hasattr(main_window, 'set_patch_mode'):
-                    main_window.set_patch_mode(False)
-                
-                self.update()
-            except Exception as e:
-                print(f"X 패치모드 최종 반영 실패: {e}")
-                import traceback
-                traceback.print_exc()
-            
-            self.selection_mode = False
-            self.selection_rect = None
+            # 모달리스 텍스트 편집기 실행 (문서 뷰어의 핸드툴, 줌 조작 허용)
+            if hasattr(main_window, 'open_text_editor'):
+                main_window.open_text_editor(span_info, is_patch_mode=True)
             return
-
-            # 변경 완료 후 상태 저장 및 표시
-            if hasattr(main_window, 'undo_manager') and self.doc:
-                main_window.undo_manager.save_state(self.doc, self)
-            if hasattr(main_window, 'mark_as_changed'):
-                main_window.mark_as_changed()
-
-            # Ctrl 상태 및 선택 모드 해제 (최종)
-            if hasattr(main_window, 'set_patch_mode'):
-                main_window.set_patch_mode(False)
-            if hasattr(main_window, 'set_patch_eraser_mode'):
-                main_window.set_patch_eraser_mode(False)
-
-            self.ctrl_pressed = False
-            self.selection_mode = False
-            try:
-                self.setCursor(Qt.CursorShape.ArrowCursor)
-            except Exception:
-                pass
-
-            # 선택 사각형 초기화 및 리프레시
-            self.selection_rect = None
-            self.update()
 
         except Exception as e:
             print(f"X 사각형 영역 선택 처리 오류: {e}")
@@ -3446,31 +5650,20 @@ class PdfViewerWidget(QLabel):
         """텍스트가 오버레이된 텍스트인지 확인 - 레이어 시스템 + 추적 시스템 기반"""
         try:
             # 1. 새로운 레이어 시스템에서 확인 (최우선)
-            overlay = self.find_overlay_at_position(self.current_page_num, bbox)
-            if overlay:
-                print(f"레이어 시스템에서 오버레이 감지: '{overlay.text}'")
-                return True
+            if bbox:
+                overlay = self.find_overlay_at_position(self.current_page_num, bbox)
+                if not overlay:
+                    overlay = self.find_overlay_by_current_position(self.current_page_num, bbox)
+                if overlay:
+                    return True
             
             # 2. 레거시 추적 시스템에서 확인
-            bbox_hash = self._get_bbox_hash(bbox)
-            if (self.current_page_num, bbox_hash) in self.overlay_texts:
-                print(f"추적 시스템에서 오버레이 감지: {bbox_hash}")
-                return True
+            if bbox:
+                bbox_hash = self._get_bbox_hash(bbox)
+                if (self.current_page_num, bbox_hash) in self.overlay_texts:
+                    return True
                 
-            # 3. 휴리스틱 검사
-            font_name = span.get('font', '')
-            color = span.get('color', 0)
-            size = span.get('size', 12)
-            
-            # 명확한 오버레이 표시자들
-            if ('+' in font_name or 'C2_' in font_name or  # 임베디드 폰트
-                color != 0 or  # 검은색이 아닌 텍스트
-                size > 20 or size < 6):  # 비정상적 크기
-                print(f"휴리스틱으로 오버레이 감지: font={font_name}, color={color}, size={size}")
-                return True
-            
-            print(f"원본 텍스트로 판정: font={font_name}, color={color}, size={size}")
-            return False  # 기본적으로 원본 텍스트로 간주
+            return False  # 실제 오버레이가 아니면 원본 텍스트
             
         except Exception as e:
             print(f"Error in is_overlay_text: {e}")
@@ -3842,7 +6035,9 @@ class PdfViewerWidget(QLabel):
 
             # 오버레이가 아니면, 원본 텍스트로는 빠른 조정 모드에 진입하지 않음
             print("No overlay at click. Skipping quick adjustment for original text.")
-            self.active_overlay = None
+            mw = getattr(self, 'main_window', None) or self.window()
+            if not (mw and getattr(mw, 'current_text_editor', None) is not None):
+                self.active_overlay = None
             self.update()
             
         except Exception as e:
@@ -3878,7 +6073,7 @@ class PdfViewerWidget(QLabel):
             self.open_text_editor(self.selected_text_info)
     
     def _needs_space_between_spans(self, prev_span, curr_span):
-        """두 span 사이에 공백이 필요한지 판단 (한글-영문/숫자 조합)"""
+        """두 span 사이에 공백이 필요한지 판단 (한글-영문/숫자 및 특수문자 조합)"""
         try:
             prev_text = prev_span.get('text', '').strip()
             curr_text = curr_span.get('text', '').strip()
@@ -3897,6 +6092,14 @@ class PdfViewerWidget(QLabel):
             # 영문/숫자인지 확인
             def is_alphanumeric(char):
                 return char.isalnum() and not is_korean(char)
+
+            # 쉼표 뒤, 닫는 괄호 뒤, 닫는 따옴표 뒤에 일반 문자가 오면 공백 필요 (예: '홍길동, 김철수', '(팀장) 홍길동')
+            if prev_last_char in (',', ')', ']', '}', '”', '"') and (is_korean(curr_first_char) or is_alphanumeric(curr_first_char)):
+                return True
+
+            # 일반 문자 뒤에 여는 괄호가 오면 공백 필요 (예: '홍길동 (팀장)')
+            if (is_korean(prev_last_char) or is_alphanumeric(prev_last_char)) and curr_first_char in ('(', '[', '{'):
+                return True
             
             # 한글-영문/숫자 또는 영문/숫자-한글 조합에서 공백 필요
             return (
@@ -3915,6 +6118,7 @@ class UndoRedoManager:
     def _snapshot_view(self, viewer):
         overlays = {}
         patches = {}
+        images = {}
         if hasattr(viewer, 'text_overlays'):
             for p, lst in viewer.text_overlays.items():
                 items = []
@@ -3964,9 +6168,21 @@ class UndoRedoManager:
                         r = item
                         patch_items.append({'bbox': (r.x0, r.y0, r.x1, r.y1), 'overlay_id': None})
                 patches[p] = patch_items
-        return overlays, patches
+        if hasattr(viewer, 'image_overlays'):
+            for p, lst in viewer.image_overlays.items():
+                img_items = []
+                for img in lst:
+                    img_items.append({
+                        'image_path': img.image_path,
+                        'bbox': (img.bbox.x0, img.bbox.y0, img.bbox.x1, img.bbox.y1),
+                        'opacity': img.opacity,
+                        'z_index': img.z_index,
+                        'visible': img.visible
+                    })
+                images[p] = img_items
+        return overlays, patches, images
 
-    def _restore_view(self, viewer, overlays, patches):
+    def _restore_view(self, viewer, overlays, patches, images=None):
         viewer.text_overlays.clear()
         for p, items in overlays.items():
             viewer.text_overlays[p] = []
@@ -4031,6 +6247,22 @@ class UndoRedoManager:
                     })
                 else:
                     viewer.background_patches[p].append({'bbox': fitz.Rect(*it), 'overlay_id': None})
+        if hasattr(viewer, 'image_overlays'):
+            viewer.image_overlays.clear()
+            if images:
+                for p, items in images.items():
+                    viewer.image_overlays[p] = []
+                    for it in items:
+                        img_ov = ImageOverlay(
+                            it['image_path'],
+                            fitz.Rect(*it['bbox']),
+                            p,
+                            opacity=it.get('opacity', 1.0),
+                            z_index=it.get('z_index', 0)
+                        )
+                        img_ov.visible = it.get('visible', True)
+                        viewer.image_overlays[p].append(img_ov)
+            viewer.active_image = None
         viewer.update()
 
     def save_state(self, doc, viewer=None):
@@ -4054,10 +6286,10 @@ class UndoRedoManager:
                 doc_bytes = doc.tobytes()
 
             doc_pages = len(doc)
-            overlays, patch_state = self._snapshot_view(viewer) if viewer else ({}, {})
+            overlays, patch_state, img_state = self._snapshot_view(viewer) if viewer else ({}, {}, {})
             print(f"   - 저장할 문서 페이지 수: {doc_pages}")
             print(f"   - 저장 전 undo_stack size: {len(self.undo_stack)}")
-            self.undo_stack.append((doc_bytes, overlays, patch_state))
+            self.undo_stack.append((doc_bytes, overlays, patch_state, img_state))
             if len(self.undo_stack) > self.max_history:
                 self.undo_stack.pop(0)
                 print(f"   - 히스토리 제한으로 가장 오래된 상태 제거")
@@ -4095,12 +6327,17 @@ class UndoRedoManager:
             else:
                 cur_bytes = current_doc.tobytes()
 
-            cur_overlays, cur_patches = self._snapshot_view(viewer) if viewer else ({}, {})
-            self.redo_stack.append((cur_bytes, cur_overlays, cur_patches))
+            cur_overlays, cur_patches, cur_images = self._snapshot_view(viewer) if viewer else ({}, {}, {})
+            self.redo_stack.append((cur_bytes, cur_overlays, cur_patches, cur_images))
             
             # undo pop and restore previous
             self.undo_stack.pop()
-            prev_bytes, prev_overlays, prev_patches = self.undo_stack[-1]
+            entry = self.undo_stack[-1]
+            if len(entry) >= 4:
+                prev_bytes, prev_overlays, prev_patches, prev_images = entry
+            else:
+                prev_bytes, prev_overlays, prev_patches = entry
+                prev_images = {}
             
             # [최적화] 복원 시 캐시 업데이트 (중요: 복원된 문서는 마지막 캐시와 동일함)
             if mw:
@@ -4109,7 +6346,7 @@ class UndoRedoManager:
                 
             restored_doc = fitz.open(stream=prev_bytes)
             if viewer:
-                self._restore_view(viewer, prev_overlays, prev_patches)
+                self._restore_view(viewer, prev_overlays, prev_patches, prev_images)
             return restored_doc
         print("   - 실행 취소 불가 (can_undo() == False)")
         return None
@@ -4135,10 +6372,15 @@ class UndoRedoManager:
             else:
                 cur_bytes = current_doc.tobytes()
 
-            cur_overlays, cur_patches = self._snapshot_view(viewer) if viewer else ({}, {})
-            self.undo_stack.append((cur_bytes, cur_overlays, cur_patches))
+            cur_overlays, cur_patches, cur_images = self._snapshot_view(viewer) if viewer else ({}, {}, {})
+            self.undo_stack.append((cur_bytes, cur_overlays, cur_patches, cur_images))
             
-            next_bytes, next_overlays, next_patches = self.redo_stack.pop()
+            entry = self.redo_stack.pop()
+            if len(entry) >= 4:
+                next_bytes, next_overlays, next_patches, next_images = entry
+            else:
+                next_bytes, next_overlays, next_patches = entry
+                next_images = {}
             
             # [최적화] 복원 시 캐시 업데이트
             if mw:
@@ -4147,7 +6389,7 @@ class UndoRedoManager:
                 
             restored_doc = fitz.open(stream=next_bytes)
             if viewer:
-                self._restore_view(viewer, next_overlays, next_patches)
+                self._restore_view(viewer, next_overlays, next_patches, next_images)
             return restored_doc
         print("   - 다시 실행 불가 (can_redo() == False)")
         return None
@@ -4209,6 +6451,16 @@ class MainWindow(QMainWindow):
         self.patch_precise_mode = False  # 정밀 모드
         self.patch_only_mode = False
         self._patch_mode_restore_state: Optional[bool] = None
+        self.current_text_editor: Optional[TextEditorDialog] = None
+        self.last_text_editor_pos: Optional[QPoint] = None
+        try:
+            last_x = self.settings.value('text_editor_pos_x')
+            last_y = self.settings.value('text_editor_pos_y')
+            if last_x is not None and last_y is not None:
+                self.last_text_editor_pos = QPoint(int(last_x), int(last_y))
+        except Exception:
+            self.last_text_editor_pos = None
+        self.continuous_scroll_enabled = True  # 수직 연속 스크롤 페이지 전환 모드
         self.last_open_dir = os.path.expanduser('~')
         self.recent_fonts: list[str] = []
         try:
@@ -4240,11 +6492,15 @@ class MainWindow(QMainWindow):
                     pass
                 self._startup_dialog = None
 
-        # 상태바 초기화
+        # 상태바 초기화 (하단 여백 차지 방지를 위해 숨기고, 상단 status_layout에 연동)
+        self._status_timer = None
         try:
-            self.statusBar()
+            sb = self.statusBar()
+            sb.hide()
+            sb.messageChanged.connect(self._on_status_bar_message_changed)
         except Exception:
             pass
+        self.update_status_mode_message()
 
     def _create_loading_dialog(self, message: str | None):
         if not message:
@@ -4508,54 +6764,84 @@ class MainWindow(QMainWindow):
         """텍스트 편집창의 변경사항을 실시간으로 화면에 반영"""
         print(f"[Preview] Key={overlay_key}, size={new_values.get('size')} (type: {type(new_values.get('size'))})")
         
-        if not overlay_key or not self.pdf_viewer or not self.pdf_viewer.doc:
-            print(f"[Preview] Early return: key={overlay_key}, viewer={bool(self.pdf_viewer)}")
+        if not self.pdf_viewer or not self.pdf_viewer.doc:
             return
 
-        page_num, overlay_id = overlay_key
-        overlay = self.pdf_viewer.get_overlay_by_id(page_num, overlay_id)
+        page_num = (overlay_key[0] if overlay_key else None)
+        if page_num is None:
+            page_num = new_values.get('page_num', self.pdf_viewer.current_page_num)
+        
+        overlay_id = overlay_key[1] if overlay_key else new_values.get('overlay_id')
+        overlay = None
+
+        if overlay_id is not None:
+            overlay = self.pdf_viewer.get_overlay_by_id(page_num, overlay_id)
+        
         if not overlay:
-            print(f"[Preview] Overlay not found on page {page_num} with ID {overlay_id}")
-            # 위치 기반으로 재시도 (ID 매칭 실패 대비)
+            # 1. 위치 기반으로 재시도 (ID 매칭 실패 대비)
             try:
                 original_bbox = new_values.get('original_bbox')
                 if original_bbox:
                     overlay = self.pdf_viewer.find_overlay_at_position(page_num, fitz.Rect(original_bbox))
                     if overlay:
                         print(f"[Preview] Found overlay via fallback position match: ID {overlay.z_index}")
-            except Exception: pass
-            
-            if not overlay: return
+            except Exception:
+                pass
+
+        if not overlay:
+            # 2. 오버레이가 아직 없다면 실시간 자동 생성 (Fallback 복원)
+            try:
+                page = self.pdf_viewer.doc.load_page(page_num)
+                span_data = getattr(self, 'current_text_editor', None)
+                span_source = span_data.span_info if (span_data and hasattr(span_data, 'span_info')) else new_values
+                overlay = self.insert_overlay_text(page, span_source, new_values)
+                if overlay:
+                    print(f"[Preview] Auto-created missing overlay on the fly: ID {overlay.z_index}")
+                    overlay_key = (page_num, overlay.z_index)
+                    if hasattr(self, 'current_text_editor') and self.current_text_editor:
+                        self.current_text_editor.overlay_key = overlay_key
+                        if hasattr(self.current_text_editor, 'span_info'):
+                            self.current_text_editor.span_info['overlay_id'] = overlay.z_index
+                            self.current_text_editor.span_info['is_overlay'] = True
+            except Exception as e_mk:
+                print(f"[Preview] Failed to auto-create fallback overlay: {e_mk}")
+
+        if not overlay:
+            print(f"[Preview] No overlay could be resolved or created. Aborting preview.")
+            return
 
         try:
-            # 실시간 미리보기를 위해 insert_overlay_text 로직을 직접 활용
-            # 이 메서드는 이미 존재하는 오버레이를 업데이트하도록 설계됨
             page = self.pdf_viewer.doc.load_page(page_num)
             
-            # span 더미 정보 생성 (insert_overlay_text 호출용)
             span_dummy = {
                 'original_bbox': overlay.original_bbox,
+                'source_bbox': getattr(overlay, 'source_bbox', overlay.original_bbox),
                 'current_bbox': overlay.bbox,
                 'is_overlay': True,
                 'overlay_id': overlay.z_index,
                 'origin': getattr(overlay, 'origin', None),
                 'page_num': page_num,
+                'text': getattr(overlay, 'text', ''),
                 'font': getattr(overlay, 'font', 'Arial'),
                 'size': getattr(overlay, 'size', 12.0),
                 'flags': getattr(overlay, 'flags', 0)
             }
             
             # 1. 오버레이 속성 및 텍스트 업데이트
-            print(f"[Preview] Calling insert_overlay_text for update...")
             self.insert_overlay_text(page, span_dummy, new_values)
             
-            # 2. 배경 패치(여백 포함) 실시간 업데이트
-            print(f"[Preview] Updating background patch...")
+            # 2. 배경 패치(여백 포함) 실시간 업데이트 (preview=True로 추가)
             self.apply_background_patch(page, overlay.original_bbox, new_values, overlay=overlay, preview=True)
             
-            # 3. 화면 즉시 갱신 강제
-            self.pdf_viewer.update() # 안전한 update 사용
-            print(f"[Preview] UI Update triggered successfully (update used)")
+            # 3. 편집 중인 오버레이 활성 상태 유지 (원본 반투명 패치 렌더링 보장)
+            self.pdf_viewer.active_overlay = (page_num, overlay.z_index)
+            
+            # 4. 화면 즉시 갱신 강제 (모달 대화상자 이벤트 루프 중 즉시 재렌더링)
+            self.pdf_viewer.update()
+            try:
+                self.pdf_viewer.repaint()
+            except Exception:
+                pass
             
         except Exception as e:
             print(f"실시간 미리보기 업데이트 실패: {e}")
@@ -4626,8 +6912,9 @@ class MainWindow(QMainWindow):
     # Old hardcoded translations removed - now loading from i18n/*.json
 
     @classmethod
-    def t(cls, key: str, **kwargs) -> str:
+    def t(cls, key: str, default: Optional[str] = None, **kwargs) -> str:
         """전역 번역 유틸리티 (MainWindow._instance 활용)"""
+        fallback_val = default if default is not None else key
         if cls._instance:
             # 1. 현재 선택된 언어 딕셔너리
             lang_dict = cls._instance.translations.get(cls._instance.language, {})
@@ -4636,11 +6923,10 @@ class MainWindow(QMainWindow):
             # 3. 영어 딕셔너리 (차선 폴백용)
             fallback_en = cls._instance.translations.get('en', {})
             
-            # 순서대로 찾음: 현재 언어 -> 한국어 -> 영어 -> 키 자체
-            text = lang_dict.get(key, fallback_ko.get(key, fallback_en.get(key, key)))
+            # 순서대로 찾음: 현재 언어 -> 한국어 -> 영어 -> 기본값/키 자체
+            text = lang_dict.get(key, fallback_ko.get(key, fallback_en.get(key, fallback_val)))
         else:
-            # 인스턴스가 없을 때의 기본 폴백 (사실상 발생 안함)
-            text = key
+            text = fallback_val
         
         if kwargs:
             try:
@@ -4680,6 +6966,7 @@ class MainWindow(QMainWindow):
         self.update_zoom_label()
         if not self.pdf_viewer.doc:
             self.pdf_viewer.setText(self.t('viewer_placeholder'))
+        self.update_status_mode_message()
         self._refresh_window_title()
 
     def _apply_translated_tooltips(self):
@@ -4695,8 +6982,12 @@ class MainWindow(QMainWindow):
             ('prev_page_button', 'tooltip_prev_page'),
             ('next_page_button', 'tooltip_next_page'),
             ('page_input', 'tooltip_goto_page'),
+            ('thumbnail_button', 'tooltip_thumbnails'),
             ('patch_mode_button', 'tooltip_patch_mode'),
             ('eraser_button', 'tooltip_patch_eraser'),
+            ('insert_image_button', 'tooltip_insert_image'),
+            ('draw_signature_button', 'tooltip_draw_signature'),
+            ('search_button', 'tooltip_search'),
             ('theme_button', 'tooltip_theme')
         ]
         for attr, key in mapping:
@@ -4849,6 +7140,30 @@ class MainWindow(QMainWindow):
         redo_action = edit_menu.addAction(self.t('redo')) 
         redo_action.triggered.connect(self.redo_action)
         redo_action.setShortcut('Ctrl+Y')
+
+        edit_menu.addSeparator()
+
+        copy_action = edit_menu.addAction(self.t('action_copy', default="📋 복사"))
+        copy_action.triggered.connect(self.copy_action)
+        copy_action.setShortcut('Ctrl+C')
+
+        paste_action = edit_menu.addAction(self.t('action_paste', default="📥 붙여넣기"))
+        paste_action.triggered.connect(self.paste_action)
+        paste_action.setShortcut('Ctrl+V')
+
+        edit_menu.addSeparator()
+
+        find_action = edit_menu.addAction(self.t('action_find', default="🔍 본문 텍스트 찾기..."))
+        find_action.triggered.connect(self.toggle_search_bar)
+        find_action.setShortcut('Ctrl+F')
+
+        find_next_action = edit_menu.addAction(self.t('action_find_next', default="🔽 다음 찾기"))
+        find_next_action.triggered.connect(self._find_next)
+        find_next_action.setShortcut('F3')
+
+        find_prev_action = edit_menu.addAction(self.t('action_find_prev', default="🔼 이전 찾기"))
+        find_prev_action.triggered.connect(self._find_prev)
+        find_prev_action.setShortcut('Shift+F3')
         
         edit_menu.addSeparator()
         
@@ -4869,11 +7184,15 @@ class MainWindow(QMainWindow):
         # 축소 / 확대 순서로 배치
         zoom_out_action = view_menu.addAction(self.t('zoom_out'))
         zoom_out_action.triggered.connect(self.zoom_out) 
-        zoom_out_action.setShortcut('Ctrl+-')
+        zoom_out_action.setShortcuts([QKeySequence(QKeySequence.StandardKey.ZoomOut), QKeySequence('Ctrl+-')])
 
         zoom_in_action = view_menu.addAction(self.t('zoom_in'))
         zoom_in_action.triggered.connect(self.zoom_in)
-        zoom_in_action.setShortcut('Ctrl+=')
+        zoom_in_action.setShortcuts([QKeySequence(QKeySequence.StandardKey.ZoomIn), QKeySequence('Ctrl+=')])
+        
+        actual_size_action = view_menu.addAction(self.t('actual_size', default="💯 100% 실제 크기"))
+        actual_size_action.triggered.connect(self.reset_zoom)
+        actual_size_action.setShortcuts([QKeySequence('Ctrl+1'), QKeySequence('Ctrl+Alt+0')])
         
         view_menu.addSeparator()
 
@@ -4894,6 +7213,35 @@ class MainWindow(QMainWindow):
         self.dark_mode_action.setCheckable(True)
         self.dark_mode_action.triggered.connect(lambda: self.set_theme_mode('dark'))
 
+        view_menu.addSeparator()
+        self.show_grid_action = view_menu.addAction(self.t('show_grid', default="▦ 격자 표시"))
+        self.show_grid_action.setCheckable(True)
+        self.show_grid_action.setChecked(False)
+        self.show_grid_action.triggered.connect(self.toggle_grid)
+
+        self.show_ruler_action = view_menu.addAction(self.t('show_ruler', default="📏 줄자 표시"))
+        self.show_ruler_action.setCheckable(True)
+        self.show_ruler_action.setChecked(False)
+        self.show_ruler_action.triggered.connect(self.toggle_ruler)
+
+        view_menu.addSeparator()
+        self.toggle_thumbnail_action = view_menu.addAction(self.t('show_thumbnails', default="📑 페이지 썸네일 패널"))
+        self.toggle_thumbnail_action.setCheckable(True)
+        self.toggle_thumbnail_action.setChecked(True)
+        self.toggle_thumbnail_action.setShortcut('F4')
+        self.toggle_thumbnail_action.triggered.connect(self.toggle_thumbnail_panel)
+
+        self.smart_snap_action = view_menu.addAction(self.t('smart_snap', default="🧲 스마트 스냅 (자석 정렬 가이드선)"))
+        self.smart_snap_action.setCheckable(True)
+        self.smart_snap_action.setChecked(True)
+        self.smart_snap_action.triggered.connect(self.toggle_smart_snap)
+
+        self.continuous_scroll_action = view_menu.addAction(self.t('continuous_scroll', default="📜 수직 연속 스크롤 (페이지 자동 전환)"))
+        self.continuous_scroll_action.setCheckable(True)
+        self.continuous_scroll_action.setChecked(True)
+        self.continuous_scroll_action.triggered.connect(lambda chk: setattr(self, 'continuous_scroll_enabled', chk))
+
+
         # 🔧 도구 메뉴
         tools_menu = menubar.addMenu(self.t('tools_menu'))
         
@@ -4902,6 +7250,14 @@ class MainWindow(QMainWindow):
         
         show_patch_info_action = tools_menu.addAction(self.t('action_show_patch_info'))
         show_patch_info_action.triggered.connect(self.show_patch_info)
+
+        insert_image_action = tools_menu.addAction(self.t('action_insert_image', default="🖼️ 이미지 삽입..."))
+        insert_image_action.triggered.connect(self.insert_image_action)
+        insert_image_action.setShortcut('Ctrl+I')
+
+        draw_signature_action = tools_menu.addAction(self.t('action_draw_signature', default="✍️ 전자 서명 그리기..."))
+        draw_signature_action.triggered.connect(self.open_signature_pad)
+        draw_signature_action.setShortcut('Ctrl+Alt+S')
 
         tools_menu.addSeparator()
 
@@ -4963,9 +7319,10 @@ class MainWindow(QMainWindow):
         # 메뉴바 설정 (모든 기능이 메뉴로 통합됨)
         self.create_menu_bar()
         
-        # 상태 표시 라벨만 유지
+        # 상태 표시 라벨 (페이지, 상태 메시지, 배율)
         self.page_label = QLabel(self.t('page_label_empty'))
         self.zoom_label = QLabel(self.t('zoom_label_template', percent=100))
+        self.status_message_label = QLabel(self.t('viewer_placeholder', default="PDF 파일을 열어 편집을 시작하세요."))
 
         # PDF 뷰어 (스크롤 영역 포함)
         self.pdf_viewer = PdfViewerWidget(parent=self)
@@ -4977,65 +7334,68 @@ class MainWindow(QMainWindow):
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame) # 프레임 제거 (테마에서 관리)
+        self.scroll_area.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         
-        # 이모지 버튼 툴바 레이아웃
-        toolbar_layout = QHBoxLayout()
+        # 툴바 위젯 초기화
         
+        # 툴바 버튼 스타일 (버튼 자체는 굵게 유지하되, 툴팁에는 bold가 상속되지 않도록 QToolTip normal 지정)
+        toolbar_btn_style = "QPushButton { font-size: 13px; font-weight: bold; } QToolTip { font-weight: normal; }"
+
         # 파일 관련 버튼들 (가로 확장)
         self.open_button = QPushButton("📂")
         self.open_button.setToolTip(self.t('tooltip_open'))
         self.open_button.setFixedSize(50, 40)
-        self.open_button.setStyleSheet("font-size: 13px; font-weight: bold;")
+        self.open_button.setStyleSheet(toolbar_btn_style)
         
         self.save_button = QPushButton("💾")
         self.save_button.setToolTip(self.t('tooltip_save'))
         self.save_button.setFixedSize(50, 40)
-        self.save_button.setStyleSheet("font-size: 13px; font-weight: bold;")
+        self.save_button.setStyleSheet(toolbar_btn_style)
         
         # 편집 관련 버튼들 (가로 확장)
         self.undo_button = QPushButton("↩️")
         self.undo_button.setToolTip(self.t('tooltip_undo'))
         self.undo_button.setFixedSize(50, 40)
-        self.undo_button.setStyleSheet("font-size: 13px; font-weight: bold;")
+        self.undo_button.setStyleSheet(toolbar_btn_style)
         
         self.redo_button = QPushButton("↪️")
         self.redo_button.setToolTip(self.t('tooltip_redo'))
         self.redo_button.setFixedSize(50, 40)
-        self.redo_button.setStyleSheet("font-size: 13px; font-weight: bold;")
+        self.redo_button.setStyleSheet(toolbar_btn_style)
         
         # 보기 관련 버튼들 (가로 확장)
         self.zoom_in_button = QPushButton("🔍➕")
         self.zoom_in_button.setToolTip(self.t('tooltip_zoom_in'))
         self.zoom_in_button.setFixedSize(55, 40)
-        self.zoom_in_button.setStyleSheet("font-size: 13px; font-weight: bold;")
+        self.zoom_in_button.setStyleSheet(toolbar_btn_style)
         
         self.zoom_out_button = QPushButton("🔍➖")
         self.zoom_out_button.setToolTip(self.t('tooltip_zoom_out'))
         self.zoom_out_button.setFixedSize(55, 40)
-        self.zoom_out_button.setStyleSheet("font-size: 13px; font-weight: bold;")
+        self.zoom_out_button.setStyleSheet(toolbar_btn_style)
 
         # 테마 토글 버튼
         self.theme_button = QPushButton("☀️")
         self.theme_button.setToolTip(self.t('tooltip_theme'))
         self.theme_button.setFixedSize(50, 40)
-        self.theme_button.setStyleSheet("font-size: 13px; font-weight: bold;")
+        self.theme_button.setStyleSheet(toolbar_btn_style)
 
         # 뷰 맞춤 버튼들
         self.fit_width_button = QPushButton("↔️")
         self.fit_width_button.setToolTip(self.t('tooltip_fit_width'))
         self.fit_width_button.setFixedSize(50, 40)
-        self.fit_width_button.setStyleSheet("font-size: 13px; font-weight: bold;")
+        self.fit_width_button.setStyleSheet(toolbar_btn_style)
 
         self.fit_height_button = QPushButton("↕️")
         self.fit_height_button.setToolTip(self.t('tooltip_fit_height'))
         self.fit_height_button.setFixedSize(50, 40)
-        self.fit_height_button.setStyleSheet("font-size: 13px; font-weight: bold;")
+        self.fit_height_button.setStyleSheet(toolbar_btn_style)
 
         # 페이지 이동 버튼들 (가로 확장)
         self.prev_page_button = QPushButton("👈")
         self.prev_page_button.setToolTip(self.t('tooltip_prev_page'))
         self.prev_page_button.setFixedSize(50, 40)
-        self.prev_page_button.setStyleSheet("font-size: 13px; font-weight: bold;")
+        self.prev_page_button.setStyleSheet(toolbar_btn_style)
 
         self.page_input = QLineEdit()
         self.page_input.setValidator(QIntValidator(1, 999999, self))
@@ -5043,7 +7403,7 @@ class MainWindow(QMainWindow):
         self.page_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.page_input.setPlaceholderText(self.t('goto_page_placeholder'))
         self.page_input.setEnabled(False)
-        self.page_input.setStyleSheet("font-size: 13px; font-weight: bold; padding: 6px; border: 1px solid #cccccc; border-radius: 6px;")
+        self.page_input.setStyleSheet("font-size: 13px; font-weight: bold; padding: 6px; border: 1px solid #cccccc; border-radius: 6px; QToolTip { font-weight: normal; }")
 
         self.page_total_label = QLabel('/ 0')
         self.page_total_label.setStyleSheet("font-size: 13px; font-weight: bold; padding: 0 6px;")
@@ -5051,13 +7411,21 @@ class MainWindow(QMainWindow):
         self.next_page_button = QPushButton("👉")
         self.next_page_button.setToolTip(self.t('tooltip_next_page'))
         self.next_page_button.setFixedSize(50, 40)
-        self.next_page_button.setStyleSheet("font-size: 13px; font-weight: bold;")
+        self.next_page_button.setStyleSheet(toolbar_btn_style)
+
+        self.thumbnail_button = QPushButton("📑")
+        self.thumbnail_button.setCheckable(True)
+        self.thumbnail_button.setChecked(True)
+        self.thumbnail_button.setToolTip(self.t('tooltip_thumbnails', default="페이지 썸네일 패널 (F4)"))
+        self.thumbnail_button.setFixedSize(50, 40)
+        self.thumbnail_button.setStyleSheet(toolbar_btn_style)
 
         # 도구 관련 버튼들 (가로 확장)
         toggle_btn_style = (
             "QPushButton { font-size: 13px; font-weight: bold; border-radius: 8px; padding: 4px; }\n"
             "QPushButton[active=\"true\"] { background-color: rgba(255, 214, 102, 0.35);"
-            " border: 1px solid rgba(255, 214, 102, 0.55); }"
+            " border: 1px solid rgba(255, 214, 102, 0.55); }\n"
+            "QToolTip { font-weight: normal; }"
         )
         self.patch_mode_button = QPushButton("🩹")
         self.patch_mode_button.setCheckable(True)
@@ -5074,40 +7442,170 @@ class MainWindow(QMainWindow):
         self.eraser_button.setStyleSheet(toggle_btn_style)
         self.eraser_button.setProperty('active', False)
 
-        # 툴바에 버튼들 추가
-        toolbar_layout.addWidget(self.open_button)
-        toolbar_layout.addWidget(self.save_button)
-        toolbar_layout.addWidget(QLabel("|"))  # 구분선
-        toolbar_layout.addWidget(self.undo_button)
-        toolbar_layout.addWidget(self.redo_button)
-        toolbar_layout.addWidget(QLabel("|"))  # 구분선
-        # 요구사항: 축소 / 확대 순서로 배치
-        toolbar_layout.addWidget(self.zoom_out_button)
-        toolbar_layout.addWidget(self.zoom_in_button)
-        toolbar_layout.addWidget(self.fit_width_button)
-        toolbar_layout.addWidget(self.fit_height_button)
-        toolbar_layout.addWidget(QLabel("|"))  # 구분선
-        toolbar_layout.addWidget(self.prev_page_button)
-        toolbar_layout.addWidget(self.page_input)
-        toolbar_layout.addWidget(self.page_total_label)
-        toolbar_layout.addWidget(self.next_page_button)
-        toolbar_layout.addWidget(QLabel("|"))  # 구분선
-        toolbar_layout.addWidget(self.patch_mode_button)
-        toolbar_layout.addWidget(self.eraser_button)
-        toolbar_layout.addWidget(QLabel("|"))  # 구분선
-        toolbar_layout.addWidget(self.theme_button)
-        toolbar_layout.addStretch()  # 나머지 공간 채우기
-        
-        # 상태바 레이아웃 (페이지 및 줌 정보 표시)
-        status_layout = QHBoxLayout()
-        status_layout.addWidget(self.page_label)
-        status_layout.addStretch()
-        status_layout.addWidget(self.zoom_label)
-        
+        self.insert_image_button = QPushButton("🖼️")
+        self.insert_image_button.setToolTip(self.t('tooltip_insert_image', default="이미지 삽입 (Ctrl+I)"))
+        self.insert_image_button.setFixedSize(50, 40)
+        self.insert_image_button.setStyleSheet(toolbar_btn_style)
+
+        self.draw_signature_button = QPushButton("✍️")
+        self.draw_signature_button.setToolTip(self.t('tooltip_draw_signature', default="전자 서명 그리기 (Ctrl+Alt+S)"))
+        self.draw_signature_button.setFixedSize(50, 40)
+        self.draw_signature_button.setStyleSheet(toolbar_btn_style)
+
+        self.search_button = QPushButton("🔍")
+        self.search_button.setToolTip(self.t('tooltip_search', default="본문 텍스트 검색 (Ctrl+F)"))
+        self.search_button.setFixedSize(50, 40)
+        self.search_button.setStyleSheet(toolbar_btn_style)
+
+        # 툴바 생성 (QToolBar: 좁은 화면에서 자동으로 >> 오버플로우 메뉴 제공)
+        self.main_toolbar = QToolBar("Main Toolbar", self)
+        self.main_toolbar.setMovable(False)
+        self.main_toolbar.setFloatable(False)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.main_toolbar)
+
+        # 기능 유형별 툴바 배치 및 구분선 삽입
+        # 1. 파일 기능 그룹
+        self.main_toolbar.addWidget(self.open_button)
+        self.main_toolbar.addWidget(self.save_button)
+        self.main_toolbar.addSeparator()
+
+        # 2. 실행 취소 / 다시 실행 그룹
+        self.main_toolbar.addWidget(self.undo_button)
+        self.main_toolbar.addWidget(self.redo_button)
+        self.main_toolbar.addSeparator()
+
+        # 3. 확대/축소 및 화면 맞춤 그룹
+        self.main_toolbar.addWidget(self.zoom_out_button)
+        self.main_toolbar.addWidget(self.zoom_in_button)
+        self.main_toolbar.addWidget(self.fit_width_button)
+        self.main_toolbar.addWidget(self.fit_height_button)
+        self.main_toolbar.addSeparator()
+
+        # 4. 페이지 이동 그룹
+        self.main_toolbar.addWidget(self.prev_page_button)
+        self.main_toolbar.addWidget(self.page_input)
+        self.main_toolbar.addWidget(self.page_total_label)
+        self.main_toolbar.addWidget(self.next_page_button)
+        self.main_toolbar.addSeparator()
+
+        # 5. 페이지 썸네일 패널 토글 그룹
+        self.main_toolbar.addWidget(self.thumbnail_button)
+        self.main_toolbar.addSeparator()
+
+        # 6. 텍스트 패치 및 지우개 편집 그룹
+        self.main_toolbar.addWidget(self.patch_mode_button)
+        self.main_toolbar.addWidget(self.eraser_button)
+        self.main_toolbar.addSeparator()
+
+        # 7. 개체(이미지/전자서명) 삽입 그룹
+        self.main_toolbar.addWidget(self.insert_image_button)
+        self.main_toolbar.addWidget(self.draw_signature_button)
+        self.main_toolbar.addSeparator()
+
+        # 8. 본문 검색 그룹
+        self.main_toolbar.addWidget(self.search_button)
+        self.main_toolbar.addSeparator()
+
+        # 9. 화면 테마 토글 그룹
+        self.main_toolbar.addWidget(self.theme_button)
+
+        # 본문 검색 바 (Ctrl+F)
+        self.search_bar = QFrame(self)
+        self.search_bar.setStyleSheet(
+            "QFrame { background-color: #f1f5f9; border-bottom: 1.5px solid #cbd5e1; padding: 2px 8px; }"
+            "QPushButton { font-size: 12px; font-weight: bold; padding: 4px 10px; border-radius: 4px; }"
+            "QLineEdit { background: white; padding: 5px 8px; border: 1.5px solid #94a3b8; border-radius: 6px; font-size: 13px; }"
+        )
+        search_layout = QHBoxLayout(self.search_bar)
+        search_layout.setContentsMargins(6, 4, 6, 4)
+        search_layout.setSpacing(8)
+
+        search_icon = QLabel("🔍")
+        search_layout.addWidget(search_icon)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("문서 내 텍스트 검색... (Enter: 다음, Shift+Enter: 이전, Esc: 닫기)")
+        self.search_input.textChanged.connect(self._on_search_text_changed)
+        self.search_input.returnPressed.connect(self._find_next)
+        search_layout.addWidget(self.search_input, stretch=1)
+
+        self.search_count_label = QLabel("0/0")
+        self.search_count_label.setStyleSheet("font-weight: bold; color: #475569; min-width: 50px;")
+        search_layout.addWidget(self.search_count_label)
+
+        self.search_prev_btn = QPushButton("▲ 이전")
+        self.search_prev_btn.setToolTip("이전 일치 항목 (Shift+Enter)")
+        self.search_prev_btn.clicked.connect(self._find_prev)
+        search_layout.addWidget(self.search_prev_btn)
+
+        self.search_next_btn = QPushButton("▼ 다음")
+        self.search_next_btn.setToolTip("다음 일치 항목 (Enter)")
+        self.search_next_btn.clicked.connect(self._find_next)
+        search_layout.addWidget(self.search_next_btn)
+
+        self.search_close_btn = QPushButton("✕")
+        self.search_close_btn.setToolTip("검색창 닫기 (Esc)")
+        self.search_close_btn.setFixedSize(28, 28)
+        self.search_close_btn.clicked.connect(self.toggle_search_bar)
+        search_layout.addWidget(self.search_close_btn)
+
+        self.search_bar.setVisible(False)
+
+        # 좌측 썸네일 탐색 패널과 스크롤 영역을 QSplitter로 통합
+        self.thumbnail_panel = ThumbnailPanel(self)
+        self.thumbnail_panel.page_selected.connect(self.go_to_page)
+        self.thumbnail_panel.close_requested.connect(lambda: self.toggle_thumbnail_panel(False))
+
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.addWidget(self.thumbnail_panel)
+        self.main_splitter.addWidget(self.scroll_area)
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
+        self.main_splitter.setSizes([160, 840])
+
+        # 상태바 위젯 (문서뷰어 상단에 고정 배치, 높이 30px 완전 고정)
+        self.status_bar_widget = QWidget(self)
+        self.status_bar_widget.setObjectName("statusBarWidget")
+        self.status_bar_widget.setFixedHeight(30)
+        self.status_bar_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.status_layout = QHBoxLayout(self.status_bar_widget)
+        self.status_layout.setContentsMargins(14, 0, 14, 0)
+        self.status_layout.setSpacing(10)
+
+        # 1) 좌측: 페이지 위치 표시
+        self.page_label.setObjectName("statusPageLabel")
+        self.status_layout.addWidget(self.page_label)
+
+        # 구분선 1
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.Shape.VLine)
+        sep1.setFrameShadow(QFrame.Shadow.Sunken)
+        sep1.setFixedHeight(14)
+        self.status_layout.addWidget(sep1)
+
+        # 2) 중앙: 현재 모드 및 상태 메시지
+        self.status_message_label.setObjectName("statusMessageLabel")
+        self.status_layout.addWidget(self.status_message_label, stretch=1)
+
+        # 구분선 2
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.VLine)
+        sep2.setFrameShadow(QFrame.Shadow.Sunken)
+        sep2.setFixedHeight(14)
+        self.status_layout.addWidget(sep2)
+
+        # 3) 우측: 배율 표시
+        self.zoom_label.setObjectName("statusZoomLabel")
+        self.status_layout.addWidget(self.zoom_label)
+
+        # 메인 레이아웃: status_bar_widget은 문서 뷰어 상단(stretch=0), main_splitter에 모든 신축 공간 배분(stretch=1)
         main_layout = QVBoxLayout()
-        main_layout.addLayout(toolbar_layout)  # 툴바 추가
-        main_layout.addLayout(status_layout)
-        main_layout.addWidget(self.scroll_area)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        main_layout.addWidget(self.search_bar, stretch=0)
+        main_layout.addWidget(self.status_bar_widget, stretch=0)
+        main_layout.addWidget(self.main_splitter, stretch=1)
         
         central_widget = QWidget()
         central_widget.setLayout(main_layout)
@@ -5132,12 +7630,198 @@ class MainWindow(QMainWindow):
         self.fit_height_button.clicked.connect(self.fit_to_height)
         self.prev_page_button.clicked.connect(self.prev_page)
         self.next_page_button.clicked.connect(self.next_page)
+        self.thumbnail_button.clicked.connect(self.toggle_thumbnail_panel)
         self.page_input.returnPressed.connect(self.go_to_page_from_input)
         self.patch_mode_button.toggled.connect(self.set_patch_mode)
         self.eraser_button.toggled.connect(self.toggle_patch_eraser)
+        self.insert_image_button.clicked.connect(self.insert_image_action)
+        self.draw_signature_button.clicked.connect(self.open_signature_pad)
+        self.search_button.clicked.connect(self.toggle_search_bar)
         self.theme_button.clicked.connect(self.toggle_theme)
         
         self.pdf_viewer.text_selected.connect(self.on_text_selected)
+
+    def copy_action(self):
+        if hasattr(self, 'pdf_viewer'):
+            self.pdf_viewer.copy_selected()
+
+    def paste_action(self):
+        if hasattr(self, 'pdf_viewer'):
+            self.pdf_viewer.paste_clipboard()
+
+    def open_signature_pad(self):
+        """전자 서명 그리기 대화상자 열기"""
+        if not self.pdf_viewer.doc:
+            QMessageBox.information(self, "알림", "먼저 PDF 문서를 열어주세요.")
+            return
+        dialog = SignaturePadDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.created_pixmap:
+            import tempfile
+            tmp_fd, tmp_path = tempfile.mkstemp(suffix="_sig.png")
+            os.close(tmp_fd)
+            dialog.created_pixmap.save(tmp_path, "PNG")
+            self.insert_signature_pixmap(dialog.created_pixmap, tmp_path)
+
+    def insert_signature_pixmap(self, pixmap, temp_path):
+        """서명 패드에서 생성된 서명 이미지를 현재 페이지에 삽입"""
+        if not self.pdf_viewer.doc:
+            return
+        
+        page_num = self.pdf_viewer.current_page_num
+        page = self.pdf_viewer.doc.load_page(page_num)
+        page_rect = page.rect
+        
+        aspect = float(pixmap.width()) / float(pixmap.height()) if pixmap.height() > 0 else 2.0
+        w = 140.0
+        h = w / aspect
+        
+        x0 = (page_rect.width - w) / 2.0
+        y0 = page_rect.height * 0.72
+        bbox = fitz.Rect(x0, y0, x0 + w, y0 + h)
+        
+        if page_num not in self.pdf_viewer.image_overlays:
+            self.pdf_viewer.image_overlays[page_num] = []
+        
+        self.pdf_viewer.image_id_counter += 1
+        img_overlay = ImageOverlay(
+            image_path=temp_path,
+            bbox=bbox,
+            page_num=page_num,
+            opacity=1.0,
+            z_index=self.pdf_viewer.image_id_counter
+        )
+        img_overlay.pixmap = pixmap
+        self.pdf_viewer.image_overlays[page_num].append(img_overlay)
+        self.pdf_viewer.active_image = img_overlay
+        
+        if hasattr(self, 'undo_manager') and self.pdf_viewer.doc:
+            try:
+                self.undo_manager.save_state(self.pdf_viewer.doc, self.pdf_viewer)
+            except Exception: pass
+            
+        self.pdf_viewer.update()
+
+    def toggle_search_bar(self):
+        """본문 검색창 표시/숨김 토글 (Ctrl+F)"""
+        if not hasattr(self, 'search_bar'):
+            return
+        is_vis = not self.search_bar.isHidden()
+        self.search_bar.setVisible(not is_vis)
+        if not is_vis:
+            self.search_input.setFocus()
+            self.search_input.selectAll()
+            if self.search_input.text().strip():
+                self._execute_search(self.search_input.text().strip())
+        else:
+            self._clear_search()
+
+    def _on_search_text_changed(self, text):
+        self._execute_search(text.strip())
+
+    def _execute_search(self, query):
+        if not self.pdf_viewer.doc or not query:
+            self._clear_search()
+            return
+        
+        self.search_results = []
+        for page_idx in range(len(self.pdf_viewer.doc)):
+            try:
+                p = self.pdf_viewer.doc.load_page(page_idx)
+                rects = p.search_for(query)
+                for r in rects:
+                    self.search_results.append((page_idx, r))
+            except Exception:
+                pass
+        
+        if not self.search_results:
+            self.search_count_label.setText("0/0")
+            self.pdf_viewer.search_highlights = []
+            self.pdf_viewer.active_search_rect = None
+            self.pdf_viewer.update()
+            return
+        
+        curr_page = self.pdf_viewer.current_page_num
+        start_idx = 0
+        for i, (pg, _) in enumerate(self.search_results):
+            if pg >= curr_page:
+                start_idx = i
+                break
+        
+        self.search_current_index = start_idx
+        self._navigate_to_search_match()
+
+    def _navigate_to_search_match(self):
+        if not getattr(self, 'search_results', None):
+            return
+        total = len(self.search_results)
+        idx = self.search_current_index % total
+        self.search_current_index = idx
+        
+        page_num, target_rect = self.search_results[idx]
+        self.search_count_label.setText(f"{idx + 1}/{total}")
+        
+        if self.pdf_viewer.current_page_num != page_num:
+            self.go_to_page(page_num)
+        
+        page_highlights = [r for pg, r in self.search_results if pg == page_num]
+        self.pdf_viewer.search_highlights = page_highlights
+        self.pdf_viewer.active_search_rect = target_rect
+        self.pdf_viewer.update()
+        
+        if hasattr(self, 'scroll_area') and self.scroll_area:
+            scale = getattr(self.pdf_viewer, 'pixmap_scale_factor', 1.0)
+            cx = (target_rect.x0 + target_rect.x1) / 2.0 * scale
+            cy = (target_rect.y0 + target_rect.y1) / 2.0 * scale
+            vp = self.scroll_area.viewport()
+            self.scroll_area.horizontalScrollBar().setValue(int(round(cx - vp.width() / 2.0)))
+            self.scroll_area.verticalScrollBar().setValue(int(round(cy - vp.height() / 2.0)))
+
+    def _find_next(self):
+        if not getattr(self, 'search_results', None):
+            self._execute_search(self.search_input.text().strip())
+            return
+        self.search_current_index = (self.search_current_index + 1) % len(self.search_results)
+        self._navigate_to_search_match()
+
+    def _find_prev(self):
+        if not getattr(self, 'search_results', None):
+            self._execute_search(self.search_input.text().strip())
+            return
+        self.search_current_index = (self.search_current_index - 1 + len(self.search_results)) % len(self.search_results)
+        self._navigate_to_search_match()
+
+    def _clear_search(self):
+        self.search_results = []
+        self.search_current_index = 0
+        if hasattr(self, 'search_count_label'):
+            self.search_count_label.setText("0/0")
+        if hasattr(self, 'pdf_viewer'):
+            self.pdf_viewer.search_highlights = []
+            self.pdf_viewer.active_search_rect = None
+            self.pdf_viewer.update()
+
+    def toggle_grid(self, checked):
+        if hasattr(self, 'pdf_viewer'):
+            self.pdf_viewer.show_grid = checked
+            self.pdf_viewer.update()
+
+    def toggle_ruler(self, checked):
+        if hasattr(self, 'pdf_viewer'):
+            self.pdf_viewer.show_ruler = checked
+            self.pdf_viewer.update()
+
+    def insert_image_action(self):
+        if not self.pdf_viewer.doc:
+            QMessageBox.warning(self, self.t('title_warning'), self.t('msg_no_pdf'))
+            return
+        initial_dir = getattr(self, 'last_open_dir', '') or ''
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "이미지 파일 선택", initial_dir,
+            "Image Files (*.png *.jpg *.jpeg *.bmp *.webp);;All Files (*)"
+        )
+        if file_path:
+            self.pdf_viewer.add_image_overlay(file_path)
+            self.statusBar().showMessage("이미지가 삽입되었습니다.", 3000)
     
     def update_undo_redo_buttons(self):
         """Undo/Redo 버튼 상태 업데이트"""
@@ -5162,6 +7846,17 @@ class MainWindow(QMainWindow):
                     self.page_input.blockSignals(False)
             if hasattr(self, 'page_total_label'):
                 self.page_total_label.setText(f"/ {total_pages}")
+            if hasattr(self, 'thumbnail_panel') and self.thumbnail_panel:
+                try:
+                    lw = self.thumbnail_panel.list_widget
+                    lw.blockSignals(True)
+                    lw.setCurrentRow(self.pdf_viewer.current_page_num)
+                    item = lw.item(self.pdf_viewer.current_page_num)
+                    if item:
+                        lw.scrollToItem(item)
+                    lw.blockSignals(False)
+                except Exception:
+                    pass
         else:
             self.page_label.setText(self.t('page_label_empty'))
             self.prev_page_button.setEnabled(False)
@@ -5175,6 +7870,104 @@ class MainWindow(QMainWindow):
                 self.page_input.setEnabled(False)
             if hasattr(self, 'page_total_label'):
                 self.page_total_label.setText('/ 0')
+            if hasattr(self, 'thumbnail_panel') and self.thumbnail_panel:
+                self.thumbnail_panel.list_widget.clear()
+                self.thumbnail_panel.count_lbl.setText("")
+        self.update_status_mode_message()
+
+    def go_to_page(self, page_index):
+        """지정한 페이지 번호(0-indexed)로 즉시 이동"""
+        if not self.pdf_viewer.doc:
+            return
+        total_pages = len(self.pdf_viewer.doc)
+        if total_pages <= 0:
+            return
+        target_index = max(0, min(total_pages - 1, page_index))
+        if target_index == self.pdf_viewer.current_page_num:
+            return
+        self.pdf_viewer.current_page_num = target_index
+        self.render_page()
+        self.update_page_navigation()
+
+    def toggle_thumbnail_panel(self, checked=None):
+        """페이지 썸네일 탐색 사이드바 토글 (F4)"""
+        if not hasattr(self, 'thumbnail_panel'):
+            return
+        if checked is None:
+            is_vis = not self.thumbnail_panel.isHidden()
+            target = not is_vis
+        else:
+            target = bool(checked)
+        self.thumbnail_panel.setVisible(target)
+        if hasattr(self, 'thumbnail_button'):
+            self.thumbnail_button.blockSignals(True)
+            self.thumbnail_button.setChecked(target)
+            self.thumbnail_button.blockSignals(False)
+        if hasattr(self, 'toggle_thumbnail_action'):
+            self.toggle_thumbnail_action.blockSignals(True)
+            self.toggle_thumbnail_action.setChecked(target)
+            self.toggle_thumbnail_action.blockSignals(False)
+
+    def toggle_smart_snap(self, checked):
+        """스마트 스냅 활성화 여부 토글"""
+        if hasattr(self, 'pdf_viewer'):
+            self.pdf_viewer.smart_snap_enabled = checked
+            self.pdf_viewer.active_snap_guides = []
+            self.pdf_viewer.update()
+
+    def load_thumbnails(self):
+        """현재 문서의 페이지 썸네일들을 생성하여 사이드바에 로드"""
+        if not hasattr(self, 'thumbnail_panel'):
+            return
+        lw = self.thumbnail_panel.list_widget
+        lw.blockSignals(True)
+        lw.clear()
+        if not self.pdf_viewer.doc:
+            self.thumbnail_panel.count_lbl.setText("")
+            lw.blockSignals(False)
+            return
+
+        total = len(self.pdf_viewer.doc)
+        self.thumbnail_panel.count_lbl.setText(f"({total})")
+
+        # 1차 아이템 뼈대 등록 (텍스트 번호 및 기본 크기)
+        for i in range(total):
+            item = QListWidgetItem(f"{i + 1}")
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item.setSizeHint(QSize(120, 150))
+            lw.addItem(item)
+        lw.blockSignals(False)
+
+        # 점진적 비동기 썸네일 렌더링 배치 시작
+        self._thumbnail_render_index = 0
+        self._render_next_thumbnail_batch()
+
+    def _render_next_thumbnail_batch(self, batch_size=8):
+        if not self.pdf_viewer.doc or not hasattr(self, 'thumbnail_panel'):
+            return
+        lw = self.thumbnail_panel.list_widget
+        total = len(self.pdf_viewer.doc)
+        start = getattr(self, '_thumbnail_render_index', 0)
+        if start >= total:
+            return
+
+        end = min(start + batch_size, total)
+        for i in range(start, end):
+            try:
+                page = self.pdf_viewer.doc.load_page(i)
+                rect = page.rect
+                scale = 96.0 / max(rect.width, 1.0)
+                pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                qimg = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888)
+                item = lw.item(i)
+                if item:
+                    item.setIcon(QIcon(QPixmap.fromImage(qimg)))
+            except Exception:
+                pass
+
+        self._thumbnail_render_index = end
+        if end < total:
+            QTimer.singleShot(1, self._render_next_thumbnail_batch)
     
     def mark_as_changed(self):
         """변경사항 표시"""
@@ -5225,6 +8018,14 @@ class MainWindow(QMainWindow):
             pass
 
     def open_pdf(self, file_path: Optional[str] = None):
+        if getattr(self, 'current_text_editor', None) is not None:
+            try:
+                if self.current_text_editor.isVisible():
+                    self.current_text_editor.accept()
+            except Exception:
+                pass
+            self.current_text_editor = None
+
         if self.has_changes:
             # 커스텀 메시지박스로 버튼 크기 동일/확대
             msg = QMessageBox(self)
@@ -5292,18 +8093,29 @@ class MainWindow(QMainWindow):
             self._store_zoom_factor()
             self.has_changes = False
 
-            # HWP(아래아한글) 문서 감지
+            # HWP(아래아한글) 문서 감지 고도화
             self.is_hwp_doc = False
             try:
-                meta = doc.metadata
+                meta = doc.metadata or {}
                 producer = meta.get('producer', '').lower()
                 creator = meta.get('creator', '').lower()
-                if 'hancom' in producer or 'hwp' in producer or 'haansoft' in producer or \
-                   'hancom' in creator or 'hwp' in creator or 'haansoft' in creator:
+                if any(k in producer or k in creator for k in ['hancom', 'hwp', 'haansoft']):
                     self.is_hwp_doc = True
+                else:
+                    # 메타데이터가 없는/변환된 문서: 폰트 목록 기반 HWP 감지
+                    hwp_font_indicators = ['hcr', 'h2hdr', 'h2gtr', 'h2mk', 'hygtr', 'hybtr', 'hmk', 'hancom', 'haansoft', 'gulimche', 'batangche']
+                    for page_idx in range(min(len(doc), 5)):
+                        for f_info in doc[page_idx].get_fonts():
+                            fname = (f_info[3] or '').lower()
+                            if any(k in fname for k in hwp_font_indicators):
+                                self.is_hwp_doc = True
+                                break
+                        if self.is_hwp_doc:
+                            break
+                if self.is_hwp_doc:
                     print("HWP(아래아한글) 문서 감지됨: 공백 너비 보정 모드 활성화")
-            except Exception:
-                pass
+            except Exception as e_hwp:
+                print(f"HWP 문서 감지 중 오류: {e_hwp}")
 
             # PDF 폰트 정보 추출
             font_extractor = PdfFontExtractor(doc)
@@ -5341,8 +8153,11 @@ class MainWindow(QMainWindow):
             self.update_undo_redo_buttons()
 
             self.render_page()
+            self.load_thumbnails()
             self.update_page_navigation()
             self._refresh_window_title()
+            fname = os.path.basename(file_path)
+            self.show_status_message(self.t('status_doc_opened', fname=fname, total=len(doc), default=f"문서 열림: {fname} (총 {len(doc)}페이지)"), timeout_ms=3000)
             return True
 
         except Exception as e:
@@ -5357,6 +8172,7 @@ class MainWindow(QMainWindow):
         if not self.current_file_path:
             return self.save_as_pdf()
         
+        self.show_status_message(self.t('progress_saving_pdf', default="PDF 저장 중..."))
         progress = None
         try:
             progress = QProgressDialog(self.t('progress_saving_pdf'), None, 0, 0, self)
@@ -5398,13 +8214,11 @@ class MainWindow(QMainWindow):
                 msg.exec()
             except Exception:
                 QMessageBox.information(self, self.t('title_success'), self.t('save_success_message'))
-            try:
-                self.statusBar().showMessage(self.t('save_success_message'), 3000)
-            except Exception:
-                pass
+            self.show_status_message(self.t('save_success_message', default="문서가 성공적으로 저장되었습니다."), timeout_ms=3000)
             return True
         except Exception as e:
             QMessageBox.critical(self, self.t('title_error'), self.t('save_failed_detail', error=str(e)))
+            self.update_status_mode_message()
             return False
         finally:
             try:
@@ -5426,6 +8240,7 @@ class MainWindow(QMainWindow):
             self, self.t('dialog_save_as'), initial_dir, pdf_filter
         )
         if file_path:
+            self.show_status_message(self.t('progress_saving_pdf', default="PDF 저장 중..."))
             progress = None
             try:
                 progress = QProgressDialog(self.t('progress_saving_pdf'), None, 0, 0, self)
@@ -5445,13 +8260,11 @@ class MainWindow(QMainWindow):
                 self.mark_as_saved()
                 self.setWindowTitle(f"{self.t('app_title')} - {os.path.basename(file_path)}")
                 QMessageBox.information(self, self.t('title_success'), self.t('save_success_message'))
-                try:
-                    self.statusBar().showMessage(self.t('save_success_message'), 3000)
-                except Exception:
-                    pass
+                self.show_status_message(self.t('save_success_message', default="문서가 성공적으로 저장되었습니다."), timeout_ms=3000)
                 return True
             except Exception as e:
                 QMessageBox.critical(self, self.t('title_error'), self.t('save_failed_detail', error=str(e)))
+                self.update_status_mode_message()
                 return False
             finally:
                 try:
@@ -5582,6 +8395,7 @@ class MainWindow(QMainWindow):
                 self.render_page()
                 self.update_undo_redo_buttons()
                 self.mark_as_changed()
+                self.show_status_message(self.t('status_undo_done', default="실행 취소 완료"), timeout_ms=2500)
                 
                 print(f"   - OK 실행 취소 완료")
             else:
@@ -5626,6 +8440,7 @@ class MainWindow(QMainWindow):
                 self.render_page()
                 self.update_undo_redo_buttons()
                 self.mark_as_changed()
+                self.show_status_message(self.t('status_redo_done', default="다시 실행 완료"), timeout_ms=2500)
                 
                 print(f"   - OK 다시 실행 완료")
             else:
@@ -5697,6 +8512,11 @@ class MainWindow(QMainWindow):
         old_factor = self.zoom_factor
         self.zoom_factor = new_factor
         
+        # mouse_pos가 명시되지 않은 경우 뷰포트 중앙을 기준으로 줌
+        if mouse_pos is None and hasattr(self, 'scroll_area') and self.scroll_area:
+            vp = self.scroll_area.viewport()
+            mouse_pos = QPoint(vp.width() // 2, vp.height() // 2)
+
         # 스크롤 위치 조정 계산
         if mouse_pos and hasattr(self, 'scroll_area'):
             h_bar = self.scroll_area.horizontalScrollBar()
@@ -5730,6 +8550,24 @@ class MainWindow(QMainWindow):
         self.render_page()
         self.update_zoom_label()
         self._store_zoom_factor()
+
+    def keyPressEvent(self, event):
+        """스페이스바 등 전역 키 이벤트를 뷰어에 전달하여 Adobe 스타일 핸드툴 즉각 반응"""
+        if event.key() == Qt.Key.Key_Space:
+            if hasattr(self, 'pdf_viewer') and self.pdf_viewer:
+                self.pdf_viewer.keyPressEvent(event)
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        """스페이스바 해제 이벤트 전달"""
+        if event.key() == Qt.Key.Key_Space:
+            if hasattr(self, 'pdf_viewer') and self.pdf_viewer:
+                self.pdf_viewer.keyReleaseEvent(event)
+                event.accept()
+                return
+        super().keyReleaseEvent(event)
 
     def render_page(self, page_to_render=None):
         if not self.pdf_viewer.doc: 
@@ -5771,6 +8609,70 @@ class MainWindow(QMainWindow):
             self.zoom_label.setText(self.t('zoom_label_template', percent=percent))
         except Exception:
             self.zoom_label.setText(self.t('zoom_label_template', percent='-'))
+
+    def update_status_mode_message(self):
+        """현재 모드 및 상태에 따른 기본 안내 메시지를 상태바에 표시"""
+        if not hasattr(self, 'status_message_label') or not self.status_message_label:
+            return
+        
+        # 1. 문서가 로드되지 않은 상태
+        viewer = getattr(self, 'pdf_viewer', None)
+        if not viewer or not getattr(viewer, 'doc', None):
+            self.status_message_label.setText(self.t('status_ready_no_doc', default="문서를 열어주세요."))
+            return
+
+        # 2. 텍스트 위치 조정 모드
+        if getattr(viewer, 'text_adjustment_mode', False) or getattr(viewer, 'quick_adjustment_mode', False):
+            self.status_message_label.setText(self.t('status_mode_text_adjust', default="텍스트 위치 조정 모드: 방향키로 이동, ESC/Enter로 완료"))
+            return
+
+        # 3. 이미지 조작 모드 (선택된 이미지가 있을 때)
+        if getattr(viewer, 'selected_image_index', None) is not None:
+            self.status_message_label.setText(self.t('status_mode_image', default="이미지 조작 모드: 드래그하여 이동, 모서리 핸들로 크기 조절 (Delete: 삭제)"))
+            return
+
+        # 4. 패치 / 지우개 모드 버튼이 활성화된 상태
+        if getattr(self, 'patch_precise_mode', False):
+            if getattr(self, 'patch_only_mode', False):
+                self.status_message_label.setText(self.t('status_mode_eraser', default="지우개 모드: 영역을 드래그하여 흰색으로 지웁니다"))
+            else:
+                self.status_message_label.setText(self.t('status_mode_patch', default="패치 모드: 편집할 영역을 드래그하여 텍스트를 수정합니다"))
+            return
+
+        # 5. 일반 모드
+        self.status_message_label.setText(self.t('status_mode_general', default="일반 모드 (Ctrl+드래그: 패치, Shift+드래그: 지우개, Space+드래그: 화면이동)"))
+
+    def show_status_message(self, message: str, timeout_ms: int = 0):
+        """상태바 중앙에 메시지 표시 및 타이머 지원"""
+        if not hasattr(self, 'status_message_label') or not self.status_message_label:
+            return
+        if hasattr(self, '_status_timer') and self._status_timer:
+            try:
+                self._status_timer.stop()
+            except Exception:
+                pass
+            self._status_timer = None
+        
+        self.status_message_label.setText(message)
+        if timeout_ms > 0:
+            self._status_timer = QTimer(self)
+            self._status_timer.setSingleShot(True)
+            self._status_timer.timeout.connect(self.update_status_mode_message)
+            self._status_timer.start(timeout_ms)
+
+    def _on_status_bar_message_changed(self, message: str):
+        """QStatusBar의 messageChanged 시그널을 커스텀 상태 라벨에 반영"""
+        if message:
+            if hasattr(self, '_status_timer') and self._status_timer:
+                try:
+                    self._status_timer.stop()
+                except Exception:
+                    pass
+                self._status_timer = None
+            if hasattr(self, 'status_message_label') and self.status_message_label:
+                self.status_message_label.setText(message)
+        else:
+            self.update_status_mode_message()
 
     def _rgbf_from_color_int(self, color_int):
         """정수 색상(0xRRGGBB)을 (r,g,b) 0.0~1.0 튜플로 변환"""
@@ -5970,15 +8872,18 @@ class MainWindow(QMainWindow):
         """현재 레이어 오버레이를 PDF 콘텐츠로 반영 (진행메시지/폰트로그 포함)
         정합성 극대화를 위해 3단계(패치 -> 텍스트 -> 스타일/밑줄) 순서로 페이지별 처리함.
         """
-        if not hasattr(self.pdf_viewer, 'text_overlays') or not self.pdf_viewer.text_overlays:
+        has_text = hasattr(self.pdf_viewer, 'text_overlays') and any(self.pdf_viewer.text_overlays.values())
+        has_images = hasattr(self.pdf_viewer, 'image_overlays') and any(self.pdf_viewer.image_overlays.values())
+        if not has_text and not has_images:
             return
 
-        print("\n오버레이 플래튼 시작 (3단계 레이어 방식)")
+        print("\n오버레이 플래튼 시작 (레이어 및 이미지 반영)")
         
         # 모든 오버레이의 이미지 플래튼 상태 초기화 (폴백 제어용)
-        for v in self.pdf_viewer.text_overlays.values():
-            for ov in v:
-                ov.image_flattened = False
+        if hasattr(self.pdf_viewer, 'text_overlays'):
+            for v in self.pdf_viewer.text_overlays.values():
+                for ov in v:
+                    ov.image_flattened = False
 
         self._set_progress(progress, self.t('progress_preparing_fonts'))
         
@@ -5988,8 +8893,7 @@ class MainWindow(QMainWindow):
             total_pages = 0
         
         # 진행 단계 총량 추산
-        overlay_count = sum(len(v) for v in self.pdf_viewer.text_overlays.values())
-        self._init_progress(progress, total_pages * 3) # 페이지당 3단계
+        self._init_progress(progress, total_pages * 4) # 페이지당 4단계 (패치, 텍스트, 밑줄, 이미지)
 
         # 0) 사전 준비: 전역 폰트 임베딩 (생략 가능하나 안정성을 위해 유지)
         self._set_progress(progress, self.t('progress_preparing_fonts'))
@@ -5998,17 +8902,29 @@ class MainWindow(QMainWindow):
         for page_num in range(total_pages):
             try:
                 page = self.pdf_viewer.doc.load_page(page_num)
-                overlays = self.pdf_viewer.text_overlays.get(page_num, [])
-                patches = self.pdf_viewer.background_patches.get(page_num, [])
+                overlays = self.pdf_viewer.text_overlays.get(page_num, []) if hasattr(self.pdf_viewer, 'text_overlays') else []
+                patches = self.pdf_viewer.background_patches.get(page_num, []) if hasattr(self.pdf_viewer, 'background_patches') else []
+                images = self.pdf_viewer.image_overlays.get(page_num, []) if hasattr(self.pdf_viewer, 'image_overlays') else []
                 
-                # --- [1단계: 모든 배경 패치] ---
+                # --- [1단계: 모든 배경 패치 (보안 영구 삭제 True Redaction 적용)] ---
+                has_redact = False
                 for patch in patches:
                     try:
                         bbox = patch.get('bbox')
-                        color = patch.get('color')
-                        if bbox and color:
-                            page.draw_rect(bbox, color=color, fill=color, width=0)
-                    except Exception: pass
+                        color = patch.get('color', (1.0, 1.0, 1.0))
+                        if bbox:
+                            page.add_redact_annot(bbox, fill=color)
+                            has_redact = True
+                    except Exception:
+                        try:
+                            if bbox and color:
+                                page.draw_rect(bbox, color=color, fill=color, width=0)
+                        except Exception: pass
+                if has_redact:
+                    try:
+                        page.apply_redactions()
+                    except Exception as e:
+                        print(f"Redaction apply fallback: {e}")
                 self._step_progress(progress, 1)
 
                 # --- [2단계: 모든 텍스트 본문] ---
@@ -6026,12 +8942,38 @@ class MainWindow(QMainWindow):
                     ov.flattened = True # 최종 완료 처리
                 self._step_progress(progress, 1)
 
+                # --- [4단계: 이미지/서명 오버레이 삽입] ---
+                for img_ov in images:
+                    if not img_ov.visible or not os.path.exists(img_ov.image_path):
+                        continue
+                    try:
+                        if img_ov.opacity < 0.99:
+                            # 투명도 적용: QImage를 통해 알파 채널 적용 후 PNG 바이트로 삽입
+                            qimg = QImage(img_ov.image_path)
+                            if not qimg.isNull():
+                                qimg = qimg.convertToFormat(QImage.Format.Format_ARGB32)
+                                p = QPainter(qimg)
+                                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+                                p.fillRect(qimg.rect(), QColor(0, 0, 0, int(round(img_ov.opacity * 255))))
+                                p.end()
+                                ba = QByteArray()
+                                buf = QBuffer(ba)
+                                buf.open(QBuffer.OpenModeFlag.WriteOnly)
+                                qimg.save(buf, "PNG")
+                                page.insert_image(img_ov.bbox, stream=ba.data(), overlay=True)
+                        else:
+                            page.insert_image(img_ov.bbox, filename=img_ov.image_path, overlay=True)
+                        img_ov.flattened = True
+                    except Exception as e_img:
+                        print(f"이미지 플래튼 오류: {e_img}")
+                self._step_progress(progress, 1)
+
             except Exception as pe:
                 print(f"  X 페이지 {page_num} 플래튼 중 오류: {pe}")
 
         # [최적화] 플래튼 작업은 문서를 직접 수정하므로 변경 플래그 세팅
         self.mark_doc_modified()
-        print("OK 모든 오버레이 플래튼 완료")
+        print("OK 모든 오버레이 및 이미지 플래튼 완료")
 
     def _do_insert_text(self, page, ov, font_ref, s_mat, font_args, baseline_y, text_x, line_height_pt, tracking_percent, stretch, fm_measure, is_hwp, need_synth_bold):
         """실제 PDF 페이지에 텍스트를 글자 단위로 삽입하는 핵심 로직 (재시도 지원용)"""
@@ -6046,10 +8988,14 @@ class MainWindow(QMainWindow):
             # 200배 정밀도 측정이므로 결과 보정
             precision_multiplier = 200.0
             
+            hwp_std_space = font_size * 0.50
             for ch in line:
                 ch_w_raw = fm_measure.horizontalAdvance(ch) / precision_multiplier
-                ch_w_stretched = ch_w_raw * stretch
-                advance = ch_w_stretched * 1.5 if (ch == ' ' and is_hwp) else ch_w_stretched
+                if ch == ' ' and is_hwp:
+                    ch_w_eff = max(ch_w_raw, hwp_std_space)
+                else:
+                    ch_w_eff = ch_w_raw
+                advance = ch_w_eff * stretch
                 
                 if ch.strip():
                     if need_synth_bold:
@@ -6154,6 +9100,8 @@ class MainWindow(QMainWindow):
             
             # [정합성 극대화] UI와 동일한 너비 측정을 위해 MainWindow 표준 메트릭 도구 사용
             precision_multiplier = 200.0
+            qfont_measure = QFont(chosen_name)
+            qfont_measure.setPixelSize(int(round(font_size * precision_multiplier)))
             fm_measure = self._get_standard_metrics(qfont_measure, precision_multiplier)
 
             # [스타일 판단: UI와 동일하게]
@@ -6227,123 +9175,178 @@ class MainWindow(QMainWindow):
             return False
 
     def get_precise_background_color(self, page, bbox):
-        """선택된 텍스트 바로 인접 픽셀만 집중 샘플링하여 배경색 검출 (백업01 로직)"""
+        """외곽선, 표 테두리선, 밑줄 및 인접 개체 간섭을 완벽히 배제하고
+        텍스트의 진짜 배경색을 정밀 검출하는 고정밀 다중 영역 분석 알고리즘"""
         import time
-        detection_id = int(time.time() * 1000) % 10000  # 고유 ID 생성
-        
-        print(f"\n=== 배경색 검출 #{detection_id} 시작 ===")
+        from collections import Counter
+        detection_id = int(time.time() * 1000) % 10000
+
+        print(f"\n=== 정밀 배경색 검출 #{detection_id} 시작 ===")
         print(f"   현재 텍스트 bbox: ({bbox.x0:.1f}, {bbox.y0:.1f}) → ({bbox.x1:.1f}, {bbox.y1:.1f})")
         print(f"   텍스트 크기: {bbox.width:.1f} x {bbox.height:.1f}pt")
-        
+
         try:
-            # 1. 선택된 텍스트 크기 기반 최소 여백 계산 (좁은 범위)
-            text_width = bbox.width
-            text_height = bbox.height
-            
-            # 매우 작은 마진으로 텍스트 바로 인접 픽셀만 대상 (문서 전체 샘플링 완전 방지)
-            margin_h = min(2, max(1, text_width * 0.01))   # 가로: 최대 2px, 최소 1px  
-            margin_v = min(2, max(1, text_height * 0.015)) # 세로: 최대 2px, 최소 1px
-            
-            print(f"   텍스트 주변부 여백: 수평={margin_h:.1f}px, 수직={margin_v:.1f}px")
-            
-            # 2. 텍스트 바로 인접한 4방향 영역만 정의 (집중 샘플링)
-            sample_regions = [
-                # 상단 바로 위 (텍스트 너비만큼)
-                fitz.Rect(bbox.x0, bbox.y0 - margin_v, bbox.x1, bbox.y0),
-                # 하단 바로 아래 (텍스트 너비만큼)
-                fitz.Rect(bbox.x0, bbox.y1, bbox.x1, bbox.y1 + margin_v),
-                # 좌측 바로 옆 (텍스트 높이만큼)
-                fitz.Rect(bbox.x0 - margin_h, bbox.y0, bbox.x0, bbox.y1),
-                # 우측 바로 옆 (텍스트 높이만큼)
-                fitz.Rect(bbox.x1, bbox.y0, bbox.x1 + margin_h, bbox.y1),
-            ]
-            
-            all_colors = []
-            valid_regions = 0
-            region_weights = [1.2, 1.2, 1.0, 1.0]  # 상하 영역에 약간 더 높은 가중치
-            
-            for i, region in enumerate(sample_regions):
-                try:
-                    # 페이지 범위 내로 제한
-                    clipped_region = region & page.rect
-                    if clipped_region.get_area() < 0.5:  # 너무 작은 영역은 스킵
-                        continue
-                    
-                    # 바로 인접 픽셀만 고해상도로 추출
-                    pix = page.get_pixmap(clip=clipped_region, dpi=600)
-                    
-                    if pix.n >= 3 and len(pix.samples) > 0:
-                        samples = pix.samples
-                        region_colors = []
-                        
-                        # RGB 값 추출 (알파 채널 제외)
-                        for j in range(0, len(samples) - 2, pix.n):
-                            rgb = (samples[j], samples[j+1], samples[j+2])
-                            # 너무 어둡거나 밝은 픽셀 필터링 (노이즈 제거)
-                            brightness = sum(rgb) / 3
-                            if 10 <= brightness <= 245:  # 극단값 제외
-                                region_colors.append(rgb)
-                        
-                        if region_colors:
-                            # 영역별 가중치 적용 (상하단이 더 안정적)
-                            weight = region_weights[i]
-                            weighted_colors = region_colors * max(1, int(weight * 8))
-                            all_colors.extend(weighted_colors)
-                            valid_regions += 1
-                            
-                            direction = ['상단', '하단', '좌측', '우측'][i]
-                            avg_color = tuple(sum(c[k] for c in region_colors) // len(region_colors) for k in range(3))
-                            print(f"   위치 {direction}: {len(region_colors)}픽셀, 평균RGB{avg_color}, 가중치{weight}")
-                    
-                except Exception as region_error:
-                    print(f"   경고 영역 {i+1} 샘플링 실패: {region_error}")
+            # 1. 텍스트 주변 여백(확장 영역) 계산
+            # 상하좌우로 2~5pt 정도 여백을 두어 단일 고해상도 픽스맵 렌더링
+            margin_h = max(2.0, min(5.0, bbox.width * 0.04))
+            margin_v = max(2.0, min(5.0, bbox.height * 0.15))
+
+            sample_rect = fitz.Rect(
+                bbox.x0 - margin_h,
+                bbox.y0 - margin_v,
+                bbox.x1 + margin_h,
+                bbox.y1 + margin_v
+            ) & page.rect
+
+            if sample_rect.get_area() < 1.0:
+                return (1.0, 1.0, 1.0)
+
+            # 단 1회의 픽스맵 캡처 (dpi=150: 약 1~2ms로 극도로 빠르면서 정밀)
+            pix = page.get_pixmap(clip=sample_rect, dpi=150)
+            if pix.n < 3 or not pix.samples:
+                return (1.0, 1.0, 1.0)
+
+            img_w = pix.width
+            img_h = pix.height
+            samples = pix.samples
+            bytes_per_pixel = pix.n
+
+            # sample_rect 내에서 원본 bbox의 픽셀 좌표 계산
+            scale_x = img_w / sample_rect.width
+            scale_y = img_h / sample_rect.height
+            bx0 = max(0, min(img_w - 1, int(round((bbox.x0 - sample_rect.x0) * scale_x))))
+            by0 = max(0, min(img_h - 1, int(round((bbox.y0 - sample_rect.y0) * scale_y))))
+            bx1 = max(bx0 + 1, min(img_w, int(round((bbox.x1 - sample_rect.x0) * scale_x))))
+            by1 = max(by0 + 1, min(img_h, int(round((bbox.y1 - sample_rect.y0) * scale_y))))
+
+            # 색상 양자화 유틸리티 (RGB를 4단위로 묶어 미세 노이즈 흡수)
+            def _quantize(r, g, b):
+                return (r // 4 * 4, g // 4 * 4, b // 4 * 4)
+
+            # 색상 거리 (Chebyshev/Max distance)
+            def _color_dist(c1, c2):
+                return max(abs(c1[0] - c2[0]), abs(c1[1] - c2[1]), abs(c1[2] - c2[2]))
+
+            # 각 영역별 픽셀 수집
+            def _get_pixel(x, y):
+                idx = (y * img_w + x) * bytes_per_pixel
+                return (samples[idx], samples[idx+1], samples[idx+2])
+
+            inner_pixels = []
+            for y in range(by0, by1):
+                for x in range(bx0, bx1):
+                    inner_pixels.append(_get_pixel(x, y))
+
+            top_pixels = [_get_pixel(x, y) for y in range(0, by0) for x in range(bx0, bx1)]
+            bottom_pixels = [_get_pixel(x, y) for y in range(by1, img_h) for x in range(bx0, bx1)]
+            left_pixels = [_get_pixel(x, y) for y in range(by0, by1) for x in range(0, bx0)]
+            right_pixels = [_get_pixel(x, y) for y in range(by0, by1) for x in range(bx1, img_w)]
+
+            # 2. 내부 영역(Inner) 분석:
+            # 텍스트 바운딩 박스 내부에서 글자 획(보통 15~35%)을 제외한 가장 넓은 영역이 '진짜 내부 배경'
+            inner_quantized = [_quantize(*p) for p in inner_pixels]
+            inner_counts = Counter(inner_quantized)
+            inner_total = len(inner_quantized)
+
+            inner_dominant = None
+            inner_ratio = 0.0
+            if inner_total > 0 and inner_counts:
+                top_inner = inner_counts.most_common(3)
+                inner_dominant, inner_dom_count = top_inner[0]
+                inner_ratio = inner_dom_count / inner_total
+                print(f"   내부 최빈 색상: RGB{inner_dominant} ({inner_ratio*100:.1f}%, {inner_dom_count}/{inner_total}px)")
+
+            # 3. 4방향 외부 영역 분석 및 '외곽선/인접 개체 이상치(Outlier)' 배제
+            outer_regions = {
+                '상단': top_pixels,
+                '하단': bottom_pixels,
+                '좌측': left_pixels,
+                '우측': right_pixels
+            }
+
+            valid_outer_colors = []
+            dir_dominant_map = {}
+
+            for d_name, p_list in outer_regions.items():
+                if not p_list:
                     continue
+                q_list = [_quantize(*p) for p in p_list]
+                c_counts = Counter(q_list)
+                dom_color, dom_count = c_counts.most_common(1)[0]
+                dom_ratio = dom_count / len(q_list)
+                dir_dominant_map[d_name] = (dom_color, dom_ratio, p_list)
+                print(f"   방향 [{d_name}]: {len(p_list)}px, 최빈 RGB{dom_color} ({dom_ratio*100:.1f}%)")
+
+            # 4. 이상치 방향(외곽선/테두리/인접 개체) 판정:
+            # - 만약 어떤 방향의 최빈색이 내부 최빈색과 거리가 28 이상 벌어지고,
+            #   다른 방향들과도 현저히 다르다면 해당 방향은 "외곽선이나 다른 개체에 걸친 방향"임!
+            accepted_directions = []
+            for d_name, (dom_c, dom_r, p_list) in dir_dominant_map.items():
+                is_outlier = False
+                if inner_dominant is not None:
+                    dist_to_inner = _color_dist(dom_c, inner_dominant)
+                    # 만약 내부 최빈색과 거리가 멀다면:
+                    if dist_to_inner > 28:
+                        # 다른 방향들과의 일치도 검사
+                        agreement_with_others = sum(
+                            1 for other_name, (oc, _, _) in dir_dominant_map.items()
+                            if other_name != d_name and _color_dist(dom_c, oc) <= 20
+                        )
+                        # 다른 방향들도 동의하지 않거나, 내부 최빈색이 충분히 우세한 경우
+                        if agreement_with_others == 0 or (inner_ratio >= 0.30 and dist_to_inner > 35):
+                            is_outlier = True
+                            print(f"   🚫 [{d_name}] 방향은 외곽선/인접 개체로 판정되어 배제됨! (RGB{dom_c}, 내부와의 거리={dist_to_inner})")
+
+                if not is_outlier:
+                    accepted_directions.append(d_name)
+                    valid_outer_colors.extend([_quantize(*p) for p in p_list])
+
+            print(f"   채택된 안전한 방향들: {accepted_directions}")
+
+            # 5. 최종 배경색 판정:
+            candidate_pool = []
             
-            if all_colors and valid_regions >= 2:  # 최소 2개 방향에서 성공
-                # 3. 색상 빈도 분석 - 유사한 색상끼리 그룹핑
-                color_counts = Counter(all_colors)
-                total_pixels = len(all_colors)
+            # 내부 최빈색 가중 추가 (내부 배경은 글자 외의 픽셀이므로 높은 신뢰도)
+            if inner_dominant is not None:
+                for c, cnt in inner_counts.most_common(3):
+                    ratio = cnt / inner_total
+                    if ratio >= 0.25 or (c == inner_dominant and ratio >= 0.15):
+                        candidate_pool.extend([c] * int(cnt * 1.5))
+
+            # 채택된 외곽 픽셀 추가
+            candidate_pool.extend(valid_outer_colors)
+
+            if candidate_pool:
+                final_counts = Counter(candidate_pool)
+                best_color, best_votes = final_counts.most_common(1)[0]
                 
-                print(f"   총 {total_pixels}개 유효 픽셀, {valid_regions}/4개 방향 샘플링 성공")
-                
-                # 가장 빈번한 색상들 분석
-                top_colors = color_counts.most_common(5)
-                print(f"    인접 픽셀 상위 색상:")
-                
-                for idx, (color, count) in enumerate(top_colors[:3]):
-                    percentage = (count / total_pixels) * 100
-                    print(f"     {idx+1}. RGB{color} - {count}회 ({percentage:.1f}%)")
-                
-                # 4. 최우선 색상 선택 및 엄격한 신뢰도 검증
-                best_color, best_count = top_colors[0]
-                best_percentage = (best_count / total_pixels) * 100
-                
-                # 높은 신뢰도: 40% 이상 점유 & 최소 픽셀 수 확보
-                if best_percentage >= 40 and best_count >= 5:
-                    result_color = (
-                        best_color[0] / 255.0,
-                        best_color[1] / 255.0,  
-                        best_color[2] / 255.0
-                    )
-                    
-                    print(f"   OK 배경색 검출 #{detection_id} 결과: RGB{best_color} → {result_color}")
-                    print(f"       신뢰도: {best_percentage:.1f}% ({best_count}픽셀)")
-                    print(f"   === 배경색 검출 #{detection_id} 완료 ===\n")
-                    return result_color
+                # best_color에 해당하는 원본 픽셀들의 실제 평균 RGB 계산 (자연스러운 색상 복원)
+                matching_orig_pixels = []
+                all_pixels_to_check = inner_pixels + [p for d in accepted_directions for p in outer_regions[d]]
+                for p in all_pixels_to_check:
+                    if _color_dist(_quantize(*p), best_color) <= 8:
+                        matching_orig_pixels.append(p)
+
+                if matching_orig_pixels:
+                    avg_r = sum(p[0] for p in matching_orig_pixels) / len(matching_orig_pixels)
+                    avg_g = sum(p[1] for p in matching_orig_pixels) / len(matching_orig_pixels)
+                    avg_b = sum(p[2] for p in matching_orig_pixels) / len(matching_orig_pixels)
                 else:
-                    print(f"   경고 신뢰도 부족: {best_percentage:.1f}% < 40% 또는 픽셀수 부족 ({best_count}개)")
-            else:
-                print(f"   X 샘플링 실패: 유효 영역 {valid_regions}/4개 부족")
-                    
+                    avg_r, avg_g, avg_b = best_color
+
+                result_color = (avg_r / 255.0, avg_g / 255.0, avg_b / 255.0)
+                print(f"   ✅ 최종 검출된 배경색: RGB({int(round(avg_r))}, {int(round(avg_g))}, {int(round(avg_b))}) → {result_color}")
+                print(f"=== 정밀 배경색 검출 #{detection_id} 완료 ===\n")
+                return result_color
+
         except Exception as e:
             print(f"   X 배경색 검출 오류: {e}")
             import traceback
             traceback.print_exc()
-        
-        # 실패 시 기본 순백색 (회색 대신 흰색)
-        fallback_color = (1.0, 1.0, 1.0)  # 순백색으로 변경
-        print(f"   배경색 검출 #{detection_id} 실패 - 순백색 Fallback 사용: {fallback_color}")
-        print(f"   === 배경색 검출 #{detection_id} 완료 (Fallback) ===\n")
+
+        # 실패 시 기본 순백색
+        fallback_color = (1.0, 1.0, 1.0)
+        print(f"   배경색 검출 실패 - 순백색 Fallback 사용: {fallback_color}\n")
         return fallback_color
 
     def get_optimal_cover_rect(self, original_bbox, text_metrics):
@@ -6607,6 +9610,172 @@ class MainWindow(QMainWindow):
         except Exception as verify_error:
             print(f"   패치 품질 검증 생략: {verify_error}")
 
+    def calculate_auto_stretch_and_tracking(self, span, chosen_font_name=None):
+        """[HWP 정밀 연동] 원본 텍스트블록의 문자 지오메트리 및 길이를 분석하여
+        한글(HWP) 문서에서 빈번히 조절되는 장평(stretch)과 자간(tracking)을 정밀 자동 계산.
+        반환값: (stretch: float, tracking: float)
+        """
+        try:
+            chars = span.get('chars', [])
+            sz = float(span.get('size', 12.0))
+            if sz <= 0:
+                return 1.0, 0.0
+
+            raw_text = span.get('text', '')
+            eff_text = raw_text.rstrip(' ')
+
+            # [방어로직] PUA 특수문자 및 선두 불릿 제외 (정밀 장평/자간 측정 보장)
+            while eff_text and (is_pua_char(eff_text[0]) or eff_text[0] in BULLET_CHARS or eff_text[0].isspace()):
+                eff_text = eff_text[1:]
+            eff_text = ''.join(c for c in eff_text if not is_pua_char(c))
+            
+            active_chars = [c for c in chars if not is_pua_char(c.get('c', ''))] if chars else []
+            while active_chars and (is_pua_char(active_chars[0].get('c', '')) or active_chars[0].get('c', '') in BULLET_CHARS or active_chars[0].get('c', '').isspace() or is_symbol_font(active_chars[0].get('font', ''))):
+                active_chars = active_chars[1:]
+
+            # 1단계: chars 지오메트리 직접 분석 (가장 정밀)
+            is_vert = span.get('is_vertical', False) or (active_chars and any(abs(c.get('dir', (1.0, 0.0))[1]) > abs(c.get('dir', (1.0, 0.0))[0]) for c in active_chars))
+            hangul_chars = [c for c in active_chars if '가' <= c.get('c', '') <= '힣']
+            
+            calc_stretch = None
+            if hangul_chars:
+                stretches = []
+                for c in hangul_chars:
+                    b = c.get('bbox', [0, 0, 0, 0])
+                    gw = (b[3] - b[1]) if is_vert else (b[2] - b[0])
+                    r = gw / sz
+                    # 유효한 한글 장평 범위 (50% ~ 200%)
+                    if 0.50 <= r <= 2.00:
+                        stretches.append(r)
+                if stretches:
+                    avg_s = sum(stretches) / len(stretches)
+                    # 100% 근방(±1.5%)은 표준 100%로 정규화
+                    if abs(avg_s - 1.0) < 0.015:
+                        calc_stretch = 1.0
+                    else:
+                        calc_stretch = round(avg_s, 2)
+                        
+            calc_tracking = None
+            if active_chars:
+                trackings = []
+                eff_stretch = calc_stretch if calc_stretch is not None else 1.0
+                for idx in range(len(active_chars) - 1):
+                    c1 = active_chars[idx]
+                    c2 = active_chars[idx + 1]
+                    ch1 = c1.get('c', '')
+                    ch2 = c2.get('c', '')
+                    # 공백이나 제어문자가 아닌 인접 글자 간격 분석
+                    if ch1.strip() and ch2.strip() and c1.get('origin') and c2.get('origin'):
+                        adv = abs(c2['origin'][1] - c1['origin'][1]) if is_vert else (c2['origin'][0] - c1['origin'][0])
+                        ref_w = (sz * eff_stretch) if ('가' <= ch1 <= '힣') else ((c1['bbox'][3] - c1['bbox'][1]) if is_vert else (c1['bbox'][2] - c1['bbox'][0]))
+                        if ref_w > 0:
+                            t = ((adv / ref_w) - 1.0) * 100.0
+                            if -30.0 <= t <= 50.0:
+                                trackings.append(t)
+                if trackings:
+                    avg_t = sum(trackings) / len(trackings)
+                    if abs(avg_t) < 0.4:
+                        calc_tracking = 0.0
+                    else:
+                        calc_tracking = round(avg_t, 1)
+
+            # 2단계: 전체 가로폭 비율 분석 및 정밀 보정
+            orig_bbox_obj = span.get('original_bbox') or span.get('bbox')
+            orig_bbox = fitz.Rect(orig_bbox_obj) if orig_bbox_obj else None
+            
+            # 유효 가로폭 산출: active_chars가 있는 경우 실제 본문 첫 글자부터 마지막 글자까지의 가로폭을 기준으로 산출
+            if orig_bbox and active_chars:
+                first_c = active_chars[0]
+                last_c = active_chars[-1]
+                eff_orig_w = max(0.0, last_c['bbox'][2] - first_c['bbox'][0])
+            else:
+                eff_orig_w = orig_bbox.width if orig_bbox else 0.0
+            
+            if eff_orig_w > 0 and eff_text:
+                if not hasattr(self, 'font_manager'):
+                    self.font_manager = SystemFontManager()
+                font_name = chosen_font_name or self.font_manager.find_best_font_match(span.get('font', '')) or 'Arial'
+                
+                from PySide6.QtGui import QFont, QFontMetricsF, QImage
+                dummy = QImage(1, 1, QImage.Format.Format_Mono)
+                dpm_72 = int(72 / 0.0254)
+                dummy.setDotsPerMeterX(dpm_72)
+                dummy.setDotsPerMeterY(dpm_72)
+                
+                qf = QFont(font_name)
+                precision_multiplier = 200.0
+                qf.setPixelSize(int(round(sz * precision_multiplier)))
+                qf.setKerning(False)
+                fm = QFontMetricsF(qf, dummy)
+                
+                is_hwp = bool(getattr(self, 'is_hwp_doc', False) or span.get('hwp_space_mode', False))
+                hwp_space_px = sz * precision_multiplier * 0.50
+                nom_w = 0.0
+                for ch in eff_text:
+                    cw = fm.horizontalAdvance(ch)
+                    if ch == ' ' and is_hwp:
+                        nom_w += max(cw, hwp_space_px)
+                    else:
+                        nom_w += cw
+                nom_w /= precision_multiplier
+                
+                if nom_w > 0:
+                    # 한글 폰트의 전각 비율(Em Ratio) 분석
+                    has_hangul = any('가' <= c <= '힣' for c in eff_text)
+                    if has_hangul and active_chars:
+                        hangul_bboxes = [c['bbox'][2] - c['bbox'][0] for c in active_chars if '가' <= c.get('c', '') <= '힣']
+                        orig_hangul_em = (sum(hangul_bboxes) / (len(hangul_bboxes) * sz)) if hangul_bboxes else 1.0
+                    else:
+                        orig_hangul_em = 1.0
+
+                    if has_hangul:
+                        system_hangul_em = fm.horizontalAdvance('가') / precision_multiplier / sz
+                    else:
+                        system_hangul_em = 1.0
+
+                    # 시스템 폰트와 원본 글자 자체의 형상(전각 너비) 차이 보정 (장평 Stretch)
+                    if has_hangul and system_hangul_em > 0 and 0.5 <= orig_hangul_em <= 2.0:
+                        font_glyph_ratio = orig_hangul_em / system_hangul_em
+                        base_stretch = 1.0 if abs(font_glyph_ratio - 1.0) < 0.02 else round(font_glyph_ratio, 2)
+                    else:
+                        base_stretch = calc_stretch if calc_stretch is not None else 1.0
+
+                    nom_w_stretched = nom_w * base_stretch
+                    rem_ratio = eff_orig_w / nom_w_stretched if nom_w_stretched > 0 else 1.0
+                    
+                    cur_s = base_stretch
+                    cur_t = calc_tracking if calc_tracking is not None else 0.0
+                    est_w = nom_w * cur_s * (1.0 + cur_t / 100.0)
+                    
+                    # 1단계 결과와 실제 원본 폭의 오차가 2% 이상 발생하면 전체 폭 비율 기반으로 재보정
+                    needs_width_adjustment = (calc_stretch is None or calc_tracking is None or abs(eff_orig_w - est_w) > eff_orig_w * 0.02)
+                    
+                    if needs_width_adjustment:
+                        calc_stretch = base_stretch
+                        if 0.985 <= rem_ratio <= 1.015:
+                            calc_tracking = 0.0
+                        elif 0.70 <= rem_ratio < 0.985:
+                            calc_tracking = round((rem_ratio - 1.0) * 100.0, 1)
+                        elif 1.015 < rem_ratio <= 1.50:
+                            calc_tracking = round((rem_ratio - 1.0) * 100.0, 1)
+                        elif rem_ratio > 1.50:
+                            calc_tracking = 50.0
+                            calc_stretch = round(base_stretch * (rem_ratio / 1.50), 2)
+                        else: # rem_ratio < 0.70
+                            calc_tracking = -30.0
+                            calc_stretch = round(base_stretch * (rem_ratio / 0.70), 2)
+
+            final_stretch = calc_stretch if calc_stretch is not None else 1.0
+            final_tracking = calc_tracking if calc_tracking is not None else 0.0
+            # 안전 범위 제한
+            final_stretch = max(0.5, min(2.0, final_stretch))
+            final_tracking = max(-50.0, min(50.0, final_tracking))
+            print(f"[AutoLayout] 자동 계산 결과: stretch={final_stretch*100:.1f}%, tracking={final_tracking:+.1f}% ('{eff_text[:20]}')")
+            return final_stretch, final_tracking
+        except Exception as e:
+            print(f"[AutoLayout] 자동 장평/자간 계산 중 오류: {e}")
+            return 1.0, 0.0
+
     def insert_overlay_text(self, page, span, new_values):
         """수정된 텍스트를 레이어 방식 오버레이로 삽입 (완전한 편집창 연계)"""
         try:
@@ -6831,7 +10000,6 @@ class MainWindow(QMainWindow):
                 qf.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
                 qf.setStyleStrategy(QFont.StyleStrategy.ForceOutline | QFont.StyleStrategy.PreferAntialias)
                 qf.setKerning(False)
-                qf.setStretch(int(max(1, min(400, new_values.get('stretch', 1.0) * 100))))
                 if edit_flags & 16: qf.setBold(True)
                 if edit_flags & 2: qf.setItalic(True)
                 fm = QFontMetricsF(qf, dummy)
@@ -6840,20 +10008,24 @@ class MainWindow(QMainWindow):
                 is_hwp_mode = bool(new_values.get('hwp_space_mode', False))
                 
                 calc_max_w = 0
-                lines_list = text_to_insert.splitlines()
+                lines_list = text_to_insert.splitlines() if text_to_insert else [""]
+                hwp_std_space = float(font_size) * precision_multiplier * 0.50
                 for line in lines_list:
-                    if is_hwp_mode:
-                        lw = 0
-                        for ch in line:
-                            cw = fm.horizontalAdvance(ch)
-                            lw += (cw * 1.5 if ch == ' ' else cw) * t_ratio
-                    else:
-                        lw = fm.horizontalAdvance(line) * t_ratio
+                    lw = 0
+                    for ch in line:
+                        cw = fm.horizontalAdvance(ch)
+                        if ch == ' ' and is_hwp_mode:
+                            cw_eff = max(cw, hwp_std_space)
+                        else:
+                            cw_eff = cw
+                        lw += cw_eff * t_ratio
                     calc_max_w = max(calc_max_w, lw)
                 
-                # 결과값을 다시 100으로 나누어 원래 스케일로 복원
+                # 결과값을 다시 200(precision_multiplier)으로 나누어 원래 스케일로 복원
                 calc_max_w /= precision_multiplier
-                calc_h = len(lines_list) * (font_size * height_ratio)
+                calc_max_w *= float(new_values.get('stretch', 1.0) or 1.0)
+                calc_max_w = max(calc_max_w, 2.0)
+                calc_h = max(len(lines_list), 1) * (font_size * height_ratio)
                 
                 # [개선] 패치 모드(텍스트가 없던 영역에 새로 생성)에서만 Y축 중앙 배치 로직 적용
                 if not existing_overlay and source_bbox and not span.get('text'):
@@ -6867,9 +10039,18 @@ class MainWindow(QMainWindow):
                     origin = [source_bbox.x0, origin_y]
                     print(f"   [Vertical Center] 패치 영역 중앙 정렬 완료: baseline={origin_y:.1f}")
 
+                # [중요] 초록색 하이라이트(오버레이 bbox)가 원본 텍스트블록(파란색 하이라이트)보다 짧아지는 문제 방지
+                fitted_w = calc_max_w
+                ref_bbox = source_bbox or span.get('source_bbox') or span.get('original_bbox') or (existing_overlay.original_bbox if existing_overlay else None)
+                if ref_bbox and ref_bbox.width > 0:
+                    orig_text = span.get('text', '') or getattr(existing_overlay, 'text', '')
+                    if not existing_overlay or text_to_insert == orig_text:
+                        fitted_w = max(calc_max_w, ref_bbox.width)
+                    else:
+                        fitted_w = max(calc_max_w, 2.0)
+
                 # [중요] 텍스트 크기에 맞춰 영역 자동 확장 (Clipping 방지 핵심)
-                # 이전에는 신규 패치 시에만 적용했으나, 일반 편집 시에도 텍스트가 커지면 영역을 늘려야 함
-                new_bbox = fitz.Rect(new_bbox.x0, target_y0, new_bbox.x0 + calc_max_w, target_y0 + calc_h)
+                new_bbox = fitz.Rect(new_bbox.x0, target_y0, new_bbox.x0 + fitted_w, target_y0 + calc_h)
                 
                 if not existing_overlay and not span.get('text'):
                     # [개선] 신규 패치 영역(original_bbox)도 최종 텍스트 영역에 1:1 동기화
@@ -7166,7 +10347,11 @@ class MainWindow(QMainWindow):
         span.setdefault('page_num', page_num)
         
         # [실시간 미리보기 핵심: 다이얼로그 열기 전 미리 오버레이 생성]
-        if not span.get('is_overlay'):
+        existing_overlay = None
+        if span.get('is_overlay') and span.get('overlay_id') is not None:
+            existing_overlay = self.pdf_viewer.get_overlay_by_id(page_num, span.get('overlay_id'))
+        
+        if not existing_overlay:
             try:
                 page = self.pdf_viewer.doc.load_page(page_num)
                 # 기본 편집값 생성
@@ -7175,6 +10360,17 @@ class MainWindow(QMainWindow):
                     qcolor = QColor((color_val >> 16) & 0xFF, (color_val >> 8) & 0xFF, color_val & 0xFF)
                 else:
                     qcolor = QColor(0, 0, 0)
+                
+                font_str = str(span.get('font', '')).lower()
+                pdf_font_str = str(span.get('pdf_font_name', '')).lower()
+                hwp_font_keys = ['hcr', 'h2hdr', 'h2gtr', 'h2mk', 'hygtr', 'hybtr', 'hmk', 'hancom', 'haansoft', 'gulimche', 'batangche']
+                is_hwp = bool(span.get('hwp_space_mode', False)) or any(k in font_str or k in pdf_font_str for k in hwp_font_keys) or getattr(self, 'is_hwp_doc', False)
+                span['hwp_space_mode'] = is_hwp
+
+                # [HWP 장평/자간 정밀 자동 계산]
+                auto_stretch, auto_tracking = self.calculate_auto_stretch_and_tracking(span)
+                span['stretch'] = auto_stretch
+                span['tracking'] = auto_tracking
                 
                 initial_values = {
                     'text': span.get('text', ''),
@@ -7185,11 +10381,14 @@ class MainWindow(QMainWindow):
                     'italic': bool(span.get('flags', 0) & 2),
                     'underline': False, # 밑줄 기본값 비활성화
                     'underline_weight': 0.6, # 밑줄 굵기 기본값 0.6 설정
-                    'stretch': 1.0,
-                    'tracking': 0.0,
+                    'stretch': auto_stretch,
+                    'tracking': auto_tracking,
                     'synth_bold_weight': 120,
-                    'hwp_space_mode': getattr(self, 'is_hwp_doc', False),
-                    'patch_margin_l': 0.0, 'patch_margin_r': 0.0, 'patch_margin_t': 0.0, 'patch_margin_b': 0.0
+                    'hwp_space_mode': is_hwp,
+                    'patch_margin_l': 0.0, 'patch_margin_r': 0.0, 'patch_margin_t': 0.0, 'patch_margin_b': 0.0,
+                    'original_bbox': span.get('original_bbox'),
+                    'origin': span.get('origin'),
+                    'page_num': page_num
                 }
                 
                 # 미리 오버레이 생성
@@ -7214,11 +10413,57 @@ class MainWindow(QMainWindow):
                 print(f"미리보기용 오버레이 선행 생성 실패: {e_pre}")
                 import traceback
                 traceback.print_exc()
+        else:
+            self.pdf_viewer.active_overlay = (page_num, existing_overlay.z_index)
+            self.pdf_viewer.update()
 
-        # 다이얼로그 실행
-        dialog = TextEditorDialog(span, self.pdf_fonts, self)
-        
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        # 다이얼로그 실행 (모달리스 방식으로 실행하여 문서 뷰어의 핸드툴, 줌 등 조작 가능)
+        self.open_text_editor(span, is_patch_mode=False)
+
+    def save_text_editor_pos(self, pos: QPoint):
+        """텍스트 편집창의 직전 위치 저장"""
+        if pos and not pos.isNull():
+            self.last_text_editor_pos = pos
+            if hasattr(self, 'settings') and self.settings:
+                try:
+                    self.settings.setValue('text_editor_pos_x', pos.x())
+                    self.settings.setValue('text_editor_pos_y', pos.y())
+                except Exception:
+                    pass
+
+    def open_text_editor(self, span, is_patch_mode=False):
+        """텍스트 편집 다이얼로그를 모달리스로 실행하여 편집 중에도 문서 뷰어 조작(핸드툴, 줌 등) 지원"""
+        # 이미 열려 있는 텍스트 편집기가 있다면 안전하게 확정 후 새로 열기
+        if getattr(self, 'current_text_editor', None) is not None:
+            try:
+                if self.current_text_editor.isVisible():
+                    self.current_text_editor.accept()
+            except Exception:
+                pass
+            self.current_text_editor = None
+
+        page_num = span.get('page_num', self.pdf_viewer.current_page_num)
+
+        if not span.get('is_overlay') and ('stretch' not in span or 'tracking' not in span):
+            if 'hwp_space_mode' not in span:
+                font_str = str(span.get('font', '')).lower()
+                pdf_font_str = str(span.get('pdf_font_name', '')).lower()
+                hwp_font_keys = ['hcr', 'h2hdr', 'h2gtr', 'h2mk', 'hygtr', 'hybtr', 'hmk', 'hancom', 'haansoft', 'gulimche', 'batangche']
+                is_hwp = bool(span.get('hwp_space_mode', False)) or any(k in font_str or k in pdf_font_str for k in hwp_font_keys) or getattr(self, 'is_hwp_doc', False)
+                span['hwp_space_mode'] = is_hwp
+            auto_stretch, auto_tracking = self.calculate_auto_stretch_and_tracking(span)
+            span.setdefault('stretch', auto_stretch)
+            span.setdefault('tracking', auto_tracking)
+
+        dialog = TextEditorDialog(span, getattr(self, 'pdf_fonts', None), self)
+        dialog.setModal(False)
+        self.current_text_editor = dialog
+
+        def _on_editor_accepted():
+            if dialog:
+                self.save_text_editor_pos(dialog.pos())
+            if getattr(self, 'current_text_editor', None) is dialog:
+                self.current_text_editor = None
             new_values = dialog.get_values()
             print(f"Dialog result: {new_values}")
             self.register_recent_font(new_values.get('font'))
@@ -7243,7 +10488,8 @@ class MainWindow(QMainWindow):
                 self.apply_background_patch(page, span['original_bbox'], new_values, overlay=overlay, preview=True)
                 
                 # 변경 완료 후 새로운 상태 저장
-                self.undo_manager.save_state(self.pdf_viewer.doc, self.pdf_viewer)
+                if hasattr(self, 'undo_manager') and self.pdf_viewer.doc:
+                    self.undo_manager.save_state(self.pdf_viewer.doc, self.pdf_viewer)
                 self.mark_as_changed()
                 self.update_undo_redo_buttons()
                 
@@ -7251,20 +10497,94 @@ class MainWindow(QMainWindow):
                 if hasattr(self, 'set_patch_mode'):
                     self.set_patch_mode(False)
                 
+                if overlay:
+                    overlay_info = {
+                        'text': overlay.text,
+                        'font': overlay.font,
+                        'size': overlay.size,
+                        'flags': overlay.flags,
+                        'color': overlay.color,
+                        'original_bbox': overlay.original_bbox,
+                        'current_bbox': overlay.bbox,
+                        'is_overlay': True,
+                        'overlay_id': overlay.z_index,
+                        'page_num': page_num,
+                        'synth_bold_weight': getattr(overlay, 'synth_bold_weight', 120),
+                        'underline_weight': getattr(overlay, 'underline_weight', 0.6),
+                        'underline_offset': getattr(overlay, 'underline_offset', 1.5)
+                    }
+                    self.pdf_viewer.selected_text_info = overlay_info
+                    self.pdf_viewer.active_overlay = (page_num, overlay.z_index)
+
+                if is_patch_mode and hasattr(self.pdf_viewer, 'selection_rect'):
+                    self.pdf_viewer.selection_rect = None
+                    self.pdf_viewer.selection_mode = False
+                    self.pdf_viewer.selection_is_eraser = False
+                    self.pdf_viewer.ctrl_pressed = False
+                    try:
+                        self.pdf_viewer.setCursor(Qt.CursorShape.ArrowCursor)
+                    except Exception:
+                        pass
+                
                 self.pdf_viewer.update()
                 
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to finalize edit: {e}")
                 import traceback
                 traceback.print_exc()
-        else:
-            # [취소 시: Undo를 통해 선행 생성된 오버레이와 패치 원복]
+
+        def _on_editor_rejected():
+            if dialog:
+                self.save_text_editor_pos(dialog.pos())
+            if getattr(self, 'current_text_editor', None) is dialog:
+                self.current_text_editor = None
             print("편집 취소 - 이전 상태로 복구")
             self.undo() # save_state 해둔 시점으로 복구
             self.update_undo_redo_buttons()
+            
+            if is_patch_mode and hasattr(self.pdf_viewer, 'selection_rect'):
+                self.pdf_viewer.selection_rect = None
+                self.pdf_viewer.selection_mode = False
+                self.pdf_viewer.selection_is_eraser = False
+                keep_enabled = getattr(self, 'patch_precise_mode', False)
+                self.pdf_viewer.ctrl_pressed = False
+                try:
+                    self.pdf_viewer.setCursor(Qt.CursorShape.CrossCursor if keep_enabled else Qt.CursorShape.ArrowCursor)
+                except Exception:
+                    pass
+            self.pdf_viewer.update()
+
+        dialog.accepted.connect(_on_editor_accepted)
+        dialog.rejected.connect(_on_editor_rejected)
+
+        # 직전 위치 복원 (화면 밖으로 벗어나지 않도록 클램핑)
+        if getattr(self, 'last_text_editor_pos', None) is not None:
+            try:
+                pos = self.last_text_editor_pos
+                screen = QApplication.screenAt(pos) or (self.screen() if hasattr(self, 'screen') else QApplication.primaryScreen())
+                if screen:
+                    screen_geo = screen.availableGeometry()
+                    x = max(screen_geo.left(), min(pos.x(), screen_geo.right() - 200))
+                    y = max(screen_geo.top(), min(pos.y(), screen_geo.bottom() - 100))
+                    dialog.move(x, y)
+            except Exception as e_pos:
+                print(f"[Dialog] Failed to restore pos: {e_pos}")
+
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
     
     def closeEvent(self, event):
         """창 닫기 이벤트 처리"""
+        if getattr(self, 'current_text_editor', None) is not None:
+            try:
+                if self.current_text_editor.isVisible():
+                    self.current_text_editor.accept()
+            except Exception:
+                pass
+            self.current_text_editor = None
+
         if self.has_changes:
             msg = QMessageBox(self)
             msg.setWindowTitle(self.t('title_unsaved_changes'))
@@ -7316,7 +10636,6 @@ class MainWindow(QMainWindow):
 
         viewer = getattr(self, 'pdf_viewer', None)
         if viewer:
-            viewer.ctrl_pressed = enabled
             if enabled:
                 try:
                     viewer.setCursor(Qt.CursorShape.CrossCursor)
@@ -7327,7 +10646,9 @@ class MainWindow(QMainWindow):
                 viewer.selection_mode = False
                 viewer.selection_start = None
                 viewer.selection_rect = None
+                viewer.selection_is_eraser = False
                 viewer.ctrl_pressed = False
+                viewer.shift_pressed = False
                 try:
                     viewer.setCursor(Qt.CursorShape.ArrowCursor)
                 except Exception:
@@ -7339,18 +10660,16 @@ class MainWindow(QMainWindow):
         if enabled != previous_enabled:
             self._store_patch_mode()
 
-        status_bar = self.statusBar() if hasattr(self, 'statusBar') else None
-        if status_bar:
-            if enabled:
-                if self.patch_only_mode:
-                    status_bar.showMessage(self.t('status_patch_eraser_on'), 2500)
-                else:
-                    status_bar.showMessage(self.t('status_patch_mode_on'), 2500)
+        if enabled:
+            if self.patch_only_mode:
+                self.show_status_message(self.t('status_patch_eraser_on', default="지우개 모드가 켜졌습니다 (드래그하여 지우기)"), 2500)
             else:
-                if previous_patch_only:
-                    status_bar.showMessage(self.t('status_patch_eraser_off'), 2500)
-                else:
-                    status_bar.showMessage(self.t('status_patch_mode_off'), 2500)
+                self.show_status_message(self.t('status_patch_mode_on', default="패치 모드가 켜졌습니다 (드래그하여 편집)"), 2500)
+        else:
+            if previous_patch_only:
+                self.show_status_message(self.t('status_patch_eraser_off', default="지우개 모드가 꺼졌습니다"), 2000)
+            else:
+                self.show_status_message(self.t('status_patch_mode_off', default="패치 모드가 꺼졌습니다"), 2000)
 
     def set_patch_margin(self, margin):
         """패치 여백 설정"""
@@ -7442,6 +10761,14 @@ class MainWindow(QMainWindow):
             app = QApplication.instance()
             if not app:
                 return
+            try:
+                tooltip_font = QToolTip.font()
+                tooltip_font.setBold(False)
+                tooltip_font.setWeight(QFont.Weight.Normal)
+                QToolTip.setFont(tooltip_font)
+            except Exception:
+                pass
+
             pal = QPalette()
             if mode == 'light':
                 pal.setColor(QPalette.Window, QColor(255, 255, 255))
@@ -7460,6 +10787,25 @@ class MainWindow(QMainWindow):
                 # 라이트 전용 위젯 스타일
                 light_qss = """
                 QMainWindow, QWidget { background: #ffffff; color: #111; }
+                QToolTip {
+                    font-weight: normal;
+                    font-size: 12px;
+                    color: #111111;
+                    background-color: #ffffff;
+                    border: 1px solid #cbd5e1;
+                    padding: 4px 8px;
+                    border-radius: 4px;
+                }
+                QToolBar {
+                    spacing: 3px;
+                    padding: 2px 4px;
+                    border: none;
+                }
+                QToolBar::separator {
+                    width: 1.5px;
+                    background-color: #cbd5e1;
+                    margin: 6px 4px;
+                }
                 QMenuBar { font-size: 13px; padding: 3px 5px; background: #ffffff; color: #111; }
                 QMenuBar::item:selected { background: #e6f2ff; border: 1px solid #3399ff; }
                 QMenu { background: #ffffff; color: #111; }
@@ -7481,6 +10827,20 @@ class MainWindow(QMainWindow):
                     self.pdf_viewer.setStyleSheet("background-color: #ffffff; border: none;")
                 if hasattr(self, 'scroll_area'):
                     self.scroll_area.setStyleSheet("background-color: #f0f0f0; border: none;")
+                if hasattr(self, 'thumbnail_panel') and self.thumbnail_panel:
+                    self.thumbnail_panel.apply_theme('light')
+                if hasattr(self, 'search_bar') and self.search_bar:
+                    self.search_bar.setStyleSheet(
+                        "QFrame { background-color: #f1f5f9; border-bottom: 1.5px solid #cbd5e1; padding: 2px 8px; }"
+                        "QPushButton { font-size: 12px; font-weight: bold; padding: 4px 10px; border-radius: 4px; }"
+                        "QLineEdit { background: white; padding: 5px 8px; border: 1.5px solid #94a3b8; border-radius: 6px; font-size: 13px; }"
+                    )
+                if hasattr(self, 'status_bar_widget') and self.status_bar_widget:
+                    self.status_bar_widget.setStyleSheet(
+                        "#statusBarWidget { background-color: #f8fafc; border-bottom: 1px solid #cbd5e1; }"
+                        "#statusPageLabel, #statusZoomLabel { font-size: 11px; font-weight: 600; color: #475569; }"
+                        "#statusMessageLabel { font-size: 11px; font-weight: 500; color: #0284c7; }"
+                    )
                 self.theme_button.setText("🌙")
             else:
                 pal.setColor(QPalette.Window, QColor(30, 31, 34))
@@ -7498,6 +10858,25 @@ class MainWindow(QMainWindow):
                 app.setPalette(pal)
                 dark_qss = """
                 QMainWindow, QWidget { background: #1e1f22; color: #ddd; }
+                QToolTip {
+                    font-weight: normal;
+                    font-size: 12px;
+                    color: #eeeeee;
+                    background-color: #2b2d30;
+                    border: 1px solid #475569;
+                    padding: 4px 8px;
+                    border-radius: 4px;
+                }
+                QToolBar {
+                    spacing: 3px;
+                    padding: 2px 4px;
+                    border: none;
+                }
+                QToolBar::separator {
+                    width: 1.5px;
+                    background-color: #475569;
+                    margin: 6px 4px;
+                }
                 QMenuBar { font-size: 13px; padding: 3px 5px; background: #1e1f22; color: #ddd; }
                 QMenuBar::item:selected { background: #2b2d30; border: 1px solid #4c9eff; }
                 QMenu { background: #2b2d30; color: #ddd; }
@@ -7516,6 +10895,20 @@ class MainWindow(QMainWindow):
                     self.pdf_viewer.setStyleSheet("background-color: #111111; border: none;")
                 if hasattr(self, 'scroll_area'):
                     self.scroll_area.setStyleSheet("background-color: #0f0f0f; border: none;")
+                if hasattr(self, 'thumbnail_panel') and self.thumbnail_panel:
+                    self.thumbnail_panel.apply_theme('dark')
+                if hasattr(self, 'search_bar') and self.search_bar:
+                    self.search_bar.setStyleSheet(
+                        "QFrame { background-color: #23272e; border-bottom: 1.5px solid #333842; padding: 2px 8px; }"
+                        "QPushButton { font-size: 12px; font-weight: bold; padding: 4px 10px; border-radius: 4px; background: #2d3139; color: #ddd; }"
+                        "QLineEdit { background: #1e1f22; color: #eee; padding: 5px 8px; border: 1.5px solid #475569; border-radius: 6px; font-size: 13px; }"
+                    )
+                if hasattr(self, 'status_bar_widget') and self.status_bar_widget:
+                    self.status_bar_widget.setStyleSheet(
+                        "#statusBarWidget { background-color: #1e1f22; border-bottom: 1px solid #2d3139; }"
+                        "#statusPageLabel, #statusZoomLabel { font-size: 11px; font-weight: 600; color: #94a3b8; }"
+                        "#statusMessageLabel { font-size: 11px; font-weight: 500; color: #38bdf8; }"
+                    )
                 self.theme_button.setText("☀️")
         except Exception:
             pass
@@ -7780,7 +11173,34 @@ class MainWindow(QMainWindow):
     
     def show_shortcuts(self):
         """단축키 도움말 표시"""
-        QMessageBox.information(self, self.t('shortcuts_title'), self.t('shortcuts_text'))
+        default_shortcuts = (
+            "📋 주요 단축키 안내\n\n"
+            "🖱️ 마우스 제스처 & 뷰어 조작:\n"
+            " • Ctrl + 드래그 : 패치모드 (영역 선택 및 텍스트 편집)\n"
+            " • Shift + 드래그 : 지우개모드 (영역 배경 패치 즉시 적용)\n"
+            " • Ctrl + 마우스휠 : 화면 확대 / 축소 (포인터 중심)\n"
+            " • Shift + 마우스휠 : 이전 / 다음 페이지 이동\n"
+            " • Spacebar + 드래그 : 화면 이동 (핸드 툴)\n"
+            " • Ctrl + Spacebar + 클릭 : 화면 확대\n"
+            " • Ctrl + Alt + Spacebar + 클릭 : 화면 축소\n\n"
+            "🔍 확대 / 축소:\n"
+            " • Ctrl + '+' / '-' : 확대 / 축소\n"
+            " • Ctrl + 0 : 창 가로 맞춤\n"
+            " • Ctrl + Shift + 0 : 창 세로 맞춤\n\n"
+            "📖 페이지 탐색:\n"
+            " • Page Up / Down : 이전 / 다음 페이지\n"
+            " • Home / End : 첫 / 마지막 페이지\n\n"
+            "✏️ 편집:\n"
+            " • Ctrl + Z / Ctrl + Y : 실행 취소 / 다시 실행\n"
+            " • Ctrl + C / Ctrl + V : 텍스트 복사 / 붙여넣기\n"
+            " • 방향키 : 선택된 텍스트 위치 미세 조정\n\n"
+            "📁 파일:\n"
+            " • Ctrl + O : PDF 열기\n"
+            " • Ctrl + S : 저장\n"
+            " • Ctrl + F : 본문 검색"
+        )
+        msg_text = self.t('shortcuts_text', default=default_shortcuts)
+        QMessageBox.information(self, self.t('shortcuts_title', default="⌨️ 단축키 안내"), msg_text)
 
     def show_kakao_donation_dialog(self):
         """카카오페이 후원 안내"""
@@ -7842,12 +11262,32 @@ class MainWindow(QMainWindow):
         msg_box.exec()
 
     def show_about(self):
-        """프로그램 정보 표시"""
+        """프로그램 정보 표시 (v1.1 버전 표기)"""
         box = QMessageBox(self)
         box.setWindowTitle(self.t('app_info_title'))
         box.setTextFormat(Qt.TextFormat.RichText)
         box.setStandardButtons(QMessageBox.StandardButton.Ok)
-        text_html = '<br>'.join(self.t('about_text').splitlines())
+        ok_btn = box.button(QMessageBox.StandardButton.Ok)
+        if ok_btn:
+            ok_btn.setText(self.t('btn_ok', default='확인') if hasattr(self, 't') else '확인')
+
+        raw_lines = self.t('about_text').splitlines()
+        formatted_lines = []
+        if raw_lines:
+            first_line = raw_lines[0]
+            if "v1." not in first_line:
+                first_line = f"<b style='font-size:15px;'>{first_line}</b> <span style='color:#007acc;font-weight:bold;font-size:13px;'>{APP_VERSION}</span>"
+            else:
+                first_line = f"<b style='font-size:15px;'>{first_line}</b>"
+            formatted_lines.append(first_line)
+            version_label = "버전" if getattr(self, 'language', 'ko') == 'ko' else "Version"
+            formatted_lines.append(f"<b>{version_label}:</b> {APP_VERSION}")
+            formatted_lines.extend(raw_lines[1:])
+        else:
+            formatted_lines.append(f"<b style='font-size:15px;'>YongPDF</b> <span style='color:#007acc;font-weight:bold;'>{APP_VERSION}</span>")
+            formatted_lines.append(f"<b>Version:</b> {APP_VERSION}")
+
+        text_html = '<br>'.join(formatted_lines)
         text_html += "<br/><br/><span style='font-size:11px;color:#8a94a3'>© 2026 YongPDF · Hwang Jinsu. All rights reserved.</span>"
         box.setText(f"<div style='min-width:320px'>{text_html}</div>")
         pix = _load_static_pixmap('YongPDF_text_img.png')
@@ -7911,14 +11351,41 @@ Source Code: <a href="https://github.com/HwangJinsu/YongPDF">https://github.com/
         
         dialog.exec()
 
+class PdfApplication(QApplication):
+    """macOS 파일 연결(Finder 더블클릭, Dock 드롭) 처리를 지원하는 애플리케이션 클래스"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.main_window: Optional[MainWindow] = None
+        self.pending_open_file: Optional[str] = None
+
+    def event(self, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.FileOpen:
+            file_path = getattr(event, 'file', lambda: '')()
+            if file_path:
+                if self.main_window and hasattr(self.main_window, 'open_pdf'):
+                    self.main_window.open_pdf(file_path)
+                    try:
+                        self.main_window.raise_()
+                        self.main_window.activateWindow()
+                    except Exception:
+                        pass
+                else:
+                    self.pending_open_file = file_path
+            return True
+        return super().event(event)
+
+
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
+    app = PdfApplication(sys.argv)
     splash = _show_startup_splash(app)
     main_window: Optional[MainWindow] = None
 
     try:
         initial_path = sys.argv[1] if len(sys.argv) > 1 else None
+        if not initial_path and app.pending_open_file:
+            initial_path = app.pending_open_file
         main_window = MainWindow(initial_path)
+        app.main_window = main_window
 
         if splash:
             splash.showMessage(
