@@ -39,38 +39,41 @@ REM 3. Search for Inno Setup compiler (ISCC.exe)
 echo [2/2] Checking Inno Setup 6...
 set "ISCC="
 
-if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" (
-    set "ISCC=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-) else if exist "C:\Program Files\Inno Setup 6\ISCC.exe" (
-    set "ISCC=C:\Program Files\Inno Setup 6\ISCC.exe"
-) else (
+if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
+if not defined ISCC if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"
+if not defined ISCC if exist "%ProgramW6432%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramW6432%\Inno Setup 6\ISCC.exe"
+if not defined ISCC if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" set "ISCC=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+if not defined ISCC if exist "C:\Program Files\Inno Setup 6\ISCC.exe" set "ISCC=C:\Program Files\Inno Setup 6\ISCC.exe"
+if not defined ISCC if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
+if not defined ISCC (
     where ISCC >nul 2>&1
-    if !ERRORLEVEL! EQU 0 (
-        set "ISCC=ISCC"
-    )
+    if !ERRORLEVEL! EQU 0 set "ISCC=ISCC"
 )
 
-if not "!ISCC!"=="" (
-    echo Running Inno Setup Compiler: "!ISCC!"
-    "!ISCC!" YongPDF_text_win.iss
-    if !ERRORLEVEL! EQU 0 (
-        echo.
-        echo =======================================================================
-        echo   [SUCCESS] Setup installer created successfully!
-        echo   Installer: dist\YongPDF_text_Setup_v1.1.exe
-        echo =======================================================================
-    ) else (
-        echo.
-        echo [ERROR] Inno Setup compilation failed!
-    )
+if not defined ISCC goto :no_inno
+
+echo Running Inno Setup Compiler: "!ISCC!"
+"!ISCC!" YongPDF_text_win.iss
+if !ERRORLEVEL! EQU 0 (
+    echo.
+    echo =======================================================================
+    echo   [SUCCESS] Setup installer created successfully!
+    echo   Installer: dist\YongPDF_text_Setup_v1.1.exe
+    echo =======================================================================
 ) else (
     echo.
-    echo [NOTICE] Inno Setup 6 (ISCC.exe) was not found on your system.
-    echo  - Onedir build files are available in: dist\YongPDF_text\
-    echo  - To build Setup.exe installer, download and install Inno Setup 6:
-    echo    https://jrsoftware.org/isdl.php
-    echo    Then open 'YongPDF_text_win.iss' and click [Compile].
+    echo [ERROR] Inno Setup compilation failed!
 )
+goto :build_done
 
+:no_inno
+echo.
+echo [NOTICE] Inno Setup 6 compiler ISCC.exe was not found on your system.
+echo  - Onedir build files are available in: dist\YongPDF_text\
+echo  - To build Setup.exe installer, download and install Inno Setup 6:
+echo    https://jrsoftware.org/isdl.php
+echo    Then open YongPDF_text_win.iss and click [Compile].
+
+:build_done
 echo.
 pause
