@@ -2092,7 +2092,8 @@ class TextEditorDialog(QDialog):
             "original_bbox": self.span_info.get('original_bbox'),
             "origin": self.span_info.get('origin'),
             "page_num": self.span_info.get('page_num', self.overlay_key[0] if self.overlay_key else 0),
-            "overlay_id": self.overlay_key[1] if self.overlay_key else self.span_info.get('overlay_id')
+            "overlay_id": self.overlay_key[1] if self.overlay_key else self.span_info.get('overlay_id'),
+            "space_width": self.span_info.get('space_width')
         }
 
     def _remember_pos(self):
@@ -2133,7 +2134,8 @@ class TextOverlay:
         underline_weight=0.6,
         underline_offset=1.5,
         origin=None,
-        pdf_font_name=None
+        pdf_font_name=None,
+        space_width=None
     ):
         self.text = text
         self.font = font  
@@ -2148,9 +2150,10 @@ class TextOverlay:
         self.z_index = 0  # 레이어 순서
         self.original_bbox = source_bbox if source_bbox is not None else bbox  # 패치 원본 영역
         self.flattened = False  # PDF에 반영 여부
-        # 확장 속성: 장평 / 자간
+        # 확장 속성: 장평 / 자간 / 공백너비
         self.stretch = 1.0  # 1.0 = 100%
         self.tracking = 0.0  # percent delta (0 = 기본)
+        self.space_width = float(space_width) if space_width is not None else None
         self.hwp_space_mode = hwp_space_mode
         self.text_only_mode = text_only_mode
         self.font_path = None
@@ -2205,6 +2208,7 @@ class TextOverlay:
         text_only_mode=None,
         content_bbox=None,
         origin=None,
+        space_width=None,
         new_values=None
     ):
         """텍스트 속성 업데이트 (편집창 연계)"""
@@ -2228,6 +2232,8 @@ class TextOverlay:
             self.stretch = float(stretch)
         if tracking is not None:
             self.tracking = float(tracking)
+        if space_width is not None:
+            self.space_width = float(space_width)
         if font_path is not None:
             self.font_path = font_path
             self._loaded_font_family = None
@@ -2246,6 +2252,9 @@ class TextOverlay:
         
         # 패치 마진 개별 업데이트 (L, R, T, B)
         if new_values:
+            if 'space_width' in new_values:
+                sw_val = new_values['space_width']
+                self.space_width = float(sw_val) if sw_val is not None else None
             for attr in ['patch_margin_l', 'patch_margin_r', 'patch_margin_t', 'patch_margin_b']:
                 if attr in new_values:
                     setattr(self, attr, float(new_values[attr]))
@@ -2541,11 +2550,14 @@ class TextOverlay:
                     num_chars = len(line)
                     for idx, ch in enumerate(line):
                         ch_w = font_metrics_f.horizontalAdvance(ch)
-                        if ch == ' ' and is_hwp:
+                        if ch == ' ' and getattr(self, 'space_width', None) is not None:
+                            current_advance = float(self.space_width) * stretch
+                        elif ch == ' ' and is_hwp:
                             ch_w_eff = max(ch_w, hwp_std_space)
+                            current_advance = (ch_w_eff / precision_multiplier) * stretch
                         else:
                             ch_w_eff = ch_w
-                        current_advance = (ch_w_eff / precision_multiplier) * stretch
+                            current_advance = (ch_w_eff / precision_multiplier) * stretch
                         
                         if ch.strip():
                             _draw_text_item(curr_x, curr_y, ch)
@@ -2610,7 +2622,8 @@ class TextOverlay:
                 getattr(self, 'patch_margin_b', 0.0)
             ),
             'stretch': getattr(self, 'stretch', 1.0),
-            'tracking': getattr(self, 'tracking', 0.0)
+            'tracking': getattr(self, 'tracking', 0.0),
+            'space_width': getattr(self, 'space_width', None)
         }
 
 class ImageOverlay:
@@ -4189,7 +4202,7 @@ class PdfViewerWidget(QLabel):
                                 else:
                                     gap = ch['bbox'][1] - prev_ch['bbox'][3]
                             f_sz = max(float(ch.get('size', 12.0)), float(prev_ch.get('size', 12.0)), 10.0)
-                            col_split_gap = max(9.5, f_sz * 1.05)
+                            col_split_gap = max(28.0, f_sz * 2.5)
                             if gap >= col_split_gap:
                                 raw_segments.append(curr_raw)
                                 curr_raw = [ch]
@@ -4276,34 +4289,6 @@ class PdfViewerWidget(QLabel):
                                 curr_seg.append(ch)
                         if curr_seg:
                             segments.append(curr_seg)
-                        
-                    # [글머리 기호 및 번호 분리 로직]
-                    # 라인 시작 부분의 항목기호/번호(예: "1. ", "6. ", "· ", "① ")는
-                    # 서식 변경 및 자간 조절 시 들여쓰기와 번호 서식을 보존하기 위해 본문 블록과 분리
-                    expanded_segments = []
-                    for seg in segments:
-                        raw_seg_text = ''.join(c.get('c', '') for c in seg)
-                        m = BULLET_NUM_PATTERN.match(raw_seg_text)
-                        if m:
-                            pfx_len = len(m.group(1))
-                            char_acc = 0
-                            split_idx = 0
-                            for idx, ch in enumerate(seg):
-                                char_acc += len(ch.get('c', ''))
-                                if char_acc >= pfx_len:
-                                    split_idx = idx + 1
-                                    break
-                            pfx_seg = seg[:split_idx]
-                            body_seg = seg[split_idx:]
-                            body_text = ''.join(c.get('c', '') for c in body_seg).strip()
-                            if pfx_seg and body_text:
-                                expanded_segments.append(pfx_seg)
-                                expanded_segments.append(body_seg)
-                            else:
-                                expanded_segments.append(seg)
-                        else:
-                            expanded_segments.append(seg)
-                    segments = expanded_segments
                         
                     for seg in segments:
                         # [방어로직] 한컴 HWP 전용 PUA 특수문자, 글머리기호(Bullet), 및 선행/후행 공백을 텍스트블록에서 제외
@@ -6073,10 +6058,13 @@ class PdfViewerWidget(QLabel):
         text_only_mode=False,
         origin=None,
         new_values=None,
-        pdf_font_name=None
+        pdf_font_name=None,
+        space_width=None
     ):
         """새로운 텍스트 오버레이 추가 (레이어 방식) - 완전한 속성 지원"""
         print(f"TextOverlay 생성 중 - 폰트: '{font}', 크기: {size}, 플래그: {flags}")
+        if space_width is None and new_values and 'space_width' in new_values:
+            space_width = new_values.get('space_width')
         norm_height = TextOverlay._normalize_height_ratio(height_ratio if height_ratio is not None else 1.15)
         preview_norm = TextOverlay._normalize_height_ratio(preview_height_ratio if preview_height_ratio is not None else norm_height)
         if ascent_ratio is None:
@@ -6102,7 +6090,8 @@ class PdfViewerWidget(QLabel):
             underline_weight=underline_weight,
             underline_offset=underline_offset,
             origin=origin,
-            pdf_font_name=pdf_font_name
+            pdf_font_name=pdf_font_name,
+            space_width=space_width
         )
         overlay.z_index = self.overlay_id_counter
         self.overlay_id_counter += 1
@@ -6542,6 +6531,7 @@ class UndoRedoManager:
                 ov.visible = it.get('visible', True)
                 ov.stretch = float(it.get('stretch', 1.0))
                 ov.tracking = float(it.get('tracking', 0.0))
+                ov.space_width = float(it['space_width']) if it.get('space_width') is not None else None
                 ov.font_path = it.get('font_path')
                 ov.synth_bold = bool(it.get('synth_bold', False))
                 if 'patch_margin_h' in it or 'patch_margin_v' in it:
@@ -9324,11 +9314,14 @@ class MainWindow(QMainWindow):
             line_end_x = curr_x
             for idx, ch in enumerate(line):
                 ch_w_raw = fm_measure.horizontalAdvance(ch) / precision_multiplier
-                if ch == ' ' and is_hwp:
+                if ch == ' ' and getattr(ov, 'space_width', None) is not None:
+                    advance = float(ov.space_width) * stretch
+                elif ch == ' ' and is_hwp:
                     ch_w_eff = max(ch_w_raw, hwp_std_space)
+                    advance = ch_w_eff * stretch
                 else:
                     ch_w_eff = ch_w_raw
-                advance = ch_w_eff * stretch
+                    advance = ch_w_eff * stretch
                 
                 if ch.strip():
                     if need_synth_bold:
@@ -9965,6 +9958,15 @@ class MainWindow(QMainWindow):
             while eff_text and (is_pua_char(eff_text[0]) or eff_text[0] in BULLET_CHARS or eff_text[0].isspace()):
                 eff_text = eff_text[1:]
             eff_text = ''.join(c for c in eff_text if not is_pua_char(c))
+            if not eff_text:
+                span['space_width'] = None
+                return 1.0, 0.0
+
+            # 독립 불릿/항목번호 레이블(예: "1.", "가.", "①", "·", "(1)" 등 길이 4 이하)은 기본 서식(100%, 0%) 유지
+            is_bullet_label = bool(BULLET_NUM_PATTERN.match(eff_text + ' ') or (len(eff_text) <= 4 and any(eff_text.endswith(s) for s in ['.', ')', ']', '-'])))
+            if is_bullet_label and len(eff_text) <= 4:
+                span['space_width'] = None
+                return 1.0, 0.0
             
             active_chars = [c for c in chars if not is_pua_char(c.get('c', ''))] if chars else []
             while active_chars and (is_pua_char(active_chars[0].get('c', '')) or active_chars[0].get('c', '') in BULLET_CHARS or active_chars[0].get('c', '').isspace() or is_symbol_font(active_chars[0].get('font', ''))):
@@ -9996,7 +9998,7 @@ class MainWindow(QMainWindow):
                 r = w_avg / (sz * hangul_em_base * hwp_base_scale)
                 
                 is_standard_em = any(k in font_str for k in ['batang', 'dotum', 'gulim', 'gungsuh', 'malgun', 'nanum', 'myungjo', 'gothic', '바탕', '돋움', '굴림', '궁서', '맑은', '나눔', '명조', '고딕'])
-                if abs(r - 1.0) < 0.015:
+                if abs(r - 1.0) < 0.035:
                     calc_stretch = 1.0
                 elif not is_hcr and not is_standard_em and 0.965 <= r <= 0.974:
                     calc_stretch = 1.0
@@ -10124,54 +10126,68 @@ class MainWindow(QMainWindow):
                 else:
                     base_stretch = 1.0
 
-                char_advances = []
-                for ch in eff_text:
-                    cw = fm.horizontalAdvance(ch)
-                    if ch == ' ' and is_hwp:
-                        cw_eff = max(cw, hwp_space_px)
-                    else:
-                        cw_eff = cw
-                    adv = (cw_eff / precision_multiplier) * base_stretch
-                    char_advances.append(adv)
-                
-                nom_w_stretched = sum(char_advances)
-                num_chars = len(char_advances)
-                inter_w = sum(char_advances[:-1]) if num_chars >= 2 else 0.0
-                
-                # 렌더링 시 actual_width = nom_w_stretched + inter_w * (tracking / 100.0)
-                # (마지막 글자 뒤에는 자간이 붙지 않으므로 자간은 inter_w 구간에만 작용)
-                if inter_w > 0:
-                    t_exact = ((eff_orig_w - nom_w_stretched) / inter_w) * 100.0
-                else:
-                    t_exact = 0.0
-
+                num_spaces = eff_text.count(' ')
                 calc_stretch = base_stretch
-                if num_chars == 1:
-                    # 1글자는 자간이 적용되지 않으므로 장평으로 폭 일치
-                    calc_tracking = 0.0
-                    if nom_w_stretched > 0:
-                        calc_stretch = round(base_stretch * (eff_orig_w / nom_w_stretched), 2)
-                elif is_distributed:
-                    # [배분정렬(Distributed Alignment)]: 전체 가로폭에 맞추어 균등 분배된 정밀 자간으로 수렴
-                    calc_tracking = round(t_exact, 1)
-                else:
-                    # 일반 텍스트 및 '한 줄로 입력' 텍스트
-                    if calc_tracking is not None:
-                        est_w = inter_w * (1.0 + calc_tracking / 100.0) + char_advances[-1]
-                        err = abs(est_w - eff_orig_w)
-                        if err <= max(0.3, eff_orig_w * 0.008):
-                            pass
-                        else:
+                if num_spaces > 0:
+                    # [HWP 배분정렬 및 다중 단어 공백 제어]
+                    # 글자 사이 간격은 Step 1에서 산출된 자간(자연 자간 0.0%)을 유지하고,
+                    # 단어와 단어 사이 간격(space_width)으로 잔여 가로폭을 조절
+                    non_space_chars = [c for c in eff_text if c != ' ']
+                    w_non_spaces = 0.0
+                    for ch in non_space_chars:
+                        cw = fm.horizontalAdvance(ch)
+                        w_non_spaces += (cw / precision_multiplier) * base_stretch
+                    
+                    rem_w = eff_orig_w - w_non_spaces
+                    eff_space_w = rem_w / num_spaces
+                    min_space_w = sz * 0.20
+                    
+                    if eff_space_w >= min_space_w:
+                        span['space_width'] = round(eff_space_w, 2)
+                        # 글자 사이 자연 자간(0.0%) 유지 (일반 폰트 편차 허용 범위 내는 0.0%로 스냅)
+                        if calc_tracking is None or abs(calc_tracking) <= 15.0:
+                            calc_tracking = 0.0
+                    else:
+                        # 공백을 최소치로 줄여도 폭을 초과하는 압축('한 줄로 입력')의 경우
+                        eff_space_w = max(0.0, round(min_space_w, 2))
+                        span['space_width'] = eff_space_w
+                        needed_w = eff_orig_w - (num_spaces * eff_space_w)
+                        if w_non_spaces > 0:
+                            t_exact = ((needed_w - w_non_spaces) / w_non_spaces) * 100.0
                             if -50.0 <= t_exact <= 500.0:
                                 calc_tracking = round(t_exact, 1)
                             elif t_exact < -50.0:
                                 calc_tracking = -50.0
-                                w_at_min = inter_w * 0.50 + char_advances[-1]
-                                if w_at_min > 0:
-                                    calc_stretch = round(base_stretch * (eff_orig_w / w_at_min), 2)
+                                calc_stretch = round(base_stretch * (needed_w / (w_non_spaces * 0.50)), 2)
                             else:
                                 calc_tracking = 500.0
+                        else:
+                            calc_tracking = 0.0
+                else:
+                    span['space_width'] = None
+                    char_advances = []
+                    for ch in eff_text:
+                        cw = fm.horizontalAdvance(ch)
+                        adv = (cw / precision_multiplier) * base_stretch
+                        char_advances.append(adv)
+                    
+                    nom_w_stretched = sum(char_advances)
+                    num_chars = len(char_advances)
+                    inter_w = sum(char_advances[:-1]) if num_chars >= 2 else 0.0
+                    
+                    if inter_w > 0:
+                        t_exact = ((eff_orig_w - nom_w_stretched) / inter_w) * 100.0
                     else:
+                        t_exact = 0.0
+
+                    if num_chars == 1:
+                        calc_tracking = 0.0
+                        if nom_w_stretched > 0:
+                            calc_stretch = round(base_stretch * (eff_orig_w / nom_w_stretched), 2)
+                    elif is_distributed:
+                        calc_tracking = round(t_exact, 1)
+                    else:
+                        # 일반 단어 및 '한 줄로 입력' 텍스트
                         if -50.0 <= t_exact <= 500.0:
                             calc_tracking = round(t_exact, 1)
                         elif t_exact < -50.0:
@@ -10181,9 +10197,9 @@ class MainWindow(QMainWindow):
                                 calc_stretch = round(base_stretch * (eff_orig_w / w_at_min), 2)
                         else:
                             calc_tracking = 500.0
-                    
-                    if calc_tracking is not None and abs(calc_tracking) < 0.3:
-                        calc_tracking = 0.0
+
+                if calc_tracking is not None and abs(calc_tracking) < 0.3:
+                    calc_tracking = 0.0
 
             final_stretch = calc_stretch if calc_stretch is not None else 1.0
             final_tracking = calc_tracking if calc_tracking is not None else 0.0
@@ -10430,12 +10446,15 @@ class MainWindow(QMainWindow):
                 calc_max_w = 0
                 lines_list = text_to_insert.splitlines() if text_to_insert else [""]
                 hwp_std_space = float(font_size) * precision_multiplier * 0.50
+                space_width_val = new_values.get('space_width') if new_values.get('space_width') is not None else span.get('space_width')
                 for line in lines_list:
                     lw = 0
                     num_chars = len(line)
                     for idx, ch in enumerate(line):
                         cw = fm.horizontalAdvance(ch)
-                        if ch == ' ' and is_hwp_mode:
+                        if ch == ' ' and space_width_val is not None:
+                            cw_eff = float(space_width_val) * precision_multiplier
+                        elif ch == ' ' and is_hwp_mode:
                             cw_eff = max(cw, hwp_std_space)
                         else:
                             cw_eff = cw
@@ -10504,6 +10523,7 @@ class MainWindow(QMainWindow):
                     flags=edit_flags,
                     stretch=new_values.get('stretch', 1.0),
                     tracking=new_values.get('tracking', 0.0),
+                    space_width=new_values.get('space_width') if new_values.get('space_width') is not None else span.get('space_width'),
                     font_path=font_path,
                     synth_bold=need_synth_bold,
                     synth_bold_weight=new_values.get('synth_bold_weight', 120),
@@ -10552,11 +10572,13 @@ class MainWindow(QMainWindow):
                     preview_height_ratio=preview_height_ratio,
                     hwp_space_mode=new_values.get('hwp_space_mode'),
                     text_only_mode=new_values.get('text_only_mode'),
+                    space_width=new_values.get('space_width') if new_values.get('space_width') is not None else span.get('space_width'),
                     new_values=new_values # 인자 추가
                 )
                 overlay.update_properties(
                     stretch=new_values.get('stretch', 1.0),
                     tracking=new_values.get('tracking', 0.0),
+                    space_width=new_values.get('space_width') if new_values.get('space_width') is not None else span.get('space_width'),
                     new_values=new_values # NameError 해결
                 )
                 setattr(overlay, 'force_image', bool(new_values.get('force_image', False)))
@@ -10807,6 +10829,7 @@ class MainWindow(QMainWindow):
                     'underline_weight': 0.6, # 밑줄 굵기 기본값 0.6 설정
                     'stretch': auto_stretch,
                     'tracking': auto_tracking,
+                    'space_width': span.get('space_width'),
                     'synth_bold_weight': 120,
                     'hwp_space_mode': is_hwp,
                     'patch_margin_l': 0.0, 'patch_margin_r': 0.0, 'patch_margin_t': 0.0, 'patch_margin_b': 0.0,
