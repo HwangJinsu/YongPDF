@@ -261,6 +261,25 @@ BULLET_CHARS = {
     '✧',  # 0x2727 WHITE FOUR POINTED STAR
 }
 
+# 글머리 기호 및 번호 정규식 패턴 (항목기호나 번호 + 뒤따르는 1개 이상의 공백)
+# 예: "1. ", "12. ", "1) ", "(1) ", "[1] ", "① ", "가. ", "가) ", "(가) ", "[가] ", "㉠ ", "· ", "- ", "■ ", "▶ ", "Ⅰ. " 등
+BULLET_NUM_PATTERN = re.compile(
+    r'^(\s*'
+    r'(?:'
+    r'\d{1,3}(?:\.\d{1,3})*[\.\)\-]'   # 1. 1.1 2) 3-
+    r'|\(\d{1,3}\)'                    # (1) (12)
+    r'|\[\d{1,3}\]'                    # [1] [2]
+    r'|[①-⑳❶-➓]'                     # ① ② ❶ ❷
+    r'|[가-힣a-zA-Z][\.\)\-]'          # 가. 나) A. b-
+    r'|\([가-힣a-zA-Z]\)'              # (가) (나) (a) (B)
+    r'|\[[가-힣a-zA-Z]\]'              # [가] [나] [A]
+    r'|[㉠-㉭㈀-㈍]'                    # ㉠ ㉡ ㈀ ㈁
+    r'|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅰⅱⅲⅳⅴⅵⅶⅷⅸⅹ]+[\.\)]?'  # Ⅰ. Ⅱ. Ⅲ
+    r'|[•‣⁃∙·ㆍ･○●◎◇◆□■▪▫▷▶▸◁◀△▲▽▼※★☆☞☜→⇒➨✔✓◦◘◙❐❑❖✦✧\-\*]' # 특수기호 불릿
+    r')'
+    r'\s+)'                             # 뒤에 반드시 1개 이상의 공백
+)
+
 def is_pua_char(c: str) -> bool:
     """한컴 HWP 전용 특수문자 및 유니코드 사용자 정의 영역(PUA) 판별"""
     if not c:
@@ -274,6 +293,25 @@ def is_symbol_font(font_name: str) -> bool:
         return False
     fn = font_name.lower()
     return any(k in fn for k in ['wingdings', 'webdings', 'symbol', 'zapfdingbats'])
+
+def normalize_font_size(sz: float) -> float:
+    """PDF 부동소수점 변환 오차(예: 9.95 -> 10.0, 11.99 -> 12.0, 12.95 -> 13.0)를 보정하여
+    문서 편집기(HWP, Word 등)에서 사용하는 정수 또는 0.5pt 단위의 폰트 크기로 정규화."""
+    try:
+        sz_val = float(sz)
+    except Exception:
+        return 12.0
+    if sz_val <= 0:
+        return 12.0
+    # 0.5pt 단위 스냅 (오차 허용 범위: ±0.08pt)
+    nearest_half = round(sz_val * 2.0) / 2.0
+    if abs(sz_val - nearest_half) <= 0.08:
+        return nearest_half
+    # 0.1pt 단위 스냅 (오차 허용 범위: ±0.025pt)
+    nearest_tenth = round(sz_val * 10.0) / 10.0
+    if abs(sz_val - nearest_tenth) <= 0.025:
+        return nearest_tenth
+    return round(sz_val, 2)
 
 # --- Enhanced Font Utilities ---
 class FontMatcher:
@@ -361,25 +399,54 @@ HNC_FONT_NAME_MAP: dict[str, str] = {
     'hypmpl': 'HY목각파임L',
     'hywulb': 'HY울릉도B',
     'hywulm': 'HY울릉도M',
+    'hywul': 'HY울릉도M',
     'hypost': 'HY엽서M',
     'hypostb': 'HY엽서B',
     'hypostl': 'HY엽서L',
     'h2snb': 'HY신그래픽B',
     'h2snm': 'HY신그래픽M',
+    # HY 접두어 버전 별칭
+    'hygtre': 'HY견고딕',
+    'hygtrm': 'HY고딕M',
+    'hyhdrm': 'HY헤드라인M',
+    'hyhdr': 'HY헤드라인M',
+    'hydb': 'HY둥근고딕',
+    'hydrb': 'HY둥근고딕B',
+    'hydrm': 'HY둥근고딕M',
+    'hygrre': 'HY견출고딕',
+    'hygrrm': 'HY중고딕',
+    'hymre': 'HY견명조',
+    'hymrm': 'HY명조M',
+    'hymjre': 'HY견명조',
+    'hymjrm': 'HY명조M',
+    'hysnrm': 'HY신명조',
+    'hysnre': 'HY신견명조',
 
     # 함초롬 글꼴 (한컴 대표 폰트)
-    'hmkmr': '함초롬바탕',
-    'hmkmrl': '함초롬바탕',
-    'hmkmr_l': '함초롬바탕',
-    'hmkmb': '함초롬바탕',
-    'hmkmd': '함초롬돋움',
-    'hmkmdb': '함초롬돋움',
     'hamchorombatang': '함초롬바탕',
     'hamchoromdotum': '함초롬돋움',
     'hcrbatang': '함초롬바탕',
     'hcrdotum': '함초롬돋움',
+    'hcrdotumbold': '함초롬돋움',
+    'hcrdotumb': '함초롬돋움',
+    'hcrdotumbd': '함초롬돋움',
+    'hcrbatangbold': '함초롬바탕',
+    'hcrbatangb': '함초롬바탕',
+    'hcrbatangbd': '함초롬바탕',
+    'h2hdr': 'HY헤드라인M',
+    'h2hdrb': 'HY헤드라인M',
 
-    # 휴먼 글꼴 (한컴)
+    # 휴먼 글꼴 (한컴 HMK / HMF)
+    'hmkmm': '휴먼명조',
+    'hmkmb': '휴먼명조',
+    'hmkmr': '휴먼둥근헤드라인',
+    'hmkmd': '휴먼고딕',
+    'hmkmdb': '휴먼고딕',
+    'hmkmg': '휴먼고딕',
+    'hmkma': '휴먼매직체',
+    'hmkme': '휴먼엑스포',
+    'hmkmo': '휴먼옛체',
+    'hmkmp': '휴먼편지체',
     'hmfmm': '휴먼명조',
     'hmfme': '휴먼견명조',
     'hmfgm': '휴먼고딕',
@@ -391,7 +458,7 @@ HNC_FONT_NAME_MAP: dict[str, str] = {
     'hmfma': '휴먼매직체',
     'hmfex': '휴먼엑스포',
 
-    # 한컴 글꼴 (한컴오피스 전용)
+    # 한컴 글꼴 (한컴오피스 전용 및 Haansoft)
     'hcomn': '한컴바탕',
     'hcomd': '한컴돋움',
     'hcomc': '한컴쿨재즈',
@@ -399,6 +466,14 @@ HNC_FONT_NAME_MAP: dict[str, str] = {
     'hcomy': '한컴윤체',
     'hancombatang': '한컴바탕',
     'hancomdotum': '한컴돋움',
+    'haansoftbatang': '한컴바탕',
+    'haansoftdotum': '한컴돋움',
+    'hansantteutdotum': '한컴산뜻돋움',
+    'hansantteutdotumregular': '한컴산뜻돋움',
+    'hansantteutdotumbold': '한컴산뜻돋움',
+    'hancomgothic': '한컴고딕',
+    'hancomgothicregular': '한컴고딕',
+    'hancomgothicbold': '한컴고딕',
 
     # 기타 자주 사용되는 한컴 번들 폰트
     'mdart': 'MD아트체',
@@ -411,12 +486,122 @@ class SystemFontManager:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(SystemFontManager, cls).__new__(cls)
-            cls._instance.font_map = cls._instance._find_system_fonts()
-            cls._instance.font_name_variations = cls._instance._build_font_variations()
             cls._instance.font_matcher = FontMatcher()
-            cls._instance.font_file_index = cls._instance._build_font_file_index()
             cls._instance._unmatched_fonts_warned: set[str] = set()
+            cls._instance.pdf_font_aliases: dict[str, str] = {}
+
+            # 1. 영구 디스크 캐시 로드 시도 (0.001초 고속 구동)
+            if not cls._instance._load_from_cache():
+                # 2. 캐시가 없거나 폰트 디렉토리 변경 시에만 시스템 폰트 스캔 수행
+                cls._instance.font_map = cls._instance._find_system_fonts()
+                cls._instance.font_name_variations = cls._instance._build_font_variations()
+                cls._instance.font_file_index = cls._instance._build_font_file_index()
+                # 3. 디스크 캐시 저장
+                cls._instance._save_to_cache()
         return cls._instance
+
+    def _get_cache_path(self) -> str:
+        """OS별 영구 폰트 캐시 파일 경로 반환"""
+        if sys.platform == "win32":
+            base_dir = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
+            cache_dir = os.path.join(base_dir, "yongpdf", "cache")
+        elif sys.platform == "darwin":
+            cache_dir = os.path.expanduser("~/Library/Caches/yongpdf")
+        else:
+            cache_dir = os.path.expanduser("~/.cache/yongpdf")
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+        except Exception:
+            pass
+        return os.path.join(cache_dir, "font_cache_v2.json")
+
+    def _get_font_dirs(self) -> list[str]:
+        """시스템별 기본 폰트 및 한컴 폰트 디렉토리 목록 반환 (정규화 및 중복 제거)"""
+        font_dirs = []
+        if sys.platform == "darwin":
+            font_dirs = ["/System/Library/Fonts", "/Library/Fonts", os.path.expanduser("~/Library/Fonts")]
+        elif sys.platform == "win32":
+            font_dirs = [os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "Fonts")]
+            if "LOCALAPPDATA" in os.environ:
+                user_fonts_dir = os.path.join(os.environ["LOCALAPPDATA"], "Microsoft", "Windows", "Fonts")
+                if user_fonts_dir not in font_dirs and os.path.isdir(user_fonts_dir):
+                    font_dirs.append(user_fonts_dir)
+            if "USERPROFILE" in os.environ:
+                userprofile_fonts = os.path.join(os.environ["USERPROFILE"], "AppData", "Local", "Microsoft", "Windows", "Fonts")
+                if userprofile_fonts not in font_dirs and os.path.isdir(userprofile_fonts):
+                    font_dirs.append(userprofile_fonts)
+        else:
+            font_dirs = ["/usr/share/fonts", "/usr/local/share/fonts", os.path.expanduser("~/.fonts")]
+
+        try:
+            hnc_dirs = self._get_hnc_font_directories()
+            for h_dir in hnc_dirs:
+                if h_dir and os.path.isdir(h_dir) and h_dir not in font_dirs:
+                    font_dirs.append(h_dir)
+        except Exception:
+            pass
+
+        return [d for d in list(set(font_dirs)) if os.path.isdir(d)]
+
+    def _get_dirs_meta(self, dirs: list[str]) -> dict[str, float]:
+        """디렉토리별 수정 시간(mtime) 딕셔너리 생성 (캐시 검증용)"""
+        meta = {}
+        for d in dirs:
+            try:
+                meta[d] = os.path.getmtime(d)
+            except Exception:
+                meta[d] = 0.0
+        return meta
+
+    def _load_from_cache(self) -> bool:
+        """디스크 캐시에서 폰트 인덱스 로드 시도. 유효한 경우 True 반환."""
+        cache_path = self._get_cache_path()
+        if not os.path.isfile(cache_path):
+            return False
+        try:
+            font_dirs = self._get_font_dirs()
+            current_meta = self._get_dirs_meta(font_dirs)
+
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            if data.get('version') != 2:
+                return False
+
+            cached_meta = data.get('dirs_meta', {})
+            # 디렉토리 목록 및 mtime 일치 여부 검증
+            if current_meta != cached_meta:
+                return False
+
+            self.font_map = data.get('font_map', {})
+            self.font_name_variations = data.get('font_name_variations', {})
+            self.font_file_index = data.get('font_file_index', {})
+            print(f"[FontCache] Loaded {len(self.font_map)} fonts from persistent cache: {cache_path}")
+            return True
+        except Exception as e:
+            print(f"[FontCache] Cache load error: {e}")
+            return False
+
+    def _save_to_cache(self) -> None:
+        """폰트 인덱스를 디스크 캐시에 원자적으로 저장."""
+        cache_path = self._get_cache_path()
+        try:
+            font_dirs = self._get_font_dirs()
+            meta = self._get_dirs_meta(font_dirs)
+            data = {
+                'version': 2,
+                'dirs_meta': meta,
+                'font_map': getattr(self, 'font_map', {}),
+                'font_name_variations': getattr(self, 'font_name_variations', {}),
+                'font_file_index': getattr(self, 'font_file_index', {})
+            }
+            tmp_path = cache_path + '.tmp'
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp_path, cache_path)
+            print(f"[FontCache] Saved {len(self.font_map)} fonts to persistent cache: {cache_path}")
+        except Exception as e:
+            print(f"[FontCache] Cache save error: {e}")
 
     def _get_all_names_from_font(self, font_path):
         names = set()
@@ -432,37 +617,34 @@ class SystemFontManager:
             names.add(kor_name.replace(' ', '-'))
 
         try:
-            font = TTFont(font_path, fontNumber=0)
-            if 'name' in font:
-                for record in font['name'].names:
-                    if record.nameID in [1, 4, 6]:  # Family name, Full name, PostScript name
-                        name = None
-                        try:
-                            name = record.toUnicode()
-                        except Exception:
-                            # 구형 한컴/한국어 폰트의 name 테이블 인코딩 fallback (CP949, EUC-KR, UTF-16-BE)
-                            raw = getattr(record, 'string', None)
-                            if raw and isinstance(raw, (bytes, bytearray)):
-                                for enc in ('cp949', 'euc-kr', 'utf-16-be', 'utf-8', 'latin-1'):
-                                    try:
-                                        decoded = raw.decode(enc).replace('\x00', '').strip()
-                                        if decoded:
-                                            name = decoded
-                                            break
-                                    except Exception:
-                                        continue
-                        if name:
-                            name = name.strip()
+            with TTFont(font_path, fontNumber=0, lazy=True) as font:
+                if 'name' in font:
+                    for record in font['name'].names:
+                        if record.nameID in [1, 4, 6]:  # Family name, Full name, PostScript name
+                            name = None
+                            try:
+                                name = record.toUnicode()
+                            except Exception:
+                                # 구형 한컴/한국어 폰트의 name 테이블 인코딩 fallback (CP949, EUC-KR, UTF-16-BE)
+                                raw = getattr(record, 'string', None)
+                                if raw and isinstance(raw, (bytes, bytearray)):
+                                    for enc in ('cp949', 'euc-kr', 'utf-16-be', 'utf-8', 'latin-1'):
+                                        try:
+                                            decoded = raw.decode(enc).replace('\x00', '').strip()
+                                            if decoded:
+                                                name = decoded
+                                                break
+                                        except Exception:
+                                            continue
                             if name:
-                                names.add(name)
-                                # 하이픈과 공백 변형 추가
-                                names.add(name.replace('-', ' '))
-                                names.add(name.replace(' ', '-'))
-                                # 한글명이 들어있는 경우 공백 제거 버전도 추가
-                                if any('가' <= ch <= '힣' for ch in name):
-                                    names.add(name.replace(' ', ''))
-        except Exception as e:
-            print(f"Error reading font {font_path}: {e}")
+                                name = name.strip()
+                                if name:
+                                    names.add(name)
+                                    names.add(name.replace('-', ' '))
+                                    names.add(name.replace(' ', '-'))
+                                    if any('가' <= ch <= '힣' for ch in name):
+                                        names.add(name.replace(' ', ''))
+        except Exception:
             names.add(base_name)
         return list(names)
 
@@ -646,81 +828,7 @@ class SystemFontManager:
 
     def _find_system_fonts(self):
         font_map = {}
-        font_dirs = []
-        
-        if sys.platform == "darwin":
-            font_dirs = ["/System/Library/Fonts", "/Library/Fonts", os.path.expanduser("~/Library/Fonts")]
-        elif sys.platform == "win32":
-            # 시스템 폰트 디렉토리
-            font_dirs = [os.path.join(os.environ["SystemRoot"], "Fonts")]
-            
-            # 사용자별 폰트 디렉토리 동적 감지
-            if "LOCALAPPDATA" in os.environ:
-                user_fonts_dir = os.path.join(os.environ["LOCALAPPDATA"], "Microsoft", "Windows", "Fonts")
-                font_dirs.append(user_fonts_dir)
-            
-            # 추가적으로 사용자 프로필 기반 폰트 디렉토리 감지
-            if "USERPROFILE" in os.environ:
-                userprofile_fonts = os.path.join(os.environ["USERPROFILE"], "AppData", "Local", "Microsoft", "Windows", "Fonts")
-                if userprofile_fonts not in font_dirs:
-                    font_dirs.append(userprofile_fonts)
-            
-            # 현재 사용자명을 이용한 절대 경로 구성 (fallback)
-            if "USERNAME" in os.environ:
-                username = os.environ["USERNAME"]
-                username_fonts_dir = f"C:\\Users\\{username}\\AppData\\Local\\Microsoft\\Windows\\Fonts"
-                if username_fonts_dir not in font_dirs and os.path.exists(username_fonts_dir):
-                    font_dirs.append(username_fonts_dir)
-            
-            # 추가적으로 Users 디렉토리의 모든 사용자 폰트 디렉토리를 탐색
-            try:
-                users_dir = "C:\\Users"
-                if os.path.exists(users_dir):
-                    for user_folder in os.listdir(users_dir):
-                        user_fonts_path = os.path.join(users_dir, user_folder, "AppData", "Local", "Microsoft", "Windows", "Fonts")
-                        if os.path.exists(user_fonts_path) and user_fonts_path not in font_dirs:
-                            font_dirs.append(user_fonts_path)
-            except (OSError, PermissionError) as e:
-                print(f"Warning: Could not scan all user font directories: {e}")
-            
-            # 시스템의 다른 일반적인 폰트 위치들도 확인
-            additional_dirs = [
-                "C:\\Windows\\Fonts",  # SystemRoot와 중복일 수 있지만 안전하게 추가
-                os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Common Files", "Microsoft Shared", "Fonts"),
-                os.path.join(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"), "Common Files", "Microsoft Shared", "Fonts") if "ProgramFiles(x86)" in os.environ else None
-            ]
-            
-            for additional_dir in additional_dirs:
-                if additional_dir and os.path.exists(additional_dir) and additional_dir not in font_dirs:
-                    font_dirs.append(additional_dir)
-                    
-        else:  # Linux
-            font_dirs = ["/usr/share/fonts", "/usr/local/share/fonts", os.path.expanduser("~/.fonts")]
-            
-            # Linux에서 추가 폰트 디렉토리들
-            additional_linux_dirs = [
-                "/usr/share/fonts/truetype",
-                "/usr/share/fonts/opentype", 
-                "/usr/local/share/fonts/truetype",
-                "/usr/local/share/fonts/opentype",
-                os.path.expanduser("~/.local/share/fonts")
-            ]
-            
-            for additional_dir in additional_linux_dirs:
-                if os.path.exists(additional_dir) and additional_dir not in font_dirs:
-                    font_dirs.append(additional_dir)
-
-        # 한컴오피스(Hnc) 폰트 디렉토리 자동 감지 및 병합
-        try:
-            hnc_dirs = self._get_hnc_font_directories()
-            for h_dir in hnc_dirs:
-                if h_dir and os.path.isdir(h_dir) and h_dir not in font_dirs:
-                    font_dirs.append(h_dir)
-        except Exception as e:
-            print(f"Warning: Error detecting Hnc font directories: {e}")
-        
-        # 중복 제거
-        font_dirs = list(set(font_dirs))
+        font_dirs = self._get_font_dirs()
         
         # 디버깅: 폰트 디렉토리 목록 출력
         print(f"Scanning font directories: {len(font_dirs)} paths")
@@ -766,9 +874,6 @@ class SystemFontManager:
         total_fonts_found = 0
         for full_path in all_font_files:
             try:
-                # [개선] 시스템 폰트 데이터베이스에 명시적 등록 (UI 렌더링 누락 방지)
-                QFontDatabase.addApplicationFont(full_path)
-                
                 font_names = self._get_all_names_from_font(full_path)
                 added_any = False
                 for name in font_names:
@@ -781,7 +886,7 @@ class SystemFontManager:
                 # 에러 로그 인코딩 방어
                 try:
                     print(f"Error processing font {full_path}: {e}")
-                except:
+                except Exception:
                     pass
         
         print(f"Total unique font files indexed: {total_fonts_found}")
@@ -1027,13 +1132,15 @@ class SystemFontManager:
                 if finalized:
                     return finalized
 
-        # 파일명 별칭 매핑 (예: H2gtrE -> HY견고딕, HMKMR -> 함초롬바탕)
+        # 파일명 별칭 매핑 (예: H2gtrE -> HY견고딕, HMKMM -> 휴먼명조)
+        mapped_kor_target = None
         for cand_name in [norm, clean_font_name, pdf_font_name]:
             if not cand_name:
                 continue
             cand_key = re.sub(r'[^a-z0-9]', '', cand_name.lower())
             if cand_key in HNC_FONT_NAME_MAP:
                 mapped_kor = HNC_FONT_NAME_MAP[cand_key]
+                mapped_kor_target = mapped_kor
                 finalized = self._finalize_font_name(mapped_kor)
                 if finalized:
                     return finalized
@@ -1043,6 +1150,7 @@ class SystemFontManager:
                         finalized = self._finalize_font_name(fn)
                         if finalized:
                             return finalized
+                break
         filename_aliases = {
             '##h2gtre': 'HY견고딕',
             '##h2hdrm': 'HY헤드라인M',
@@ -1059,23 +1167,66 @@ class SystemFontManager:
                 if finalized:
                     return finalized
 
-        # 한국어 대표 서체 패밀리 우선 매칭 (difflib 엉뚱한 매칭 방지)
+        # [복원] PDF 내부 임베딩 폰트 스트림에서 추출된 별칭 확인
+        if hasattr(self, 'pdf_font_aliases'):
+            for cand_alias in (pdf_font_name, clean_font_name):
+                if cand_alias in self.pdf_font_aliases:
+                    resolved = self.pdf_font_aliases[cand_alias]
+                    if resolved and resolved != pdf_font_name:
+                        matched_alias = self.find_best_font_match(resolved)
+                        if matched_alias:
+                            return matched_alias
+
+        # 한국어 대표 서체 패밀리 우선 매칭 (difflib 엉뚱한 비한글 매칭 완벽 방지)
         lower_name = norm.lower()
         clean_lower = clean_font_name.lower()
+        target_hint = (mapped_kor_target or '').lower()
+
+        # 1. 헤드라인 / 견고딕 / 울릉도 등 굵은 제목체 계열
+        if any(k in lower_name or k in clean_lower or k in target_hint for k in (
+            'h2hdr', 'hyhdr', 'headline', '헤드라인', 'h2gtr', 'hygtr', '견고딕', '중고딕', 'h2db', '둥근고딕', 'wul', '울릉도', '목각'
+        )):
+            for cand in ['HY헤드라인M', 'HY헤드라인', '휴먼둥근헤드라인', 'H2hdrM', 'HY견고딕', 'HY울릉도M', 'Apple SD Gothic Neo', '맑은 고딕', 'Malgun Gothic', 'NanumGothic', 'Nanum Gothic']:
+                if cand in self.font_map:
+                    return self._finalize_font_name(cand)
+
+        # 2. 맑은 고딕 계열
         if any(k in lower_name or k in clean_lower for k in ('malgun', '맑은고딕', '맑은 고딕')):
             for cand in ['Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', 'NanumGothic', 'Nanum Gothic']:
                 if cand in self.font_map:
                     return self._finalize_font_name(cand)
-        if any(k in lower_name or k in clean_lower for k in ('dotum', '돋움', '고딕', 'gothic')):
-            for cand in ['Apple SD Gothic Neo', 'NanumGothic', 'Nanum Gothic', 'Dotum', '돋움']:
+
+        # 3. 함초롬 계열
+        if any(k in lower_name or k in clean_lower for k in ('hcr', 'hamchorom', '함초롬')):
+            for cand in ['HCR Dotum', '함초롬돋움', 'HCR Batang', '함초롬바탕', 'HCRDotum', 'HCRBatang', 'Apple SD Gothic Neo', '맑은 고딕']:
                 if cand in self.font_map:
                     return self._finalize_font_name(cand)
-        if any(k in lower_name or k in clean_lower for k in ('batang', '바탕', '명조', 'myeongjo', 'myungjo')):
-            for cand in ['Batang', '바탕', 'AppleMyungjo', 'Nanum Myeongjo', 'NanumMyeongjo']:
+
+        # 4. 고딕 / 돋움 / 산뜻돋움 / 휴먼고딕 계열
+        if any(k in lower_name or k in clean_lower or k in target_hint for k in (
+            'dotum', '돋움', '고딕', 'gothic', 'santteut', '산뜻돋움', 'hancomgothic', '한컴고딕', '휴먼고딕', 'hmfg', 'hmkmg', 'hmkmd'
+        )):
+            for cand in ['Apple SD Gothic Neo', '맑은 고딕', 'Malgun Gothic', 'NanumGothic', 'Nanum Gothic', 'Dotum', '돋움']:
                 if cand in self.font_map:
                     return self._finalize_font_name(cand)
+
+        # 5. 바탕 / 명조 / 신명조 / 휴먼명조 / 한컴바탕 / 궁서 계열
+        if any(k in lower_name or k in clean_lower or k in target_hint for k in (
+            'batang', '바탕', '명조', 'myeongjo', 'myungjo', 'mjre', 'mjrm', 'hmkmm', 'hmfmm', '휴먼명조', 'hysn', 'h2sn', '신명조', '견명조', 'haansoftbatang', '한컴바탕', '궁서', 'gungsuh', 'h2gs', 'hygs'
+        )):
+            for cand in ['AppleMyungjo', 'Batang', '바탕', 'Nanum Myeongjo', 'NanumMyeongjo', 'Apple SD Gothic Neo', '맑은 고딕']:
+                if cand in self.font_map:
+                    return self._finalize_font_name(cand)
+
+        # 6. 굴림 계열
         if any(k in lower_name or k in clean_lower for k in ('gulim', '굴림')):
-            for cand in ['Gulim', '굴림', 'Apple SD Gothic Neo', 'NanumGothic']:
+            for cand in ['Gulim', '굴림', 'Apple SD Gothic Neo', '맑은 고딕', 'NanumGothic']:
+                if cand in self.font_map:
+                    return self._finalize_font_name(cand)
+
+        # 7. 한컴 폰트 별칭 매핑에 들어있던 한글 서체인데 시스템 폰트 목록에 없었던 경우 한글 fallback
+        if mapped_kor_target:
+            for cand in ['Apple SD Gothic Neo', '맑은 고딕', 'Malgun Gothic', 'NanumGothic', 'AppleMyungjo']:
                 if cand in self.font_map:
                     return self._finalize_font_name(cand)
 
@@ -1140,6 +1291,8 @@ class PdfFontExtractor:
     def __init__(self, doc):
         self.doc = doc
         self.used_fonts = set()
+        self.font_details = {}
+        self.font_aliases = {}
         self.font_manager = SystemFontManager()
     
     def extract_fonts_from_document(self):
@@ -1155,11 +1308,45 @@ class PdfFontExtractor:
             try:
                 font_list = page.get_fonts()
                 for font_info in font_list:
+                    xref = font_info[0]
                     font_name = font_info[3] if len(font_info) > 3 else font_info[0]
                     if font_name:
+                        # [가상 프린터/CID 난독화 폰트 복원] 임베딩된 폰트 스트림의 실제 TrueType 이름 추출
+                        real_name = None
+                        if xref > 0 and (font_name.startswith('CIDFont+') or font_name.startswith('F') or '+' not in font_name):
+                            try:
+                                base, ext, ftype, buf = self.doc.extract_font(xref)
+                                if buf:
+                                    import io
+                                    from fontTools.ttLib import TTFont
+                                    tt = TTFont(io.BytesIO(buf), fontNumber=0, lazy=True)
+                                    if 'name' in tt:
+                                        kor_name = None
+                                        eng_name = None
+                                        for rec in tt['name'].names:
+                                            if rec.nameID in [1, 4, 6]:
+                                                try:
+                                                    val = rec.toUnicode().strip()
+                                                    if val:
+                                                        if any('가' <= ch <= '힣' for ch in val) and not kor_name:
+                                                            kor_name = val
+                                                        elif not eng_name:
+                                                            eng_name = val
+                                                except Exception:
+                                                    pass
+                                        real_name = kor_name or eng_name
+                            except Exception:
+                                pass
+                        
+                        display_name = real_name if real_name else font_name
+                        if real_name:
+                            self.font_aliases[font_name] = real_name
+                            if hasattr(self.font_manager, 'pdf_font_aliases'):
+                                self.font_manager.pdf_font_aliases[font_name] = real_name
+                        
                         font_details[font_name] = {
-                            'xref': font_info[0],
-                            'name': font_info[3] if len(font_info) > 3 else font_name,
+                            'xref': xref,
+                            'name': display_name,
                             'type': font_info[1] if len(font_info) > 1 else 'Unknown',
                             'encoding': font_info[2] if len(font_info) > 2 else 'Unknown'
                         }
@@ -1191,12 +1378,14 @@ class PdfFontExtractor:
         """PDF 폰트와 시스템 폰트 매칭 결과"""
         matched_fonts = []
         for pdf_font in self.used_fonts:
-            system_font = self.font_manager.find_best_font_match(pdf_font)
+            target_name = self.font_aliases.get(pdf_font, pdf_font)
+            system_font = self.font_manager.find_best_font_match(target_name) or self.font_manager.find_best_font_match(pdf_font)
             if system_font:
                 matched_fonts.append({
                     'pdf_font': pdf_font,
+                    'resolved_name': target_name,
                     'system_font': system_font,
-                    'confidence': self._calculate_match_confidence(pdf_font, system_font)
+                    'confidence': self._calculate_match_confidence(target_name, system_font)
                 })
         
         # 신뢰도 순으로 정렬
@@ -1254,7 +1443,7 @@ class TextEditorDialog(QDialog):
         self.original_font_info = {
             'font': span_info.get('font', ''),
             'pdf_font_name': span_info.get('pdf_font_name') or span_info.get('font', ''),
-            'size': span_info.get('size', 12),
+            'size': normalize_font_size(span_info.get('size', 12)),
             'flags': span_info.get('flags', 0)
         }
         
@@ -1385,7 +1574,7 @@ class TextEditorDialog(QDialog):
 
         self.tracking_spin = QDoubleSpinBox()
         self.tracking_spin.setDecimals(1)
-        self.tracking_spin.setRange(-50.0, 50.0)  # percent delta (HWP 표준 -50% ~ +50%)
+        self.tracking_spin.setRange(-50.0, 500.0)  # percent delta (-50% ~ +500%, 배분정렬 지원)
         self.tracking_spin.setSingleStep(0.5)
         self.tracking_spin.setValue(float(span_info.get('tracking', 0.0)))
 
@@ -1648,11 +1837,7 @@ class TextEditorDialog(QDialog):
         parent.preview_edit_changes(self.overlay_key, vals)
 
     def _normalize_font_size(self, value):
-        try:
-            val = float(value)
-        except Exception:
-            return 12.0
-        return val
+        return normalize_font_size(value)
 
     def _on_patch_margin_changed(self):
         # _on_values_changed로 통합됨
@@ -2352,7 +2537,9 @@ class TextOverlay:
                 if needs_precise:
                     curr_x = text_x
                     t_ratio = 1.0 + tracking_ratio
-                    for ch in line:
+                    actual_width = 0.0
+                    num_chars = len(line)
+                    for idx, ch in enumerate(line):
                         ch_w = font_metrics_f.horizontalAdvance(ch)
                         if ch == ' ' and is_hwp:
                             ch_w_eff = max(ch_w, hwp_std_space)
@@ -2363,8 +2550,11 @@ class TextOverlay:
                         if ch.strip():
                             _draw_text_item(curr_x, curr_y, ch)
                         
-                        curr_x += current_advance * t_ratio
-                    actual_width = (curr_x - text_x)
+                        if idx < num_chars - 1:
+                            curr_x += current_advance * t_ratio
+                        else:
+                            actual_width = (curr_x + current_advance) - text_x
+                            curr_x += current_advance
                 else:
                     _draw_text_item(text_x, curr_y, line)
                     actual_width = font_metrics_f.horizontalAdvance(line) / precision_multiplier
@@ -3155,6 +3345,11 @@ class PdfViewerWidget(QLabel):
             self.update()
         
     def set_document(self, doc):
+        if getattr(self, 'doc', None) and self.doc != doc:
+            try:
+                self.doc.close()
+            except Exception:
+                pass
         self.doc = doc
         self.current_page_num = 0
         self._text_dict_cache = {} # 캐시 초기화
@@ -3850,7 +4045,27 @@ class PdfViewerWidget(QLabel):
                         eff_dir = line_dir
                     for span in line.get('spans', []):
                         font = span.get('font', '')
-                        size = float(span.get('size', 12.0))
+                        raw_size = float(span.get('size', 12.0))
+                        sp_chars = span.get('chars', [])
+                        
+                        # HCR 계열 여부 판별 (0.970 em base)
+                        is_hcr = any(k in font.lower() for k in ['hcr', '함초롬'])
+                        em_base = 0.970 if is_hcr else 1.000
+                        
+                        # [핵심] MuPDF의 수평 스케일링(장평 Tz) 기하평균 크기 왜곡 역보정
+                        # span['size']가 장평(Tz)에 의해 왜곡된 경우(예: 10pt 장평 105% -> 10.19pt, 98% -> 9.83pt)
+                        # 실제 한글 글리프 너비로부터 원본 폰트 높이(수직 크기)를 역산하여 정규화
+                        hangul_in_span = [c for c in sp_chars if '가' <= c.get('c', '') <= '힣']
+                        if hangul_in_span and raw_size > 0:
+                            w_avg = sum(c['bbox'][2] - c['bbox'][0] for c in hangul_in_span) / len(hangul_in_span)
+                            rho = (w_avg / em_base) / raw_size
+                            if abs(rho - 1.0) >= 0.008:
+                                true_sz_raw = (raw_size ** 2) / (w_avg / em_base)
+                                size = normalize_font_size(true_sz_raw)
+                            else:
+                                size = normalize_font_size(raw_size)
+                        else:
+                            size = normalize_font_size(raw_size)
                         color = span.get('color', 0)
                         flags = span.get('flags', 0)
                         for ch in span.get('chars', []):
@@ -3956,16 +4171,15 @@ class PdfViewerWidget(QLabel):
                         else:
                             bl['chars'].sort(key=lambda c: c['bbox'][1])
                         
-                    # [시각적 공백 복원] PDF 문자 간격(Gap)을 분석하여 누락된 공백 문자(' ') 복원
-                    # Word/PowerPoint 등에서 공백 글리프 없이 좌표 이동(TJ)으로 띄어쓰기된 텍스트 처리
-                    spaced_chars = []
+                    # [시각적 공백 복원 및 표/컬럼 분할]
+                    # 1) 먼저 col_split_gap 기준으로 독립 세그먼트(셀/컬럼) 분할
+                    raw_segments = []
+                    curr_raw = []
                     for ch in bl['chars']:
-                        if not spaced_chars:
-                            spaced_chars.append(ch)
+                        if not curr_raw:
+                            curr_raw.append(ch)
                         else:
-                            prev_ch = spaced_chars[-1]
-                            p_c = prev_ch.get('c', '')
-                            c_c = ch.get('c', '')
+                            prev_ch = curr_raw[-1]
                             if not is_vertical:
                                 gap = ch['bbox'][0] - prev_ch['bbox'][2]
                             else:
@@ -3975,68 +4189,135 @@ class PdfViewerWidget(QLabel):
                                 else:
                                     gap = ch['bbox'][1] - prev_ch['bbox'][3]
                             f_sz = max(float(ch.get('size', 12.0)), float(prev_ch.get('size', 12.0)), 10.0)
-                            max_seg_gap = max(35.0, f_sz * 3.5)
-                            
-                            # 공백 판정 임계치: 글자 크기의 18% 이상 및 2.0pt 이상, 컬럼 분할 거리 미만
-                            if (not p_c.isspace()) and (not c_c.isspace()) and (max_seg_gap >= gap >= max(2.0, f_sz * 0.18)):
+                            col_split_gap = max(9.5, f_sz * 1.05)
+                            if gap >= col_split_gap:
+                                raw_segments.append(curr_raw)
+                                curr_raw = [ch]
+                            else:
+                                curr_raw.append(ch)
+                    if curr_raw:
+                        raw_segments.append(curr_raw)
+
+                    # 2) 각 세그먼트 내에서 배분정렬(Distributed Alignment) 및 단어 간 공백 판정
+                    segments = []
+                    for raw_seg in raw_segments:
+                        non_space_chars = [c for c in raw_seg if c.get('c', '').strip()]
+                        is_uniform_spacing = False
+                        if len(non_space_chars) >= 2:
+                            seg_gaps = []
+                            for idx in range(len(non_space_chars) - 1):
+                                nc1 = non_space_chars[idx]
+                                nc2 = non_space_chars[idx + 1]
                                 if not is_vertical:
-                                    sp_bbox = (prev_ch['bbox'][2], prev_ch['bbox'][1], ch['bbox'][0], prev_ch['bbox'][3])
-                                    sp_origin = (prev_ch['bbox'][2], prev_ch.get('origin', (0, 0))[1] if prev_ch.get('origin') else prev_ch['bbox'][3])
+                                    g = nc2['bbox'][0] - nc1['bbox'][2]
+                                else:
+                                    bdir = nc2.get('dir', (0.0, 1.0))
+                                    g = (nc1['bbox'][1] - nc2['bbox'][3]) if bdir[1] < 0 else (nc2['bbox'][1] - nc1['bbox'][3])
+                                seg_gaps.append(g)
+                            
+                            avg_sz = sum(float(c.get('size', 12.0)) for c in non_space_chars) / len(non_space_chars)
+                            min_wide_gap = max(1.6, avg_sz * 0.15)
+                            
+                            if len(non_space_chars) == 2:
+                                # 2글자 한글 단어(성명, 직급, 비고 등)에서 간격이 벌어진 경우 배분정렬로 간주
+                                is_hangul_pair = all('가' <= c.get('c', '') <= '힣' for c in non_space_chars)
+                                if is_hangul_pair and seg_gaps[0] >= min_wide_gap:
+                                    is_uniform_spacing = True
+                            else:
+                                # 3글자 이상: 모든 간격이 일정 기준 이상이고 편차가 작은 경우 균일 배분정렬로 간주
+                                if all(g >= min_wide_gap for g in seg_gaps):
+                                    mean_g = sum(seg_gaps) / len(seg_gaps)
+                                    max_diff = max(abs(g - mean_g) for g in seg_gaps)
+                                    if max_diff <= max(1.8, mean_g * 0.22):
+                                        is_uniform_spacing = True
+                        
+                        curr_seg = []
+                        for ch in raw_seg:
+                            if not curr_seg:
+                                curr_seg.append(ch)
+                            else:
+                                prev_ch = curr_seg[-1]
+                                p_c = prev_ch.get('c', '')
+                                c_c = ch.get('c', '')
+                                if not is_vertical:
+                                    gap = ch['bbox'][0] - prev_ch['bbox'][2]
                                 else:
                                     bl_dir = ch.get('dir', (0.0, 1.0))
                                     if bl_dir[1] < 0:
-                                        sp_bbox = (prev_ch['bbox'][0], ch['bbox'][3], prev_ch['bbox'][2], prev_ch['bbox'][1])
-                                        sp_origin = (prev_ch.get('origin', (0, 0))[0], prev_ch['bbox'][1])
+                                        gap = prev_ch['bbox'][1] - ch['bbox'][3]
                                     else:
-                                        sp_bbox = (prev_ch['bbox'][0], prev_ch['bbox'][3], prev_ch['bbox'][2], ch['bbox'][1])
-                                        sp_origin = (prev_ch.get('origin', (0, 0))[0], prev_ch['bbox'][3])
-                                spaced_chars.append({
-                                    'c': ' ',
-                                    'bbox': sp_bbox,
-                                    'origin': sp_origin,
-                                    'font': prev_ch.get('font', ''),
-                                    'size': prev_ch.get('size', 12.0),
-                                    'color': prev_ch.get('color', 0),
-                                    'flags': prev_ch.get('flags', 0),
-                                    'span': prev_ch.get('span'),
-                                    'dir': prev_ch.get('dir')
-                                })
-                            spaced_chars.append(ch)
-
-                    # 과도한 수평/수직 간격(컬럼 분할) 처리
-                    segments = []
-                    curr_seg = []
-                    for ch in spaced_chars:
-                        if not curr_seg:
-                            curr_seg.append(ch)
-                        else:
-                            prev_ch = curr_seg[-1]
-                            if not is_vertical:
-                                gap = ch['bbox'][0] - prev_ch['bbox'][2]
-                            else:
-                                bl_dir = ch.get('dir', (0.0, 1.0))
-                                if bl_dir[1] < 0:
-                                    gap = prev_ch['bbox'][1] - ch['bbox'][3]
-                                else:
-                                    gap = ch['bbox'][1] - prev_ch['bbox'][3]
-                            f_sz = max(ch['size'], prev_ch['size'], 10.0)
-                            if gap > max(35.0, f_sz * 3.5):
-                                segments.append(curr_seg)
-                                curr_seg = [ch]
-                            else:
+                                        gap = ch['bbox'][1] - prev_ch['bbox'][3]
+                                f_sz = max(float(ch.get('size', 12.0)), float(prev_ch.get('size', 12.0)), 10.0)
+                                
+                                # 균일 자간/배분정렬이 아닌 일반 단어 간 띄어쓰기 판정 시에만 공백 문자 복원
+                                if (not is_uniform_spacing) and (not p_c.isspace()) and (not c_c.isspace()) and (gap >= max(2.0, f_sz * 0.18)):
+                                    if not is_vertical:
+                                        sp_bbox = (prev_ch['bbox'][2], prev_ch['bbox'][1], ch['bbox'][0], prev_ch['bbox'][3])
+                                        sp_origin = (prev_ch['bbox'][2], prev_ch.get('origin', (0, 0))[1] if prev_ch.get('origin') else prev_ch['bbox'][3])
+                                    else:
+                                        bl_dir = ch.get('dir', (0.0, 1.0))
+                                        if bl_dir[1] < 0:
+                                            sp_bbox = (prev_ch['bbox'][0], ch['bbox'][3], prev_ch['bbox'][2], prev_ch['bbox'][1])
+                                            sp_origin = (prev_ch.get('origin', (0, 0))[0], prev_ch['bbox'][1])
+                                        else:
+                                            sp_bbox = (prev_ch['bbox'][0], prev_ch['bbox'][3], prev_ch['bbox'][2], ch['bbox'][1])
+                                            sp_origin = (prev_ch.get('origin', (0, 0))[0], prev_ch['bbox'][3])
+                                    curr_seg.append({
+                                        'c': ' ',
+                                        'bbox': sp_bbox,
+                                        'origin': sp_origin,
+                                        'font': prev_ch.get('font', ''),
+                                        'size': prev_ch.get('size', 12.0),
+                                        'color': prev_ch.get('color', 0),
+                                        'flags': prev_ch.get('flags', 0),
+                                        'span': prev_ch.get('span'),
+                                        'dir': prev_ch.get('dir')
+                                    })
                                 curr_seg.append(ch)
-                    if curr_seg:
-                        segments.append(curr_seg)
+                        if curr_seg:
+                            segments.append(curr_seg)
+                        
+                    # [글머리 기호 및 번호 분리 로직]
+                    # 라인 시작 부분의 항목기호/번호(예: "1. ", "6. ", "· ", "① ")는
+                    # 서식 변경 및 자간 조절 시 들여쓰기와 번호 서식을 보존하기 위해 본문 블록과 분리
+                    expanded_segments = []
+                    for seg in segments:
+                        raw_seg_text = ''.join(c.get('c', '') for c in seg)
+                        m = BULLET_NUM_PATTERN.match(raw_seg_text)
+                        if m:
+                            pfx_len = len(m.group(1))
+                            char_acc = 0
+                            split_idx = 0
+                            for idx, ch in enumerate(seg):
+                                char_acc += len(ch.get('c', ''))
+                                if char_acc >= pfx_len:
+                                    split_idx = idx + 1
+                                    break
+                            pfx_seg = seg[:split_idx]
+                            body_seg = seg[split_idx:]
+                            body_text = ''.join(c.get('c', '') for c in body_seg).strip()
+                            if pfx_seg and body_text:
+                                expanded_segments.append(pfx_seg)
+                                expanded_segments.append(body_seg)
+                            else:
+                                expanded_segments.append(seg)
+                        else:
+                            expanded_segments.append(seg)
+                    segments = expanded_segments
                         
                     for seg in segments:
                         # [방어로직] 한컴 HWP 전용 PUA 특수문자, 글머리기호(Bullet), 및 선행/후행 공백을 텍스트블록에서 제외
                         # 1. 선두의 불릿 기호, 한컴 PUA 특수문자, 심볼 폰트 문자 및 선행 공백 검출/제외 (들여쓰기 인덴트 폭 오차 완벽 해결)
+                        # 단, 세그먼트 자체가 독립된 불릿/기호 세그먼트인 경우 해당 불릿 기호를 보존
+                        has_normal_content = any(not (c.get('c', '').isspace() or is_pua_char(c.get('c', '')) or (c.get('c', '') in BULLET_CHARS) or is_symbol_font(c.get('font', ''))) for c in seg)
                         start_idx = 0
                         while start_idx < len(seg):
                             ch = seg[start_idx]
                             c_str = ch.get('c', '')
                             f_str = ch.get('font', '')
-                            if c_str.isspace() or is_pua_char(c_str) or (c_str in BULLET_CHARS) or is_symbol_font(f_str):
+                            if c_str.isspace() or is_pua_char(c_str):
+                                start_idx += 1
+                            elif has_normal_content and ((c_str in BULLET_CHARS) or is_symbol_font(f_str)):
                                 start_idx += 1
                             else:
                                 break
@@ -4049,7 +4330,9 @@ class PdfViewerWidget(QLabel):
                             ch = seg[end_idx - 1]
                             c_str = ch.get('c', '')
                             f_str = ch.get('font', '')
-                            if c_str.isspace() or is_pua_char(c_str) or (c_str in BULLET_CHARS) or is_symbol_font(f_str):
+                            if c_str.isspace() or is_pua_char(c_str):
+                                end_idx -= 1
+                            elif has_normal_content and ((c_str in BULLET_CHARS) or is_symbol_font(f_str)):
                                 end_idx -= 1
                             else:
                                 break
@@ -4239,7 +4522,7 @@ class PdfViewerWidget(QLabel):
         primary_span = max(target_spans, key=lambda s: len(s.get("text", "").strip()) if s.get("text") else 0)
         primary_attrs = {
             'font': primary_span.get('font', 'Arial'),
-            'size': float(primary_span.get('size', 12.0)),
+            'size': normalize_font_size(primary_span.get('size', 12.0)),
             'color': primary_span.get('color', 0),
             'flags': primary_span.get('flags', 0),
             'origin': target_spans[0].get('origin') or primary_span.get('origin')
@@ -5343,49 +5626,78 @@ class PdfViewerWidget(QLabel):
                 print("X MainWindow를 찾을 수 없어 작업을 중단합니다.")
                 return
 
-            # 1) 선택영역에서 텍스트/스타일 추출
-            # 텍스트: 영역 내 텍스트를 가져와 한 줄로 정규화
-            try:
-                # visual lines에서 선택 영역과 교차하는 텍스트 추출 (시각적 공백 복원 반영)
-                vlines = self._get_visual_lines_for_page(self.current_page_num)
-                intersected_texts = []
-                for vl in vlines:
-                    if self._rects_overlap(vl['original_bbox'], pdf_selection_rect, tol=1.0):
-                        intersected_texts.append(vl['text'])
-                if intersected_texts:
-                    region_text = ' '.join(intersected_texts).strip()
-                else:
-                    rot_clip = (pdf_selection_rect * page.derotation_matrix) if page.rotation != 0 else pdf_selection_rect
-                    region_text = page.get_text("text", clip=rot_clip) or ""
-                    region_text = re.sub(r"\s+", " ", region_text).strip()
-                region_text = ''.join(c for c in region_text if not is_pua_char(c))
-            except Exception:
-                region_text = ""
+            # 1) 선택영역(pdf_selection_rect) 안에 포함된 텍스트/글자들만 정확히 선별 추출
+            vlines = self._get_visual_lines_for_page(self.current_page_num)
+            matched_chars = []
+            selected_lines_text = []
+            first_origin = None
 
-            # 스타일: 가장 빈도 높은 폰트 / 평균 크기 / 가장 빈도 높은 색상
-            try:
-                text_dict = page.get_text("dict")
-                rot_mat = page.rotation_matrix if page.rotation != 0 else None
-                fonts = []
-                sizes = []
-                colors = []
-                for block in text_dict.get("blocks", []):
-                    if block.get('type') != 0:
-                        continue
-                    for line in block.get("lines", []):
-                        for span in line.get("spans", []):
-                            span_bbox = fitz.Rect(span["bbox"])
-                            if rot_mat:
-                                span_bbox = span_bbox * rot_mat
-                            if span_bbox.intersects(pdf_selection_rect):
-                                if span.get('font'): fonts.append(span['font'])
-                                if span.get('size'): sizes.append(float(span['size']))
-                                if 'color' in span: colors.append(span['color'])
-                chosen_font = fonts and Counter(fonts).most_common(1)[0][0] or 'Arial'
-                chosen_size = sizes and (sum(sizes)/len(sizes)) or 12.0
-                chosen_color = colors and Counter(colors).most_common(1)[0][0] or 0
-            except Exception:
-                chosen_font, chosen_size, chosen_color = 'Arial', 12.0, 0
+            for vl in vlines:
+                vl_bbox = vl.get('original_bbox')
+                if not (vl_bbox and self._rects_overlap(vl_bbox, pdf_selection_rect, tol=1.0)):
+                    continue
+                
+                # 라인 내에서 드래그 영역과 겹치는 글자들 필터링
+                chars_in_rect = []
+                for ch in vl.get('chars', []):
+                    cb = fitz.Rect(ch['bbox'])
+                    cx = (cb.x0 + cb.x1) / 2.0
+                    cy = (cb.y0 + cb.y1) / 2.0
+                    # 글자의 중심점이 선택 영역에 있거나 교차 면적이 충분한 경우
+                    if (pdf_selection_rect.x0 - 1.0 <= cx <= pdf_selection_rect.x1 + 1.0 and
+                        pdf_selection_rect.y0 - 1.0 <= cy <= pdf_selection_rect.y1 + 1.0):
+                        chars_in_rect.append(ch)
+                    elif cb.intersects(pdf_selection_rect):
+                        intersect_rect = cb & pdf_selection_rect
+                        if intersect_rect.width * intersect_rect.height >= (cb.width * cb.height * 0.35):
+                            chars_in_rect.append(ch)
+
+                if chars_in_rect:
+                    # 앞뒤 공백 정리
+                    while chars_in_rect and chars_in_rect[0].get('c', '').isspace():
+                        chars_in_rect.pop(0)
+                    while chars_in_rect and chars_in_rect[-1].get('c', '').isspace():
+                        chars_in_rect.pop()
+                        
+                    if chars_in_rect:
+                        line_txt = ''.join(c.get('c', '') for c in chars_in_rect)
+                        line_txt = ''.join(c for c in line_txt if not is_pua_char(c)).strip()
+                        if line_txt:
+                            selected_lines_text.append(line_txt)
+                            matched_chars.extend(chars_in_rect)
+                            if first_origin is None:
+                                for c in chars_in_rect:
+                                    if c.get('origin'):
+                                        first_origin = c['origin']
+                                        break
+
+            if selected_lines_text and matched_chars:
+                region_text = ' '.join(selected_lines_text)
+                from collections import Counter
+                font_list = [c['font'] for c in matched_chars if c.get('font')]
+                size_list = [c['size'] for c in matched_chars if c.get('size')]
+                color_list = [c['color'] for c in matched_chars if 'color' in c]
+                
+                chosen_font = Counter(font_list).most_common(1)[0][0] if font_list else 'Arial'
+                chosen_size = normalize_font_size(Counter(size_list).most_common(1)[0][0] if size_list else 12.0)
+                chosen_color = Counter(color_list).most_common(1)[0][0] if color_list else 0
+                
+                x0_m = min(c['bbox'][0] for c in matched_chars)
+                y0_m = min(c['bbox'][1] for c in matched_chars)
+                x1_m = max(c['bbox'][2] for c in matched_chars)
+                y1_m = max(c['bbox'][3] for c in matched_chars)
+                actual_text_bbox = fitz.Rect(x0_m, y0_m, x1_m, y1_m)
+            else:
+                # visual lines에서 글자가 매칭되지 않은 경우 (빈 영역 드래그 등)
+                rot_clip = (pdf_selection_rect * page.derotation_matrix) if page.rotation != 0 else pdf_selection_rect
+                clip_text = page.get_text("text", clip=rot_clip) or ""
+                region_text = re.sub(r"\s+", " ", clip_text).strip()
+                region_text = ''.join(c for c in region_text if not is_pua_char(c))
+                chosen_font = 'Arial'
+                chosen_size = 12.0
+                chosen_color = 0
+                actual_text_bbox = pdf_selection_rect
+                first_origin = None
 
             # 시스템 폰트 매칭
             chosen_font_orig = chosen_font
@@ -5404,9 +5716,21 @@ class PdfViewerWidget(QLabel):
                 'size': chosen_size,
                 'flags': 0,
                 'color': chosen_color,
-                'original_bbox': pdf_selection_rect,
+                'original_bbox': actual_text_bbox if matched_chars else pdf_selection_rect,
+                'origin': first_origin,
+                'chars': matched_chars,
                 'page_num': self.current_page_num
             }
+
+            # [HWP 장평/자간 정밀 자동 계산]
+            auto_stretch, auto_tracking = 1.0, 0.0
+            if hasattr(main_window, 'calculate_auto_stretch_and_tracking') and region_text:
+                try:
+                    auto_stretch, auto_tracking = main_window.calculate_auto_stretch_and_tracking(span_info, chosen_font_name=chosen_font)
+                except Exception as e_st:
+                    print(f"패치모드 자동 장평/자간 계산 실패: {e_st}")
+            span_info['stretch'] = auto_stretch
+            span_info['tracking'] = auto_tracking
 
             patch_only_mode = getattr(main_window, 'patch_only_mode', False) or getattr(self, 'selection_is_eraser', False)
 
@@ -5507,11 +5831,14 @@ class PdfViewerWidget(QLabel):
                     'bold': False,
                     'italic': False,
                     'underline': False,
-                    'stretch': 1.0,
-                    'tracking': 0.0,
+                    'stretch': auto_stretch,
+                    'tracking': auto_tracking,
                     'synth_bold_weight': 120,
                     'hwp_space_mode': getattr(main_window, 'is_hwp_doc', False),
-                    'patch_margin_l': 0.0, 'patch_margin_r': 0.0, 'patch_margin_t': 0.0, 'patch_margin_b': 0.0
+                    'patch_margin_l': 0.0, 'patch_margin_r': 0.0, 'patch_margin_t': 0.0, 'patch_margin_b': 0.0,
+                    'original_bbox': span_info.get('original_bbox'),
+                    'origin': first_origin,
+                    'page_num': self.current_page_num
                 }
                 
                 # 미리 오버레이 생성 (UI에 즉시 반영)
@@ -8134,7 +8461,11 @@ class MainWindow(QMainWindow):
                     font_detail = font_extractor.font_details[pdf_font]
                     details = f" [Type: {font_detail['type']}, Encoding: {font_detail['encoding']}]"
 
-                print(f"  PDF: {pdf_font} -> System: {system_font} (confidence: {confidence:.2f}){details}")
+                resolved = font_info.get('resolved_name')
+                if resolved and resolved != pdf_font:
+                    print(f"  PDF: {pdf_font} ({resolved}) -> System: {system_font} (confidence: {confidence:.2f}){details}")
+                else:
+                    print(f"  PDF: {pdf_font} -> System: {system_font} (confidence: {confidence:.2f}){details}")
 
             # 매칭되지 않은 폰트 표시
             unmatched = [f for f in font_extractor.used_fonts if not any(mf['pdf_font'] == f for mf in self.pdf_fonts)]
@@ -8989,7 +9320,9 @@ class MainWindow(QMainWindow):
             precision_multiplier = 200.0
             
             hwp_std_space = font_size * 0.50
-            for ch in line:
+            num_chars = len(line)
+            line_end_x = curr_x
+            for idx, ch in enumerate(line):
                 ch_w_raw = fm_measure.horizontalAdvance(ch) / precision_multiplier
                 if ch == ' ' and is_hwp:
                     ch_w_eff = max(ch_w_raw, hwp_std_space)
@@ -9019,8 +9352,12 @@ class MainWindow(QMainWindow):
                         page.insert_text(target_p, ch, fontname=font_ref, 
                                        morph=(target_p, s_mat), **font_args)
                 
-                curr_x += advance * t_ratio
-            ov._last_flatten_width = (curr_x - text_x)
+                if idx < num_chars - 1:
+                    curr_x += advance * t_ratio
+                else:
+                    line_end_x = curr_x + advance
+                    curr_x += advance
+            ov._last_flatten_width = (line_end_x - text_x)
 
     def _flatten_single_overlay(self, page, ov, mode='all'):
         """개별 오버레이를 특정 모드(본문/스타일/전체)로 PDF에 반영
@@ -9617,7 +9954,7 @@ class MainWindow(QMainWindow):
         """
         try:
             chars = span.get('chars', [])
-            sz = float(span.get('size', 12.0))
+            sz = normalize_font_size(span.get('size', 12.0))
             if sz <= 0:
                 return 1.0, 0.0
 
@@ -9637,44 +9974,93 @@ class MainWindow(QMainWindow):
             is_vert = span.get('is_vertical', False) or (active_chars and any(abs(c.get('dir', (1.0, 0.0))[1]) > abs(c.get('dir', (1.0, 0.0))[0]) for c in active_chars))
             hangul_chars = [c for c in active_chars if '가' <= c.get('c', '') <= '힣']
             
+            # HCR 계열 폰트(함초롬돋움, 함초롬바탕 등)는 한글 글리프 기본 너비가 0.970 em(970/1000)으로 설계됨
+            font_str = ((span.get('font') or '') + ' ' + (span.get('pdf_font_name') or '')).lower()
+            is_hcr = any(k in font_str for k in ['hcr', '함초롬'])
+            hangul_em_base = 0.970 if is_hcr else 1.000
+            
             calc_stretch = None
-            if hangul_chars:
-                stretches = []
-                for c in hangul_chars:
-                    b = c.get('bbox', [0, 0, 0, 0])
-                    gw = (b[3] - b[1]) if is_vert else (b[2] - b[0])
-                    r = gw / sz
-                    # 유효한 한글 장평 범위 (50% ~ 200%)
-                    if 0.50 <= r <= 2.00:
-                        stretches.append(r)
-                if stretches:
-                    avg_s = sum(stretches) / len(stretches)
-                    # 100% 근방(±1.5%)은 표준 100%로 정규화
-                    if abs(avg_s - 1.0) < 0.015:
-                        calc_stretch = 1.0
-                    else:
-                        calc_stretch = round(avg_s, 2)
+            if hangul_chars and sz > 0:
+                w_avg = sum((c['bbox'][3] - c['bbox'][1]) if is_vert else (c['bbox'][2] - c['bbox'][0]) for c in hangul_chars) / len(hangul_chars)
+                rho = (w_avg / hangul_em_base) / sz
+                # 만약 sz가 아직 정규화되지 않은 부동소수점 왜곡 크기인 경우 true_sz 역산
+                if abs(rho - 1.0) >= 0.008 and abs(sz - round(sz)) > 0.08:
+                    true_sz_raw = (sz ** 2) / (w_avg / hangul_em_base)
+                    true_sz = normalize_font_size(true_sz_raw)
+                    sz = true_sz
+                    span['size'] = true_sz
+                
+                # HWP 글리프 기준 스케일 (9.9546 / 10.0 = 0.9955) 반영
+                is_hwp = bool(getattr(self, 'is_hwp_doc', False) or span.get('hwp_space_mode', False) or is_hcr or any(k in font_str for k in ['batang', 'dotum', 'gulim']))
+                hwp_base_scale = 0.9955 if is_hwp else 1.000
+                r = w_avg / (sz * hangul_em_base * hwp_base_scale)
+                
+                is_standard_em = any(k in font_str for k in ['batang', 'dotum', 'gulim', 'gungsuh', 'malgun', 'nanum', 'myungjo', 'gothic', '바탕', '돋움', '굴림', '궁서', '맑은', '나눔', '명조', '고딕'])
+                if abs(r - 1.0) < 0.015:
+                    calc_stretch = 1.0
+                elif not is_hcr and not is_standard_em and 0.965 <= r <= 0.974:
+                    calc_stretch = 1.0
+                    hangul_em_base = 0.970
+                else:
+                    calc_stretch = round(r, 2)
                         
             calc_tracking = None
+            is_distributed = False
             if active_chars:
                 trackings = []
+                hangul_trackings = []
                 eff_stretch = calc_stretch if calc_stretch is not None else 1.0
+                
+                # 인접 글자 간격 분석
+                all_gaps = []
                 for idx in range(len(active_chars) - 1):
                     c1 = active_chars[idx]
                     c2 = active_chars[idx + 1]
                     ch1 = c1.get('c', '')
                     ch2 = c2.get('c', '')
-                    # 공백이나 제어문자가 아닌 인접 글자 간격 분석
                     if ch1.strip() and ch2.strip() and c1.get('origin') and c2.get('origin'):
-                        adv = abs(c2['origin'][1] - c1['origin'][1]) if is_vert else (c2['origin'][0] - c1['origin'][0])
-                        ref_w = (sz * eff_stretch) if ('가' <= ch1 <= '힣') else ((c1['bbox'][3] - c1['bbox'][1]) if is_vert else (c1['bbox'][2] - c1['bbox'][0]))
-                        if ref_w > 0:
-                            t = ((adv / ref_w) - 1.0) * 100.0
-                            if -30.0 <= t <= 50.0:
-                                trackings.append(t)
-                if trackings:
-                    avg_t = sum(trackings) / len(trackings)
-                    if abs(avg_t) < 0.4:
+                        if is_vert:
+                            adv = abs(c2['origin'][1] - c1['origin'][1])
+                            gap = abs(c2['bbox'][1] - c1['bbox'][3])
+                        else:
+                            adv = c2['origin'][0] - c1['origin'][0]
+                            gap = c2['bbox'][0] - c1['bbox'][2]
+                        all_gaps.append((adv, gap, ch1, ch2, c1))
+                
+                # [배분정렬(Distributed Alignment) 정밀 감지]:
+                # 모든 글자 간격(adv)이 일정하고 균일(표준편차 작음)하면서 gap이 일반 자간보다 유의미하게 넓은 경우
+                if len(all_gaps) >= 2:
+                    adv_vals = [g[0] for g in all_gaps]
+                    mean_adv = sum(adv_vals) / len(adv_vals)
+                    variance = sum((a - mean_adv) ** 2 for a in adv_vals) / len(adv_vals)
+                    std_dev = variance ** 0.5
+                    base_ref_w = sz * hangul_em_base * eff_stretch
+                    if std_dev <= max(1.5, mean_adv * 0.15) and mean_adv > base_ref_w * 1.05:
+                        is_distributed = True
+                elif len(all_gaps) == 1:
+                    adv = all_gaps[0][0]
+                    base_ref_w = sz * hangul_em_base * eff_stretch
+                    if adv > base_ref_w * 1.05:
+                        is_distributed = True
+                
+                for adv, gap, ch1, ch2, c1 in all_gaps:
+                    # 배분정렬이 아닌 일반 텍스트는 단어 분리 공백 제외
+                    if (not is_distributed) and (gap >= max(2.0, sz * 0.18)):
+                        continue
+                    ref_w = (sz * hangul_em_base * eff_stretch) if ('가' <= ch1 <= '힣') else ((c1['bbox'][3] - c1['bbox'][1]) if is_vert else (c1['bbox'][2] - c1['bbox'][0]))
+                    if ref_w > 0:
+                        t = ((adv / ref_w) - 1.0) * 100.0
+                        if -50.0 <= t <= 500.0:
+                            trackings.append(t)
+                            if ('가' <= ch1 <= '힣') and ('가' <= ch2 <= '힣'):
+                                hangul_trackings.append(t)
+                target_trackings = hangul_trackings if hangul_trackings else trackings
+                if target_trackings:
+                    avg_t = sum(target_trackings) / len(target_trackings)
+                    nearest_int = round(avg_t)
+                    if abs(avg_t - nearest_int) <= 0.35:
+                        calc_tracking = float(nearest_int)
+                    elif abs(avg_t) < 0.5:
                         calc_tracking = 0.0
                     else:
                         calc_tracking = round(avg_t, 1)
@@ -9710,66 +10096,100 @@ class MainWindow(QMainWindow):
                 
                 is_hwp = bool(getattr(self, 'is_hwp_doc', False) or span.get('hwp_space_mode', False))
                 hwp_space_px = sz * precision_multiplier * 0.50
-                nom_w = 0.0
+                
+                # 한글 폰트의 전각 비율(Em Ratio) 분석
+                has_hangul = any('가' <= c <= '힣' for c in eff_text)
+                if has_hangul and active_chars:
+                    hangul_bboxes = [c['bbox'][2] - c['bbox'][0] for c in active_chars if '가' <= c.get('c', '') <= '힣']
+                    orig_hangul_em = (sum(hangul_bboxes) / (len(hangul_bboxes) * sz)) if hangul_bboxes else 1.0
+                else:
+                    orig_hangul_em = 1.0
+
+                if has_hangul:
+                    system_hangul_em = fm.horizontalAdvance('가') / precision_multiplier / sz
+                else:
+                    system_hangul_em = 1.0
+
+                # 시스템 폰트와 원본 글자 자체의 형상(전각 너비) 차이 보정 (장평 Stretch)
+                if calc_stretch is not None:
+                    base_stretch = calc_stretch
+                elif has_hangul and system_hangul_em > 0 and 0.5 <= orig_hangul_em <= 2.0:
+                    is_standard_em = any(k in font_str for k in ['batang', 'dotum', 'gulim', 'gungsuh', 'malgun', 'nanum', 'myungjo', 'gothic', '바탕', '돋움', '굴림', '궁서', '맑은', '나눔', '명조', '고딕'])
+                    if is_hcr or (not is_standard_em and abs(orig_hangul_em - 0.970) < 0.008):
+                        norm_orig_em = orig_hangul_em / 0.970
+                        base_stretch = 1.0 if abs(norm_orig_em - 1.0) < 0.02 else round(norm_orig_em, 2)
+                    else:
+                        font_glyph_ratio = orig_hangul_em / system_hangul_em
+                        base_stretch = 1.0 if abs(font_glyph_ratio - 1.0) < 0.02 else round(font_glyph_ratio, 2)
+                else:
+                    base_stretch = 1.0
+
+                char_advances = []
                 for ch in eff_text:
                     cw = fm.horizontalAdvance(ch)
                     if ch == ' ' and is_hwp:
-                        nom_w += max(cw, hwp_space_px)
+                        cw_eff = max(cw, hwp_space_px)
                     else:
-                        nom_w += cw
-                nom_w /= precision_multiplier
+                        cw_eff = cw
+                    adv = (cw_eff / precision_multiplier) * base_stretch
+                    char_advances.append(adv)
                 
-                if nom_w > 0:
-                    # 한글 폰트의 전각 비율(Em Ratio) 분석
-                    has_hangul = any('가' <= c <= '힣' for c in eff_text)
-                    if has_hangul and active_chars:
-                        hangul_bboxes = [c['bbox'][2] - c['bbox'][0] for c in active_chars if '가' <= c.get('c', '') <= '힣']
-                        orig_hangul_em = (sum(hangul_bboxes) / (len(hangul_bboxes) * sz)) if hangul_bboxes else 1.0
-                    else:
-                        orig_hangul_em = 1.0
+                nom_w_stretched = sum(char_advances)
+                num_chars = len(char_advances)
+                inter_w = sum(char_advances[:-1]) if num_chars >= 2 else 0.0
+                
+                # 렌더링 시 actual_width = nom_w_stretched + inter_w * (tracking / 100.0)
+                # (마지막 글자 뒤에는 자간이 붙지 않으므로 자간은 inter_w 구간에만 작용)
+                if inter_w > 0:
+                    t_exact = ((eff_orig_w - nom_w_stretched) / inter_w) * 100.0
+                else:
+                    t_exact = 0.0
 
-                    if has_hangul:
-                        system_hangul_em = fm.horizontalAdvance('가') / precision_multiplier / sz
+                calc_stretch = base_stretch
+                if num_chars == 1:
+                    # 1글자는 자간이 적용되지 않으므로 장평으로 폭 일치
+                    calc_tracking = 0.0
+                    if nom_w_stretched > 0:
+                        calc_stretch = round(base_stretch * (eff_orig_w / nom_w_stretched), 2)
+                elif is_distributed:
+                    # [배분정렬(Distributed Alignment)]: 전체 가로폭에 맞추어 균등 분배된 정밀 자간으로 수렴
+                    calc_tracking = round(t_exact, 1)
+                else:
+                    # 일반 텍스트 및 '한 줄로 입력' 텍스트
+                    if calc_tracking is not None:
+                        est_w = inter_w * (1.0 + calc_tracking / 100.0) + char_advances[-1]
+                        err = abs(est_w - eff_orig_w)
+                        if err <= max(0.3, eff_orig_w * 0.008):
+                            pass
+                        else:
+                            if -50.0 <= t_exact <= 500.0:
+                                calc_tracking = round(t_exact, 1)
+                            elif t_exact < -50.0:
+                                calc_tracking = -50.0
+                                w_at_min = inter_w * 0.50 + char_advances[-1]
+                                if w_at_min > 0:
+                                    calc_stretch = round(base_stretch * (eff_orig_w / w_at_min), 2)
+                            else:
+                                calc_tracking = 500.0
                     else:
-                        system_hangul_em = 1.0
-
-                    # 시스템 폰트와 원본 글자 자체의 형상(전각 너비) 차이 보정 (장평 Stretch)
-                    if has_hangul and system_hangul_em > 0 and 0.5 <= orig_hangul_em <= 2.0:
-                        font_glyph_ratio = orig_hangul_em / system_hangul_em
-                        base_stretch = 1.0 if abs(font_glyph_ratio - 1.0) < 0.02 else round(font_glyph_ratio, 2)
-                    else:
-                        base_stretch = calc_stretch if calc_stretch is not None else 1.0
-
-                    nom_w_stretched = nom_w * base_stretch
-                    rem_ratio = eff_orig_w / nom_w_stretched if nom_w_stretched > 0 else 1.0
+                        if -50.0 <= t_exact <= 500.0:
+                            calc_tracking = round(t_exact, 1)
+                        elif t_exact < -50.0:
+                            calc_tracking = -50.0
+                            w_at_min = inter_w * 0.50 + char_advances[-1]
+                            if w_at_min > 0:
+                                calc_stretch = round(base_stretch * (eff_orig_w / w_at_min), 2)
+                        else:
+                            calc_tracking = 500.0
                     
-                    cur_s = base_stretch
-                    cur_t = calc_tracking if calc_tracking is not None else 0.0
-                    est_w = nom_w * cur_s * (1.0 + cur_t / 100.0)
-                    
-                    # 1단계 결과와 실제 원본 폭의 오차가 2% 이상 발생하면 전체 폭 비율 기반으로 재보정
-                    needs_width_adjustment = (calc_stretch is None or calc_tracking is None or abs(eff_orig_w - est_w) > eff_orig_w * 0.02)
-                    
-                    if needs_width_adjustment:
-                        calc_stretch = base_stretch
-                        if 0.985 <= rem_ratio <= 1.015:
-                            calc_tracking = 0.0
-                        elif 0.70 <= rem_ratio < 0.985:
-                            calc_tracking = round((rem_ratio - 1.0) * 100.0, 1)
-                        elif 1.015 < rem_ratio <= 1.50:
-                            calc_tracking = round((rem_ratio - 1.0) * 100.0, 1)
-                        elif rem_ratio > 1.50:
-                            calc_tracking = 50.0
-                            calc_stretch = round(base_stretch * (rem_ratio / 1.50), 2)
-                        else: # rem_ratio < 0.70
-                            calc_tracking = -30.0
-                            calc_stretch = round(base_stretch * (rem_ratio / 0.70), 2)
+                    if calc_tracking is not None and abs(calc_tracking) < 0.3:
+                        calc_tracking = 0.0
 
             final_stretch = calc_stretch if calc_stretch is not None else 1.0
             final_tracking = calc_tracking if calc_tracking is not None else 0.0
-            # 안전 범위 제한
+            # 안전 범위 제한 (-50% ~ +500%)
             final_stretch = max(0.5, min(2.0, final_stretch))
-            final_tracking = max(-50.0, min(50.0, final_tracking))
+            final_tracking = max(-50.0, min(500.0, final_tracking))
             print(f"[AutoLayout] 자동 계산 결과: stretch={final_stretch*100:.1f}%, tracking={final_tracking:+.1f}% ('{eff_text[:20]}')")
             return final_stretch, final_tracking
         except Exception as e:
@@ -10012,13 +10432,17 @@ class MainWindow(QMainWindow):
                 hwp_std_space = float(font_size) * precision_multiplier * 0.50
                 for line in lines_list:
                     lw = 0
-                    for ch in line:
+                    num_chars = len(line)
+                    for idx, ch in enumerate(line):
                         cw = fm.horizontalAdvance(ch)
                         if ch == ' ' and is_hwp_mode:
                             cw_eff = max(cw, hwp_std_space)
                         else:
                             cw_eff = cw
-                        lw += cw_eff * t_ratio
+                        if idx < num_chars - 1:
+                            lw += cw_eff * t_ratio
+                        else:
+                            lw += cw_eff
                     calc_max_w = max(calc_max_w, lw)
                 
                 # 결과값을 다시 200(precision_multiplier)으로 나누어 원래 스케일로 복원
@@ -10375,7 +10799,7 @@ class MainWindow(QMainWindow):
                 initial_values = {
                     'text': span.get('text', ''),
                     'font': span.get('font', 'Arial'),
-                    'size': float(span.get('size', 12.0)),
+                    'size': normalize_font_size(span.get('size', 12.0)),
                     'color': qcolor,
                     'bold': bool(span.get('flags', 0) & 16),
                     'italic': bool(span.get('flags', 0) & 2),
